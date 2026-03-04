@@ -678,7 +678,6 @@ let unmerge_name_map = {
   nmap_rules = unmerge_rules;
   nmap_constr = unmerge_constr;
   nmap_delta = unmerge_delta;
-  nmap_retro = unmerge_retro;
 }
 
 let unmerge_structure struc =
@@ -688,6 +687,11 @@ let unmerging () = enabled () && not (KerName.Map.is_empty !merged)
 
 let unmerge_exported struc =
   if not (unmerging ()) then struc else unmerge_structure struc
+
+(* Since rocq#21716 a module body carries no retroknowledge: the library's
+   registrations are written beside its structure, and undone the same way. *)
+let unmerge_retroknowledge retro =
+  if not (unmerging ()) then retro else List.Smart.map unmerge_retro retro
 
 (* ------------------------------------------------------------------ *)
 (* The load-time step.                                                 *)

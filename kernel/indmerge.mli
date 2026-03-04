@@ -256,3 +256,8 @@ val unmerge_delta : Mod_subst.delta_resolver -> Mod_subst.delta_resolver
     A resolver entry that points at a name this run merged into cannot be
     undone -- which copy an alias names is not recoverable from it -- so this
     refuses to write the library rather than guess. *)
+
+val unmerge_retroknowledge :
+  Retroknowledge.action list -> Retroknowledge.action list
+(** The same, for the retroknowledge a library exports beside its
+    structure: only a [Register ... as kernel.ind_*] names an inductive. *)

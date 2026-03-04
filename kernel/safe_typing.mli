@@ -259,6 +259,7 @@ val deps_of_library : compiled_library -> (DirPath.t * vodigest) array
 (** Used by the checker, which refuses a library whose dependencies have a
     name that is not made of identifiers. *)
 val univs_of_library : compiled_library -> Sorts.QContextSet.t * Univ.ContextSet.t
+val retroknowledge_of_library : compiled_library -> Retroknowledge.action list
 val check_flags_for_library : compiled_library -> safe_transformer0
 
 val start_library : DirPath.t -> ModPath.t safe_transformer
