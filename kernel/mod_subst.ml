@@ -59,7 +59,6 @@ module Deltamap = struct
 
   let find_mp mp reso = ModPath.Map.find mp reso.mmap
   let find_kn kn reso = KerName.Map.find kn reso.kmap
-  let mem_mp mp reso = ModPath.Map.mem mp reso.mmap
   let fold_kn f reso i = KerName.Map.fold f reso.kmap i
   let fold fmp fkn reso accu =
     ModPath.Map.fold fmp reso.mmap (KerName.Map.fold fkn reso.kmap accu)
@@ -260,11 +259,6 @@ let map_mbid mbid mp resolve = Flat (map_mbid_flat mbid mp resolve)
 
 let map_mp mp1 mp2 resolve = Flat (map_mp_flat mp1 mp2 resolve)
 
-let mp_in_delta mp = Deltamap.mem_mp mp
-
-let mp_of_delta resolve mp =
- try Deltamap.find_mp mp resolve with Not_found -> mp
-
 let find_prefix resolve mp =
   let rec sub_mp = function
     | MPdot(mp,l) as mp_sup ->
@@ -273,6 +267,11 @@ let find_prefix resolve mp =
     | p -> Deltamap.find_mp p resolve
   in
   try sub_mp mp with Not_found -> mp
+
+(* TODO: remove the indirection at some point *)
+let mp_of_delta = find_prefix
+
+let mp_is_alias resolve mp = not (ModPath.equal mp (find_prefix resolve mp))
 
 (** Applying a resolver to a kernel name *)
 
