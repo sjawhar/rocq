@@ -71,6 +71,14 @@ val strengthen_module : ModPath.t -> module_body -> module_body
 
 val strengthen_and_subst_module_body : ModPath.t -> module_body -> ModPath.t -> bool -> module_body
 
+(** [include_applied_structure mp_from struc reso mp] includes into [mp] the
+    result of a functor application elaborated at the functor's path [mp_from].
+    Nothing is strengthened, there being no module at [mp_from], and no
+    equivalence is recorded for [mp] itself. *)
+val include_applied_structure :
+  ModPath.t -> structure_body -> delta_resolver ->
+  ModPath.t -> structure_body * delta_resolver
+
 val subst_modtype_signature_and_resolver : ModPath.t -> ModPath.t ->
   module_signature -> delta_resolver -> module_signature * delta_resolver
 
