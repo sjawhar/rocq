@@ -394,7 +394,7 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
     cst
 
 
-let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 subst2 =
+let check_constant ?(cache=true) (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 subst2 =
   let error why = error_signature_mismatch trace l why in
   let check_conv why cst poly pb = check_conv_error error why (cst, ustate) poly pb in
   let check_type poly cst env t1 t2 =
@@ -412,9 +412,11 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
       let scb1 = Declareops.subst_const_body subst1 cb1_0 in
       let scb2 = Declareops.subst_const_body subst2 cb2_0 in
       (* The outcome only depends on the pair of bodies when both
-         substitutions leave them physically unchanged, see [CbPairCache]. *)
+         substitutions leave them physically unchanged, see [CbPairCache].
+         With [~cache:false] the cache is neither read nor filled. *)
       let context_free = scb1 == cb1_0 && scb2 == cb2_0 in
-      if context_free && cache_mem l cb1_0 cb2_0 then cst
+      let use_cache = cache && context_free in
+      if use_cache && cache_mem l cb1_0 cb2_0 then cst
       else begin
       let cb1 = match strengthen1 with
         | Some reso -> Modops.strengthen_const mp1 l scb1 reso
@@ -453,10 +455,61 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
       (* Only cache checks that produced no new universe constraints: they
          are then pure and stay valid in any later state of this process. *)
       let () =
-        if context_free && cst' == cst then cache_add l cb1_0 cb2_0
+        if use_cache && cst' == cst then cache_add l cb1_0 cb2_0
       in
       cst'
       end
+
+let check_constant_alias env cst cb =
+  let user = Constant.user cst in
+  let canonical = Constant.canonical cst in
+  if KerName.equal user canonical then ()
+  else
+    let target = Constant.make1 canonical in
+    let target_body = Environ.lookup_constant target env in
+    let target_body =
+      match target_body.const_body, cb.const_body with
+      | (Undef _ | OpaqueDef _), Def _ ->
+        let instance =
+          make_abstract_instance (constant_polymorphic_context target_body)
+        in
+        { target_body with const_body = Def (mkConstU (target, instance)) }
+      | _ -> target_body
+    in
+    let state = Environ.universes env, Conversion.checked_universes in
+    (* The cache of [check_constant] is not used here. Its verdicts assume
+       that canonical names are trustworthy, which is what this check
+       establishes, and an environment that only grows, which rocqchk does
+       not have: it checks a module's type and then its implementation
+       under the same names. A verdict recorded in one of these
+       environments would skip this check in the other. *)
+    let _ =
+      check_constant ~cache:false state [] env (KerName.modpath canonical)
+        (KerName.label user) None (Constant target_body) cb
+        empty_subst empty_subst
+    in
+    ()
+
+let check_inductive_alias env mind mib =
+  let user = MutInd.user mind in
+  let canonical = MutInd.canonical mind in
+  if KerName.equal user canonical then ()
+  else
+    let target = MutInd.make1 canonical in
+    let target_body = Environ.lookup_mind target env in
+    let target_mp, target_label = KerName.repr canonical in
+    let user_mp = KerName.modpath user in
+    let target_resolver = empty_delta_resolver target_mp in
+    let user_resolver =
+      add_kn_delta_resolver user canonical (empty_delta_resolver user_mp)
+    in
+    let state = Environ.universes env, Conversion.checked_universes in
+    let _ =
+      check_inductive state [] env target_mp target_label
+        (IndType ((target, 0), target_body)) user_mp mib empty_subst empty_subst
+        target_resolver user_resolver
+    in
+    ()
 
 let rec check_modules state trace env mp1 msb1 mp2 msb2 subst1 subst2 =
   let mty1 = module_type_of_module msb1 in
