@@ -378,8 +378,8 @@ and strengthen_and_subst_struct struc subst mp_from mp_to alias incl reso =
     at [mp_from], the functor's path. *)
 let include_applied_structure mp_from struc reso mp =
   let subst =
-    let subst_resolver = map_mp mp_from mp (empty_delta_resolver mp) in
-    map_mp mp_from mp (subst_dom_delta_resolver subst_resolver reso)
+    let subst = map_mp mp_from mp (empty_delta_resolver mp) in
+    map_mp mp_from mp (subst_dom_codom_delta_resolver subst reso)
   in
   let reso', struc' =
     strengthen_and_subst_struct struc subst mp_from mp true (AliasIncl false) reso
