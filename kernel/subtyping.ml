@@ -238,6 +238,11 @@ let check_universes error env u1 u2 =
   | Monomorphic, Polymorphic _ -> error (PolymorphicStatusExpected true)
   | Polymorphic _, Monomorphic -> error (PolymorphicStatusExpected false)
 
+let check_template error _env t1 t2 = match t1, t2 with
+| None, None | Some _, Some _ -> ()
+| None, Some _ -> error (TemplateStatusExpected true)
+| Some _, None -> error (TemplateStatusExpected false)
+
 let check_variance error v1 v2 =
   match v1, v2 with
   | None, None -> ()
@@ -248,9 +253,15 @@ let check_variance error v1 v2 =
   | None, Some _ -> error (CumulativeStatusExpected true)
   | Some _, None -> error (CumulativeStatusExpected false)
 
-let check_recursivity r1 r2 = match r1, r2 with
-| Finite, Finite | BiFinite, BiFinite | CoFinite, CoFinite -> true
-| (Finite | BiFinite | CoFinite), _ -> false
+let check_private error p1 p2 =
+  if Option.equal Bool.equal p1 p2 then ()
+  else error (PrivateStatusExpected p2)
+
+let check_primitive error p1 p2 = match p1, p2 with
+| (NotRecord | FakeRecord), (NotRecord | FakeRecord) -> ()
+| PrimRecord _, PrimRecord _ -> ()
+| PrimRecord _, (NotRecord | FakeRecord) -> error (RecordFieldExpected false)
+| (NotRecord | FakeRecord), PrimRecord _ -> error (RecordFieldExpected true)
 
 let squash_info_equal s1 s2 = match s1, s2 with
   | AlwaysSquashed, AlwaysSquashed -> true
@@ -287,7 +298,9 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
       ctx1 ctx2 (env, cst)
   in
 
+  let () = check_private error mib1.mind_private mib2.mind_private in
   let env = check_universes error env mib1.mind_universes mib2.mind_universes in
+  let () = check_template error env mib1.mind_template mib2.mind_template in
   let () = check_variance error mib1.mind_variance mib2.mind_variance in
   let inst = make_abstract_instance (Declareops.inductive_polymorphic_context mib1) in
   let mib2 =  Declareops.subst_mind_body subst2 mib2 in
@@ -324,8 +337,7 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
       let ty2 = type_of_inductive ((mib2, p2), inst) in
       let cst = check_inductive_type ~is_ctor:false cst p2.mind_typename ty1 ty2 in
       (* we check that records and their field names are preserved. *)
-      (** FIXME: this check looks nonsense *)
-      check (fun p -> p.mind_record <> NotRecord) (==) (fun x -> RecordFieldExpected x);
+      let () = check_primitive error p1.mind_record p2.mind_record in
       if p1.mind_record <> NotRecord then begin
         let rec names_prod_letin t = match kind t with
           | Prod(n,_,t) -> n.binder_name::(names_prod_letin t)
@@ -358,7 +370,7 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
       (arities_of_constructors ((mind,i), inst) (mib2, p2))
   in
   let check f test why = if not (test (f mib1) (f mib2)) then error (why (f mib2)) in
-  check (fun mib -> mib.mind_finite) check_recursivity (fun x -> FiniteInductiveFieldExpected x);
+  check (fun mib -> mib.mind_finite<>CoFinite) (==) (fun x -> FiniteInductiveFieldExpected x);
   if not (Int.equal (Declareops.mind_ntypes mib1) (Declareops.mind_ntypes mib2)) then
     error (InductiveNumbersFieldExpected { got = Declareops.mind_ntypes mib1; expected = Declareops.mind_ntypes mib2 });
   assert (List.is_empty mib1.mind_hyps && List.is_empty mib2.mind_hyps);
@@ -377,6 +389,11 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
         env cst ctx1 ctx2
     in
     cst
+  in
+
+  let () =
+    if not (mib1.mind_nparams_rec >= mib2.mind_nparams_rec) then
+      error (InductiveUniformParams { got = mib1.mind_nparams_rec; expected = mib2.mind_nparams_rec })
   in
 
   let () =
