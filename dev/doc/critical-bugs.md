@@ -326,20 +326,6 @@ and lack of checking of relevance marks on constants in coqchk
   which means those letins cannot be irrelevant for conversion.
   Differences in reduction may mean the bug is harder to exploit before V8.19, see issue.
 
-#### incorrect reification in lazy machine of matches with universe polymorphism
-- component: "lazy" reduction
-- introduced: V8.17
-- impacted released versions: V8.17 to V9.2.0
-- impacted rocqchk versions: same
-- fixed in: V9.2.1, V9.3
-- found by: OpenAI
-- issue: #22380
-- risk: reification of the lazy machine is only trusted
-  when it is used to check an application or match/proj
-  (typically in `f x`, the inferred type of `f` is reduced to expose a `forall`).
-  The bug occurs when the reduced type has a stuck match on a universe polymorphic inductive.
-  The exploit in the issue uses Definitional UIP but the code is incorrect even without that flag.
-
 ### Module system
 
 #### missing universe constraints in typing "with" clause of a module type
@@ -463,15 +449,15 @@ and lack of checking of relevance marks on constants in coqchk
 - risk: need to use module subtyping to confuse inductives with different letins,
   and use those letins in a match.
 
-### Including functor application generates garbage delta-resolvers
+#### Subtyping of inductive types ignores uniform parameters making it inconsistent with propext
 
-- component: module inclusion and functors
-- introduced: unclear, only exploitable since #21905
-- impacted released versions: V9.3+rc1
-- fixed in: 9.2.1, 9.3.0
+- component: module subtyping and nested inductive types
+- introduced: the underlying bug has always been there but only exploitable since 9.2 (#21632)
+- impacted released versions: until V9.3.1
+- fixed in: 9.3.1
 - found by: Pierre-Marie Pédrot flanked by Claude Opus 5
-- issue: #22409
-- risk: any development relying on inclusion of functor applications
+- issue: #22510
+- risk: not a full proof of False, but dangerous when using propext
 
 ### Universes
 
