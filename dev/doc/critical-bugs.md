@@ -449,6 +449,16 @@ and lack of checking of relevance marks on constants in coqchk
 - risk: need to use module subtyping to confuse inductives with different letins,
   and use those letins in a match.
 
+#### Subtyping of inductive types ignores uniform parameters making it inconsistent with propext
+
+- component: module subtyping and nested inductive types
+- introduced: the underlying bug has always been there but only exploitable since 9.2 (#21632)
+- impacted released versions: until V9.3.1
+- fixed in: 9.3.1
+- found by: Pierre-Marie Pédrot flanked by Claude Opus 5
+- issue: #22510
+- risk: not a full proof of False, but dangerous when using propext
+
 ### Universes
 
 #### issue with two parameters in the same universe level
