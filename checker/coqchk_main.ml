@@ -231,7 +231,7 @@ let add_compile s =
     between coqtop and coqc. *)
 
 let compile_files senv =
-  CheckLibrary.recheck_library senv
+  CheckLibrary.recheck_library ~output_context:!Check_stat.output_context senv
     ~norec:(List.rev !norec_list)
     ~admit:(List.rev !admit_list)
     ~check:(List.rev !compile_list)
