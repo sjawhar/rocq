@@ -22,3 +22,6 @@ val compile_module_bytecode : Environ.env -> Vmlibrary.t -> Names.ModPath.t ->
 val check_module : Environ.env -> opaques -> Retroknowledge.action list -> Names.ModPath.t -> Mod_declarations.module_body -> opaques
 
 exception BadConstant of Names.Constant.t * Pp.t
+
+(** Record assumptions hidden by module signatures without type checking. *)
+val collect_module_opaques : Environ.env -> Names.Cset.t Names.Cmap.t -> Names.ModPath.t -> Mod_declarations.module_body -> Names.Cset.t Names.Cmap.t

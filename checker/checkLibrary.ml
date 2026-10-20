@@ -298,7 +298,7 @@ let raise_first_table_error () =
       then ignore (read_opaque_table dp src))
     (List.rev !hashed_tables)
 
-let check_one_lib admit senv (dir,m) =
+let check_one_lib ~output_context admit senv (dir,m) =
   let md = m.library_compiled in
   let dig = m.library_digest in
   (* Stock parses the table of opaque proofs of every library it interns,
@@ -316,8 +316,16 @@ let check_one_lib admit senv (dir,m) =
       (Flags.if_verbose Feedback.msg_notice
          (str "Admitting library: " ++ pr_dirpath dir);
        Check_stat.record_admitted (DirPath.to_string dir);
-       Safe_checking.unsafe_import (fst senv) md dig),
-      (snd senv)
+       let imported = Safe_checking.unsafe_import (fst senv) md dig in
+       let opac =
+         if not output_context then snd senv
+         else
+           let env = Safe_typing.env_of_safe_env
+             (Safe_typing.check_flags_for_library md (fst senv)) in
+           Mod_checking.collect_module_opaques env (snd senv)
+             (ModPath.MPfile dir) (Safe_typing.module_of_library md)
+       in
+       imported, opac)
     else
       (Flags.if_verbose Feedback.msg_notice
          (str "Checking library: " ++ pr_dirpath dir);
@@ -724,7 +732,7 @@ and fold_deps_list seen ff modl needed =
 let fold_deps_list ff modl acc =
   snd (fold_deps_list LibrarySet.empty ff modl (LibrarySet.empty,acc))
 
-let recheck_library_in_order senv ~norec ~admit ~check =
+let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
   let ml = List.map try_locate_qualified_library check in
   let nrl = List.map try_locate_qualified_library norec in
   let al =  List.map try_locate_qualified_library admit in
@@ -769,13 +777,13 @@ let recheck_library_in_order senv ~norec ~admit ~check =
   let () = CheckWorkers.validate_tables
       (List.rev_map (fun (dp, src) -> dp, (fun () -> ignore (read_opaque_table dp src)))
          !hashed_tables) in
-  let senv = List.fold_left (check_one_lib nochk) (senv, Cmap.empty) needed in
+  let senv = List.fold_left (check_one_lib ~output_context nochk) (senv, Cmap.empty) needed in
   CheckWorkers.finish ();
   Flags.if_verbose Feedback.msg_notice (str"Modules were successfully checked");
   senv
 
-let recheck_library senv ~norec ~admit ~check =
-  try recheck_library_in_order senv ~norec ~admit ~check
+let recheck_library ?(output_context=false) senv ~norec ~admit ~check =
+  try recheck_library_in_order ~output_context senv ~norec ~admit ~check
   with e ->
     let e = Exninfo.capture e in
     CheckWorkers.abort ();
