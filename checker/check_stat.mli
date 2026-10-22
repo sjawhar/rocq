@@ -16,4 +16,4 @@ val record_inductive :
   indices_matter:bool -> Names.MutInd.t -> Declarations.mutual_inductive_body -> unit
 val record_admitted : string -> unit
 
-val stats : Environ.env -> Names.Cset.t Names.Cmap.t -> unit
+val stats : Environ.env -> Names.KerName.t list option -> unit

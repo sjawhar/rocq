@@ -8,6 +8,8 @@
 (*         *     (see LICENSE file for the text of the license)         *)
 (************************************************************************)
 
+type axioms
+
 val set_indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) -> unit
 
 val compile_module_bytecode : Environ.env -> Vmlibrary.t -> Names.ModPath.t ->
@@ -17,9 +19,12 @@ val compile_module_bytecode : Environ.env -> Vmlibrary.t -> Names.ModPath.t ->
     body, discarding whatever code the [.vo] file claims, and add it to the given
     table. *)
 
-val check_module : Environ.env -> Names.Cset.t Names.Cmap.t -> Names.ModPath.t -> Mod_declarations.module_body -> Names.Cset.t Names.Cmap.t
+val check_module : Environ.env -> axioms -> Names.ModPath.t -> Mod_declarations.module_body -> axioms
 
 exception BadConstant of Names.Constant.t * Pp.t
 
+val constants_of_axioms : axioms -> Names.KerName.t list
+val empty_axioms : axioms
+
 (** Record assumptions hidden by module signatures without type checking. *)
-val collect_module_opaques : Environ.env -> Names.Cset.t Names.Cmap.t -> Names.ModPath.t -> Mod_declarations.module_body -> Names.Cset.t Names.Cmap.t
+val collect_module_axioms : Environ.env -> axioms -> Names.ModPath.t -> Mod_declarations.module_body -> axioms
