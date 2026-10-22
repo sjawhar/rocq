@@ -173,9 +173,8 @@ let running : worker list ref = ref []
    [table_bytes] count what this process read and parsed itself.
    [main_cooks] counts the opaque bodies that the main process cooked
    itself, wherever in the code that happened ([note_cook], called from
-   the cook): with [-j] they are the bodies of sealed modules, whose
-   cooked form the main process needs, and those of checks it ran itself
-   because it could not fork. *)
+   the cook): with [-j] they are those of checks it ran itself because it
+   could not fork. *)
 let forks = ref 0
 let early_stops = ref 0
 let releases = ref 0

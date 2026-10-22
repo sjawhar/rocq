@@ -7,11 +7,10 @@
 # main process", is taken in the cook itself, so it says where the cook
 # ran, not which branch of the code called it: a change that moved the
 # cook of an ordinary body back into the main process would make it
-# nonzero here. A constant of a sealed module whose signature declares it
-# without a body is the exception: the main process records what its body
-# uses (Mod_checking.register_opacified_constant), so it cooks that body
-# itself, and still defers its check. At -j 1 the check runs at once, as
-# before.
+# nonzero here. The -o summary lists the axioms declared in the checked
+# implementations without reading any body, so a constant of a sealed
+# module whose signature declares it without a body is no exception. At
+# -j 1 the check runs at once, as before.
 #
 #  (a) Cook.v: sections with variables and a let, polymorphic lemmas with
 #      private universes, a polymorphic section, a functor, its
@@ -21,9 +20,9 @@
 #  (b) CookB.v: opaque bodies that point into Cook.vo's table, through a
 #      functor of Cook applied here and through Include: the same;
 #  (c) Sealed.v: a module sealed by a signature that declares Parameters,
-#      which the module proves with Qed. Those bodies are cooked in the main
-#      process (2), and the -o summary lists the axiom that the proof of one
-#      of them uses, and not the Parameters themselves, at every -j;
+#      which the module proves with Qed. The main process cooks none of
+#      those bodies either, and the -o summary lists the axiom the library
+#      declares, and not the Parameters themselves, at every -j;
 #  (d) SecFail: an ill-typed opaque proof inside a section (the opaques
 #      segment of another build of the file): coqchk fails at every -j with
 #      the type error of -j 1, which -j N wraps in "while checking the
@@ -125,8 +124,9 @@ Module Type S.
   Axiom r : forall n, q n = q n.
 End S.
 
-(* p and r are declared without a body and proved with Qed: their bodies
-   take the eager path. q is a transparent definition. extra is not in S. *)
+(* p and r are declared without a body and proved with Qed: their checks
+   are deferred like any other. q is a transparent definition. extra is
+   not in S. *)
 Module M : S.
   Lemma p : True. Proof. exact ax_used. Qed.
   Definition q (n : nat) := n.
@@ -280,17 +280,14 @@ for lib in Cook CookB Sealed; do
     expect "($lib) -j $j exit code with -d" "$R" -eq 0
     expect "($lib) -j $j checks run" "$(done_field "$lib-d$j" run)" -eq "$(done_field "$lib-d$j" deferred)"
     expect "($lib) -j $j checks deferred" "$(done_field "$lib-d$j" deferred)" -gt 0
-    if [ "$lib" = Sealed ]; then
-      expect "($lib) -j $j bodies cooked in the main process" "$(done_field "$lib-d$j" cooked)" -eq 2
-    else
-      expect "($lib) -j $j bodies cooked in the main process" "$(done_field "$lib-d$j" cooked)" -eq 0
-    fi
+    expect "($lib) -j $j bodies cooked in the main process" "$(done_field "$lib-d$j" cooked)" -eq 0
   done
 done
 
-# (c) The summary: the Parameter p is implemented by a body that uses
-# ax_used, so the axiom listed is ax_used, and neither M.p nor M.r is. The
-# axioms part of the summary runs from "* Axioms:" to the next "* " line.
+# (c) The summary: the library declares one axiom, ax_used, and M proves
+# the Parameters p and r of its signature, so the axiom listed is ax_used,
+# and neither M.p nor M.r is. The axioms part of the summary runs from
+# "* Axioms:" to the next "* " line.
 awk '/^\* Axioms:/ { f = 1; next } /^\* / { f = 0 } f' "$d/Sealed-j1.out" > "$d/axioms"
 [ "$(tr -d ' ' < "$d/axioms" | grep -v '^$')" = "Sealed.ax_used" ] \
   || { cat "$d/Sealed-j1.out" >&2; fail "(c) the axioms listed are not exactly Sealed.ax_used"; }

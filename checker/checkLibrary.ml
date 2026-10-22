@@ -98,9 +98,8 @@ let register_loaded_library m =
    with that one, then reads the table as stock does. So the opaque
    proofs, 846 MB of the whole r160 tree against 252 MB of library
    content, stay out of the main process's heap, and no fork copies them,
-   except a table that the main process reads itself: for a sealed
-   module's constant it cooks ([Mod_checking]), or for a batch it checks
-   because it could not fork ([CheckWorkers.spawn]). Where no worker can
+   except a table that the main process reads itself, for a batch it
+   checks because it could not fork ([CheckWorkers.spawn]). Where no worker can
    ([-j 1]), the table is parsed when the library is interned, where
    stock parses it, and nothing is hashed: see [intern_opaques].
 
@@ -317,15 +316,15 @@ let check_one_lib ~output_context admit senv (dir,m) =
          (str "Admitting library: " ++ pr_dirpath dir);
        Check_stat.record_admitted (DirPath.to_string dir);
        let imported = Safe_checking.unsafe_import (fst senv) md dig in
-       let opac =
+       let axioms =
          if not output_context then snd senv
          else
            let env = Safe_typing.env_of_safe_env
              (Safe_typing.check_flags_for_library md (fst senv)) in
-           Mod_checking.collect_module_opaques env (snd senv)
+           Mod_checking.collect_module_axioms env (snd senv)
              (ModPath.MPfile dir) (Safe_typing.module_of_library md)
        in
-       imported, opac)
+       imported, axioms)
     else
       (Flags.if_verbose Feedback.msg_notice
          (str "Checking library: " ++ pr_dirpath dir);
@@ -777,7 +776,7 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
   let () = CheckWorkers.validate_tables
       (List.rev_map (fun (dp, src) -> dp, (fun () -> ignore (read_opaque_table dp src)))
          !hashed_tables) in
-  let senv = List.fold_left (check_one_lib ~output_context nochk) (senv, Cmap.empty) needed in
+  let senv = List.fold_left (check_one_lib ~output_context nochk) (senv, Mod_checking.empty_axioms) needed in
   CheckWorkers.finish ();
   Flags.if_verbose Feedback.msg_notice (str"Modules were successfully checked");
   senv
