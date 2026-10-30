@@ -28,7 +28,6 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [guard checker does not account for cross calls to compute uniform arguments of a nested mutual fixpoint](#guard-checker-does-not-account-for-cross-calls-to-compute-uniform-arguments-of-a-nested-mutual-fixpoint)
       - [guard checker does not check for correct recursive calls when passed as uniform argument in a nested fixpoint](#guard-checker-does-not-check-for-correct-recursive-calls-when-passed-as-uniform-argument-in-a-nested-fixpoint)
       - [guard checker does not count argument-less recursive calls to compute uniform arguments of a nested mutual fixpoint](#guard-checker-does-not-count-argument-less-recursive-calls-to-compute-uniform-arguments-of-a-nested-mutual-fixpoint)
-      - [incorrect variance inference for a constructor applied in a letin of a constructor type](#incorrect-variance-inference-for-a-constructor-applied-in-a-letin-of-a-constructor-type)
     - [Module system](#module-system)
       - [missing universe constraints in typing "with" clause of a module type](#missing-universe-constraints-in-typing-with-clause-of-a-module-type)
       - [universe constraints for module subtyping not stored in vo files](#universe-constraints-for-module-subtyping-not-stored-in-vo-files)
@@ -77,7 +76,6 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [tactic code could mutate a global cache of values for section variables](#tactic-code-could-mutate-a-global-cache-of-values-for-section-variables)
       - [incorrect handling of universe polymorphism](#incorrect-handling-of-universe-polymorphism)
       - [Forgotten universe substitution with Register Inline on universe polymorphic definition](#forgotten-universe-substitution-with-register-inline-on-universe-polymorphic-definition)
-      - [kernel reduction drops the lift on a primitive array](#kernel-reduction-drops-the-lift-on-a-primitive-array)
     - [Side-effects](#side-effects)
       - [polymorphic side-effects inside monomorphic definitions incorrectly handled as not inlined](#polymorphic-side-effects-inside-monomorphic-definitions-incorrectly-handled-as-not-inlined)
       - [Section variables used in side effects not checked by Proof using](#section-variables-used-in-side-effects-not-checked-by-proof-using)
@@ -315,33 +313,6 @@ and lack of checking of relevance marks on constants in coqchk
 - exploit / GH issue: [#21701](https://github.com/rocq-prover/rocq/issues/21701)
 - risk: unknown (no development in CI was affected)
 
-#### incorrect variance inference with letin in constructor type
-- component: inductive declarations, universe polymorphism
-- introduced: V8.6 (cumulative inductives)
-- impacted released versions: V8.6 to V9.2.0
-- impacted rocqchk versions: same
-- fixed in: V9.2.1, V9.3
-- found by: OpenAI
-- issue: #22385
-- risk: the bug comes from being able to bind a constructor type letin in a match,
-  which means those letins cannot be irrelevant for conversion.
-  Differences in reduction may mean the bug is harder to exploit before V8.19, see issue.
-
-#### incorrect variance inference for a constructor applied in a letin of a constructor type
-- component: inductive declarations, universe polymorphism
-- introduced: V9.3.0 ([#22385](https://github.com/rocq-prover/rocq/pull/22385))
-- impacted released versions: V9.3.0
-- impacted coqchk versions: Same
-- fixed in: V9.2.1, V9.3.1, V9.4 ([#22681](https://github.com/rocq-prover/rocq/pull/22681))
-- found by: Sami Jawhar
-- exploit: test-suite/bugs/bug_22675.v
-- GH issue number: [#22675](https://github.com/rocq-prover/rocq/issues/22675)
-- risk: needs a cumulative inductive one of whose constructors has a letin whose
-  body contains a fully applied constructor of another cumulative inductive
-  which has a letin of its own. V9.2.0 accepts the issue's file through
-  [#22383](https://github.com/rocq-prover/rocq/issues/22383): it does not infer
-  letin bodies at all.
-
 ### Module system
 
 #### missing universe constraints in typing "with" clause of a module type
@@ -464,16 +435,6 @@ and lack of checking of relevance marks on constants in coqchk
 - issue: #22387
 - risk: need to use module subtyping to confuse inductives with different letins,
   and use those letins in a match.
-
-#### Subtyping of inductive types ignores uniform parameters making it inconsistent with propext
-
-- component: module subtyping and nested inductive types
-- introduced: the underlying bug has always been there but only exploitable since 9.2 (#21632)
-- impacted released versions: until V9.3.1
-- fixed in: 9.3.1
-- found by: Pierre-Marie Pédrot flanked by Claude Opus 5
-- issue: #22510
-- risk: not a full proof of False, but dangerous when using propext
 
 ### Universes
 
@@ -617,17 +578,6 @@ fix.
 - risk: needs a sort polymorphic inductive declared in a section with
   a section polymorphic sort and sort polymorphism in the inductive command (cf bug file)
 
-#### variance inference ignores stack of stuck irrelevant to relevant matches
-- component: inductive declarations, universe polymorphism
-- introduced: 8.13
-- impacted released versions: V8.13 to V9.2.0
-- impacted rocqchk versions: same
-- fixed in: V9.2.1, V9.3 ([#22377](https://github.com/rocq-prover/rocq/pull/22377))
-- found by: OpenAI
-- issue: [#22376](https://github.com/rocq-prover/rocq/issues/22376)
-- risk: needs a cumulative inductive in which a match on an empty SProp
-  inductive or inductive using Definitional UIP appears
-
 #### Missing universe substitution in primitive array instance in lazy
 
 - component: lazy, primitive arrays
@@ -651,29 +601,6 @@ fix.
 - risk: low (needs to use universe substitution in letin from the
   inductive indices to incorrectly convert match return clauses and
   somehow derive inconsistency from there)
-
-#### missing universe substitution when converting matches with letin in constructor type
-- component: conversion
-- introduced: V8.17
-- impacted released versions: V8.17 to V9.2.0
-- impacted rocqchk versions: same
-- fixed in: V9.2.1, V9.3 ([#22393](https://github.com/rocq-prover/rocq/pull/22393))
-- found by: OpenAI
-- issue: [#22391](https://github.com/rocq-prover/rocq/issues/22391)
-- risk: needs to convert stuck matches of a universe polymorphic inductive
-  with a letin in the constructor type. The bug only appears if a polymorphic
-  universe is used in the letin's body, and the match uses the letin.
-
-#### Universe checking state gets confused when locally changed in module
-
-- component: environ
-- introduced: V8.14
-- impacted released versions: V8.14 to V9.3.0
-- impacted rocqchk versions: none
-- fixed in: V9.3.1, V9.4
-- found by: Gaëtan Gilbert
-- issue: [rocq-prover/rocq#22287](https://github.com/rocq-prover/rocq/issues/22287)
-- risk: needs an explicit Unset Universe Checking
 
 ### Primitive projections
 
@@ -965,20 +892,6 @@ For instance `α` and `__U03b1_` were the same in the native compiler.
 - additional note: does not seem to be exploitable before 8.8 (until 8.6 Register
   Inline fails with anomaly on universe polymorphic constants, and before
   8.8 Register Inline only affects native which fails in ocamlopt)
-
-#### kernel reduction drops the lift on a primitive array
-
-- component: lazy reduction, primitive arrays
-- introduced: V8.13 (introduction of primitive arrays)
-- impacted released versions: V8.13 to V9.3.0
-- impacted coqchk versions: same
-- fixed in: V9.2.1, V9.3.1, V9.4
-- found by: Jan-Oliver Kaiser
-- exploit: test-suite/bugs/bug_22772.v
-- GH issue number: rocq-prover/rocq#22772
-- risk: when reducing a primitive array under binders, the lift on the
-  array was eagerly dropped, producing wrong normal forms and letting the
-  kernel accept ill-typed terms
 
 ### Side-effects
 
