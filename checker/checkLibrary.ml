@@ -49,9 +49,7 @@ let pr_path sp =
 
 type compilation_unit_name = DirPath.t
 
-(* The boolean beside each proof records that coqc did not type it. The
-   checker types every proof regardless, so it never reads the boolean. *)
-type seg_proofs = (Opaqueproof.opaque_proofterm * bool) option array
+type seg_proofs = Opaqueproof.opaque_proofterm option array
 
 type library_t = {
   library_name : compilation_unit_name;
@@ -77,8 +75,14 @@ let libraries_table = ref LibraryMap.empty
 
 (* various requests to the tables *)
 
+(* While the libraries are read, the libraries loaded before the run began,
+   as stock sees them: when the walk runs while the libraries are still
+   being read, the libraries it has loaded must not change how the others
+   are found. *)
+let intern_context = ref None
+
 let find_library dir =
-  LibraryMap.find dir !libraries_table
+  LibraryMap.find dir (match !intern_context with Some t -> t | None -> !libraries_table)
 
 let library_full_filename dir = (find_library dir).library_filename
 
@@ -98,8 +102,9 @@ let register_loaded_library m =
    with that one, then reads the table as stock does. So the opaque
    proofs, 846 MB of the whole r160 tree against 252 MB of library
    content, stay out of the main process's heap, and no fork copies them,
-   except a table that the main process reads itself, for a batch it
-   checks because it could not fork ([CheckWorkers.spawn]). Where no worker can
+   except a table that the main process reads itself: for a sealed
+   module's constant it cooks ([Mod_checking]), or for a batch it checks
+   because it could not fork ([CheckWorkers.spawn]). Where no worker can
    ([-j 1]), the table is parsed when the library is interned, where
    stock parses it, and nothing is hashed: see [intern_opaques].
 
@@ -242,35 +247,15 @@ let access_opaque_table dp i =
   let () = assert (0 <= i && i < Array.length t) in
   t.(i)
 
-(* A test-only cross-check, off by default: with ROCQCHK_COOK_CROSS_CHECK
-   set to a non-empty value, every opaque body is also cooked by the stock
-   [Discharge.cook_opaque_proofterm] (no memo: it keeps unchanged subterms
-   shared but rebuilds every changed one at each occurrence), and an anomaly
-   is raised unless the two terms are [Constr.equal]. The test suite sets it
-   (test-suite/Makefile), so that every coqchk run there checks that
-   [Cooking.expand_constr_shared] still agrees with [Cooking.expand_constr]. *)
-let cook_cross_check_on =
-  match Sys.getenv_opt "ROCQCHK_COOK_CROSS_CHECK" with
-  | None | Some "" -> false
-  | Some _ -> true
-
-let cook_cross_check ci stored cooked =
-  if cook_cross_check_on then
-    let (tree, _) = Discharge.cook_opaque_proofterm ci stored in
-    if not (Constr.equal cooked tree) then
-      CErrors.anomaly
-        Pp.(str "cook cross-check: the shared cook differs from the stock cook.")
-
 let indirect_accessor o =
   let (sub, ci, dp, i) = Opaqueproof.repr o in
   let c = access_opaque_table dp i in
   let c = match c with
   | None ->  CErrors.user_err Pp.(str "Cannot access opaque delayed proof.")
-  | Some (c, _unchecked) -> c
+  | Some c -> c
   in
-  let (cooked, prv) = Discharge.cook_opaque_proofterm_shared ci c in
-  let () = cook_cross_check ci c cooked in
-  let c = Mod_subst.subst_mps_list sub cooked in
+  let (c, prv) = Discharge.cook_opaque_proofterm ci c in
+  let c = Mod_subst.subst_mps_list sub c in
   (c, prv)
 
 let () = Mod_checking.set_indirect_accessor indirect_accessor
@@ -297,7 +282,7 @@ let raise_first_table_error () =
       then ignore (read_opaque_table dp src))
     (List.rev !hashed_tables)
 
-let check_one_lib ~output_context admit senv (dir,m) =
+let check_one_lib admit senv (dir,m) =
   let md = m.library_compiled in
   let dig = m.library_digest in
   (* Stock parses the table of opaque proofs of every library it interns,
@@ -314,15 +299,8 @@ let check_one_lib ~output_context admit senv (dir,m) =
     if LibrarySet.mem dir admit then
       (Flags.if_verbose Feedback.msg_notice
          (str "Admitting library: " ++ pr_dirpath dir);
-       Check_stat.record_admitted (DirPath.to_string dir);
-       let imported = Safe_checking.unsafe_import (fst senv) md dig in
-       let axioms =
-         if not output_context then snd senv
-         else
-           Mod_checking.collect_module_axioms (snd senv)
-             (ModPath.MPfile dir) (Safe_typing.module_of_library md)
-       in
-       imported, axioms)
+       Safe_checking.unsafe_import (fst senv) md dig),
+      (snd senv)
     else
       (Flags.if_verbose Feedback.msg_notice
          (str "Checking library: " ++ pr_dirpath dir);
@@ -562,72 +540,6 @@ let summary_seg : summary_disk ObjFile.id = ObjFile.make_id "summary"
 let library_seg : library_disk ObjFile.id = ObjFile.make_id "library"
 let opaques_seg : seg_proofs ObjFile.id = ObjFile.make_id "opaques"
 
-(* Place 1 of the name check (checkNames.mli): every name of the library that
-   the checker can print, in every intern mode, since [Dep] mode does not
-   validate the file, and before any of them is printed: all the libraries are
-   read before the first is checked. The compiled library's name is the one
-   the kernel imports it under, which coqc writes as the file's name. A
-   mutual inductive block has one label, but a type name for each of its
-   types. *)
-let check_names ~dir ~file sd md =
-  let refuse what name why =
-    CErrors.user_err
-      (str "Library " ++ pr_dirpath dir ++
-       str (" (file " ^ file ^ ") has the " ^ what ^ " " ^ CheckNames.quote name ^
-            ", which is not " ^ why ^ "."))
-  in
-  let check_id what id =
-    if not (CheckNames.valid_id id) then refuse what (Id.to_string id) "an identifier"
-  in
-  let check_dirpath what dp =
-    if not (CheckNames.valid_dirpath dp) then
-      refuse what (DirPath.to_string dp) "made of identifiers"
-  in
-  let compiled = md.md_compiled in
-  let comp_name = Safe_typing.dirpath_of_library compiled in
-  if not (DirPath.equal comp_name dir) then
-    CErrors.user_err
-      (str ("The file " ^ file ^ " contains compiled library " ^
-            CheckNames.quote (DirPath.to_string comp_name) ^ " and not library ") ++
-       pr_dirpath dir ++ str ".");
-  check_dirpath "library name" sd.md_name;
-  Array.iter (fun (dp, _) -> check_dirpath "dependency" dp) sd.md_deps;
-  Array.iter (fun (dp, _) -> check_dirpath "dependency" dp)
-    (Safe_typing.deps_of_library compiled);
-  let open Declarations in
-  let open Mod_declarations in
-  let check_mind mib =
-    Array.iter (fun mip ->
-        check_id "inductive type name" mip.mind_typename;
-        Array.iter (check_id "constructor name") mip.mind_consnames)
-      mib.mind_packets
-  in
-  let rec check_signature = function
-    | MoreFunctor (mbid, mtb, sign) ->
-      if not (CheckNames.valid_mbid mbid) then
-        refuse "functor parameter" (MBId.to_string mbid) "made of identifiers";
-      check_signature (mod_type mtb);
-      check_signature sign
-    | NoFunctor struc -> check_structure struc
-  and check_structure struc =
-    List.iter (fun (label, field) ->
-        check_id "label" label;
-        match field with
-        | SFBconst _ | SFBrules _ -> ()
-        | SFBmind mib -> check_mind mib
-        | SFBmodule mb -> check_module mb
-        | SFBmodtype mtb -> check_signature (mod_type mtb))
-      struc
-  and check_module mb =
-    check_signature (mod_type mb);
-    (* A module sealed by a signature has an implementation of its own, whose
-       objects the checker announces too (mod_checking.ml). *)
-    match mod_expr mb with
-    | Struct (_, struc) -> check_structure struc
-    | Algebraic _ | Abstract | FullStruct -> ()
-  in
-  check_module (Safe_typing.module_of_library compiled)
-
 (* [validated] is the set of libraries which must be validated when read even
    if they are interned as a dependency, namely those named on the command
    line and not admitted. *)
@@ -667,7 +579,6 @@ let intern_from_file ~intern_mode ~validated (dir, f) =
       (* Verification of the final checksum *)
       let () = close_in ch in
       let () = System.check_caml_version ~caml:sd.md_ocaml ~file:f in
-      let () = check_names ~dir ~file:f sd md in
       if dir <> sd.md_name then
         CErrors.user_err
           (name_clash_message dir sd.md_name f);
@@ -690,14 +601,18 @@ let intern_from_file ~intern_mode ~validated dirf : library_t =
     ()
 
 (* Read a compiled library and all dependencies, in reverse order.
-   Do not include files that are already in the context. *)
-let rec intern_library ~intern_mode ~validated seen (dir, f) needed =
+   Do not include files that are already in the context. [listed] holds the
+   names in [needed], so that a library is looked up there in constant
+   time. [on_done] is called on each library as soon as its dependencies
+   are all read, which is the order of the final list reversed: the order
+   in which the libraries are checked. *)
+let rec intern_library ~intern_mode ~validated ~on_done seen (dir, f) ((_, listed) as acc) =
   if LibrarySet.mem dir seen then failwith "Recursive dependencies!";
   (* Look if in the current logical environment *)
-  try let _ = find_library dir in needed
+  try let _ = find_library dir in acc
   with Not_found ->
   (* Look if already listed and consequently its dependencies too *)
-  if List.mem_assoc_f DirPath.equal dir needed then needed
+  if LibrarySet.mem dir listed then acc
   else
     (* [dir] is an absolute name which matches [f] which must be in loadpath *)
     let m = intern_from_file ~intern_mode ~validated (dir,f) in
@@ -706,7 +621,11 @@ let rec intern_library ~intern_mode ~validated seen (dir, f) needed =
       Array.map (fun (d,_) -> try_locate_absolute_library d) m.library_deps
     in
     let intern_mode = match intern_mode with Rec -> Rec | Root | Dep -> Dep in
-    (dir,m) :: Array.fold_right (intern_library ~intern_mode ~validated seen') deps needed
+    let needed, listed =
+      Array.fold_right (intern_library ~intern_mode ~validated ~on_done seen') deps acc
+    in
+    on_done (dir, m);
+    (dir, m) :: needed, LibrarySet.add dir listed
 
 (* Compute the reflexive transitive dependency closure *)
 let rec fold_deps seen ff (dir,f) (s,acc) =
@@ -729,7 +648,37 @@ and fold_deps_list seen ff modl needed =
 let fold_deps_list ff modl acc =
   snd (fold_deps_list LibrarySet.empty ff modl (LibrarySet.empty,acc))
 
-let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
+(* Whether every table of opaque proofs that the opaque bodies of [m]
+   point into is known, so that whichever process checks them can read it.
+   Each body names its table's library, which is normally [m] itself or one
+   of its dependencies, but nothing requires it. *)
+let opaque_sources_ready m =
+  let open Declarations in
+  let rec in_struct acc s =
+    List.fold_left (fun acc (_, field) -> match field with
+        | SFBconst cb ->
+          (match cb.const_body with
+           | OpaqueDef o -> let (_, _, dp, _) = Opaqueproof.repr o in LibrarySet.add dp acc
+           | _ -> acc)
+        | SFBmind _ | SFBrules _ -> acc
+        | SFBmodule mb -> in_module acc mb
+        | SFBmodtype mtb -> in_signature acc (Mod_declarations.mod_type mtb))
+      acc s
+  and in_signature acc = function
+    | NoFunctor s -> in_struct acc s
+    | MoreFunctor (_, mtb, f) ->
+      in_signature (in_signature acc (Mod_declarations.mod_type mtb)) f
+  and in_module acc mb =
+    let acc = in_signature acc (Mod_declarations.mod_type mb) in
+    match Mod_declarations.mod_expr mb with
+    | Mod_declarations.Struct (_, s) -> in_struct acc s
+    | Mod_declarations.(Abstract | Algebraic _ | FullStruct) -> acc
+  in
+  let libs = in_module LibrarySet.empty (Safe_typing.module_of_library m.library_compiled) in
+  LibrarySet.for_all (fun dp ->
+      LibraryMap.mem dp !opaque_sources || LibraryMap.mem dp !opaque_cache) libs
+
+let recheck_library_in_order senv ~norec ~admit ~check =
   let ml = List.map try_locate_qualified_library check in
   let nrl = List.map try_locate_qualified_library norec in
   let al =  List.map try_locate_qualified_library admit in
@@ -742,45 +691,134 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
     fold LibrarySet.remove al
       (fold LibrarySet.add nrl (fold LibrarySet.add ml LibrarySet.empty))
   in
-  let needed = List.fold_right (intern_library ~intern_mode:Rec ~validated LibrarySet.empty) ml [] in
-  let needed = List.fold_right (intern_library ~intern_mode:Root ~validated LibrarySet.empty) nrl needed in
-  (* Intern the admit list too, in Dep mode so it is loaded but not validated
-     ([validated] already excludes [al]). Without this an admitted library that
-     is a dependency of no checked or norec library is never interned, so it is
-     absent from [depgraph] and the [fold_deps_list ... al] below raises the
-     anomaly "missing dep when computing closure". This matches -admit's
-     documented "load module and dependencies without checking", and it is the
-     shape a -statement-report run produces: the model library is admitted but
-     referenced by constant name, not Require'd by the checked statement library. *)
-  let needed = List.fold_right (intern_library ~intern_mode:Dep ~validated LibrarySet.empty) al needed in
-  let needed = List.rev needed in
-  (* first compute the closure of norec, remove closure of check,
-     add closure of admit, and finally remove norec and check *)
-  let nochk = fold_deps_list LibrarySet.add nrl LibrarySet.empty in
-  let nochk = fold_deps_list LibrarySet.remove ml nochk in
-  let nochk = fold_deps_list LibrarySet.add al nochk in
-  (* explicitly required modules cannot be skipped... *)
-  let nochk =
-    List.fold_right LibrarySet.remove (List.map fst (nrl@ml)) nochk in
+  (* With workers, when every library to check is named with -norec, the
+     walk does not wait for the intern to end: each library is checked as
+     soon as its dependencies are all read, which is when the intern
+     reaches its place in the walk's order, so the workers start at once
+     instead of after the last library is read. Such a library is admitted
+     exactly when it is not named with -norec, which is known then; with
+     -check or -admit, which library is admitted depends on the closures of
+     libraries not read yet, so the intern ends first, as in stock.
+
+     What stock does is kept: it reads every library before it checks
+     any, so it prints every line of the intern, then the ordered list,
+     then the walk, and it fails on a library it cannot read before any
+     check fails. Here, what the walk prints is held until the ordered
+     list is printed; a check that fails stops the walk, but the intern
+     goes on to the end, and if the intern fails, its error is raised
+     and nothing the walk printed is shown. A library whose opaque proofs
+     point into a table not read yet, which nothing but the end of the
+     intern guarantees, is checked after it, with every library after it,
+     in the same order. The tables are read by the worker of
+     [validate_tables], forked when the intern ends; until then no
+     per-library table task is queued ([CheckWorkers.expect_validator]),
+     so the queue holds the same checks as in stock's order. *)
+  (* Only when a worker's output can be kept in files: a worker without
+     them prints at once, which would put its lines among the intern's. And
+     not with -d checker-workers, whose lines the main process prints when
+     it starts each worker, the validator before any library's check. *)
+  let streaming =
+    CheckWorkers.parallel () && CList.is_empty ml && CList.is_empty al
+    && not (CheckWorkers.debugging ())
+    && CheckWorkers.capture_available ()
+  in
+  let norec_set = List.fold_left (fun s (dir, _) -> LibrarySet.add dir s) LibrarySet.empty nrl in
+  let walked = ref (senv, Cmap.empty) in
+  let walk_error = ref None in
+  (* The libraries left to check once the intern has ended, newest first:
+     every library from the first one whose opaque proofs point into a
+     table not read yet, which only the end of the intern makes certain to
+     be there, as it is in stock. *)
+  let pending = ref [] in
+  let check_early ((dir, m) as lib) =
+    if Option.has_some !walk_error then ()
+    else if not (CList.is_empty !pending) then pending := lib :: !pending
+    else begin
+      let admitted = not (LibrarySet.mem dir norec_set) in
+      if not admitted && not (opaque_sources_ready m) then pending := [lib]
+      else begin
+        let admit = if admitted then LibrarySet.singleton dir else LibrarySet.empty in
+        CheckWorkers.hold_on ();
+        match check_one_lib admit !walked lib with
+        | senv -> CheckWorkers.hold_off (); walked := senv
+        | exception e ->
+          let e = Exninfo.capture e in
+          CheckWorkers.hold_off ();
+          match fst e with
+          | Sys.Break -> CheckWorkers.release_held (); Exninfo.iraise e
+          | _ -> walk_error := Some e
+      end
+    end
+  in
+  let on_done = if streaming then check_early else ignore in
+  if streaming then begin
+    CheckWorkers.start_holding ();
+    CheckWorkers.expect_validator ()
+  end;
+  intern_context := Some !libraries_table;
+  let needed, nochk =
+    Fun.protect ~finally:(fun () -> intern_context := None) @@ fun () ->
+    try
+      let acc =
+        List.fold_right (intern_library ~intern_mode:Rec ~validated ~on_done LibrarySet.empty)
+          ml ([], LibrarySet.empty)
+      in
+      let needed, _ =
+        List.fold_right (intern_library ~intern_mode:Root ~validated ~on_done LibrarySet.empty)
+          nrl acc
+      in
+      let needed = List.rev needed in
+      (* first compute the closure of norec, remove closure of check,
+         add closure of admit, and finally remove norec and check *)
+      let nochk = fold_deps_list LibrarySet.add nrl LibrarySet.empty in
+      let nochk = fold_deps_list LibrarySet.remove ml nochk in
+      let nochk = fold_deps_list LibrarySet.add al nochk in
+      (* explicitly required modules cannot be skipped... *)
+      let nochk =
+        List.fold_right LibrarySet.remove (List.map fst (nrl@ml)) nochk in
+      if streaming then
+        List.iter (fun (dir, _) ->
+            if LibrarySet.mem dir nochk = LibrarySet.mem dir norec_set then
+              CErrors.anomaly
+                (str "Library " ++ pr_dirpath dir ++
+                 str " was admitted differently while the intern ran."))
+          needed;
+      needed, nochk
+    with e when streaming ->
+      let e = Exninfo.capture e in
+      CheckWorkers.drop_held ();
+      CheckWorkers.drop_held_output ();
+      Exninfo.iraise e
+  in
   (* *)
   Flags.if_verbose Feedback.msg_notice (fnl()++hv 2 (str "Ordered list:" ++ fnl() ++
     prlist
     (fun (dir,_) -> pr_dirpath dir ++ fnl()) needed));
   (* Every library is interned by now, so every table stock would have
-     parsed is recorded: read them all early, in stock's order, so that a
-     malformed one stops the run near where it stops stock. The reader
-     keeps no table, so the worker holds at most one table beyond the heap
-     it was forked with. *)
-  let () = CheckWorkers.validate_tables
+     parsed is recorded: read them all, in stock's order, so that a
+     malformed one stops the run near where it stops stock. The reader keeps
+     no table, so the worker holds at most one table beyond the heap it was
+     forked with. *)
+  let validate_tables () = CheckWorkers.validate_tables
       (List.rev_map (fun (dp, src) -> dp, (fun () -> ignore (read_opaque_table dp src)))
          !hashed_tables) in
-  let senv = List.fold_left (check_one_lib ~output_context nochk) (senv, Mod_checking.empty_axioms) needed in
+  let senv =
+    if streaming then begin
+      CheckWorkers.release_held ();
+      Option.iter Exninfo.iraise !walk_error;
+      validate_tables ();
+      List.fold_left (check_one_lib nochk) !walked (List.rev !pending)
+    end else begin
+      validate_tables ();
+      List.fold_left (check_one_lib nochk) (senv, Cmap.empty) needed
+    end
+  in
   CheckWorkers.finish ();
   Flags.if_verbose Feedback.msg_notice (str"Modules were successfully checked");
   senv
 
-let recheck_library ?(output_context=false) senv ~norec ~admit ~check =
-  try recheck_library_in_order ~output_context senv ~norec ~admit ~check
+let recheck_library senv ~norec ~admit ~check =
+  try recheck_library_in_order senv ~norec ~admit ~check
   with e ->
     let e = Exninfo.capture e in
     CheckWorkers.abort ();
@@ -796,104 +834,3 @@ let recheck_library ?(output_context=false) senv ~norec ~admit ~check =
     in
     CheckWorkers.print_held_output ();
     Exninfo.iraise e
-
-(************************************************************************)
-(*s The challenge side of [rocqchk -compare].
-
-    The challenge libraries carry the same names as the answer's, so they
-    cannot share this module's per-library tables: [libraries_table] would
-    make [intern_library] skip an answer library because a challenge library
-    of that name is already there, and the opaque tables, keyed by library
-    name as well, would let a challenge proof body stand in for an answer
-    one. So the challenge is loaded between [swap_tables] calls: the answer's
-    tables are set aside, the challenge is loaded with tables of its own, and
-    the answer's are put back. The challenge environment is a value and
-    survives the swap; its opaque bodies are not read, because the comparison
-    never looks into an opaque body. *)
-
-type tables = {
-  tb_libraries : library_t LibraryMap.t;
-  tb_opaque_sources : opaque_source LibraryMap.t;
-  tb_opaque_cache : seg_proofs LibraryMap.t;
-  tb_depgraph : (compilation_unit_name * Safe_typing.vodigest) array LibraryMap.t;
-  tb_hashed : (DirPath.t * opaque_source) list;
-  tb_load_paths : CUnix.physical_path list * logical_path list;
-}
-
-(* Empty library tables, with the load path as it is: the challenge load adds
-   its own directories in front of the answer's, so that a library name the
-   two sides share resolves to the challenge's copy, while a pre-checked
-   library, which is one file for both sides, still resolves. *)
-let fresh_tables () = {
-  tb_libraries = LibraryMap.empty;
-  tb_opaque_sources = LibraryMap.empty;
-  tb_opaque_cache = LibraryMap.empty;
-  tb_depgraph = LibraryMap.empty;
-  tb_hashed = [];
-  tb_load_paths = !load_paths;
-}
-
-let swap_tables t =
-  let old = {
-    tb_libraries = !libraries_table;
-    tb_opaque_sources = !opaque_sources;
-    tb_opaque_cache = !opaque_cache;
-    tb_depgraph = !depgraph;
-    tb_hashed = !hashed_tables;
-    tb_load_paths = !load_paths;
-  } in
-  libraries_table := t.tb_libraries;
-  opaque_sources := t.tb_opaque_sources;
-  opaque_cache := t.tb_opaque_cache;
-  depgraph := t.tb_depgraph;
-  hashed_tables := t.tb_hashed;
-  load_paths := t.tb_load_paths;
-  old
-
-type challenge_library = library_t
-
-(* The libraries the challenge files name, then the given shared libraries,
-   each with its dependencies, in dependency order, with the dependency
-   digests each of them records. Nothing is imported yet: the caller checks
-   those digests against the answer's before any of it reaches an
-   environment.
-
-   A shared library is one the answer loaded from outside the roots the
-   challenge stands in for -- the image's installed libraries. The challenge
-   files' own closure reaches only the ones their Require lines name, and the
-   answer may load more; a universe constraint one of those carries between
-   two levels the challenge does know would otherwise look like a constraint
-   the answer invented (dispatch://BET-901). They are interned into the same
-   tables, so a library both lists reach is read once.
-
-   The two results are the files' closure, which is what the comparison
-   walks, and every library to import, the files' closure first. *)
-let intern_challenge files shared =
-  let intern = intern_library ~intern_mode:Dep ~validated:LibrarySet.empty LibrarySet.empty in
-  let locs = List.map (fun f -> try_locate_qualified_library (PhysicalFile f)) files in
-  let needed = List.fold_right intern locs [] in
-  let all = List.fold_right intern (List.map try_locate_absolute_library shared) needed in
-  List.rev needed, List.rev all
-
-let challenge_deps needed =
-  List.map (fun (dir, m) -> dir, m.library_deps) needed
-
-(* Import the interned libraries without a check: setup checked the challenge
-   files, and a dependency of theirs is either another challenge file or a
-   pre-checked library. *)
-let import_challenge senv needed =
-  List.fold_left
-    (fun senv (_, m) ->
-       Safe_checking.unsafe_import senv m.library_compiled m.library_digest)
-    senv needed
-
-let library_file dir = snd (try_locate_absolute_library dir)
-
-(* The dependency digests every library interned so far records. *)
-let interned_deps () = LibraryMap.bindings !depgraph
-
-(* The file each loaded library was read from, as the loader recorded it. *)
-let interned_files () =
-  List.map (fun (dir, m) -> dir, m.library_filename) (LibraryMap.bindings !libraries_table)
-
-let challenge_files needed = List.map (fun (dir, m) -> dir, m.library_filename) needed
