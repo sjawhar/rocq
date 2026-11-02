@@ -535,7 +535,7 @@ let rec to_constr lfts v =
     | FCaseT (ci, u, pms, p, c, ve, env) ->
       to_constr_case lfts ci u pms p NoInvert c ve env
     | FCaseInvert (ci, u, pms, p, indices, c, ve, env) ->
-      let iv = CaseInvert {indices=Array.Fun1.map to_constr lfts indices} in
+      let iv = CaseInvert {indices} in
       to_constr_case lfts ci u pms p iv c ve env
     | FFix ((op,(lna,tys,bds)) as fx, e) ->
       if is_subs_id (fst e) && is_lift_id lfts then
@@ -631,7 +631,7 @@ and to_constr_case lfts ci u pms (p,r) iv c ve env =
     mkCase (ci, usubst_instance subs u,
             Array.Smart.map (subst_instance_constr (snd env)) pms,
             (f_ctx p,r),
-            map_invert (subst_instance_constr (snd env)) iv,
+            to_constr_invert lfts iv,
             to_constr lfts c,
             Array.Smart.map f_ctx ve)
   else
@@ -644,9 +644,13 @@ and to_constr_case lfts ci u pms (p,r) iv c ve env =
             usubst_instance subs u,
             Array.map (fun c -> subst_constr subs c) pms,
             (f_ctx p,r),
-            map_invert (subst_constr subs) iv,
+            to_constr_invert lfts iv,
             to_constr lfts c,
             Array.map f_ctx ve)
+
+and to_constr_invert lfts = function
+  | NoInvert -> NoInvert
+  | CaseInvert {indices} -> CaseInvert {indices=Array.Fun1.map to_constr lfts indices}
 
 and comp_subs el (s,u') =
   Esubst.lift_subst (fun el c -> lazy (Vars.make_substituend @@ to_constr el c)) el s, u'
