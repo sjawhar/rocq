@@ -1,0 +1,44 @@
+name: label-v4 merge dump and fixtures
+on: [push]
+permissions:
+  contents: read
+jobs:
+  dump:
+    strategy:
+      matrix:
+        ocaml: ["ocaml-variants.4.14.2+options,ocaml-option-flambda", "5"]
+      fail-fast: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - run: sudo apt-get update
+      - uses: actions/checkout@v4
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+          dune-cache: true
+      - run: opam install --deps-only ./coqide-server.opam ./rocq*.opam
+      - run: opam exec -- make world
+      - name: Dump the representation
+        run: |
+          git log -1 --format='tested commit %H'
+          T=$(find _build -name library_label.exe | head -1)
+          echo "tool $T"
+          echo "BEGIN-VO-REPRESENTATION"
+          "$T" --vo-representation | base64 -w 0
+          echo
+          echo "END-VO-REPRESENTATION"
+          "$T" --vo-representation | sha256sum
+      - name: Run the fixtures
+        run: |
+          set +e
+          T="misc/library-label-reproducible.log misc/vo-format.log misc/vo-format-rule.log misc/print-assumptions-memo-opaque-table.log misc/print-assumptions-shared.log misc/library-label-plugin.log misc/library-label-keepfacts.log"
+          opam exec -- make -k -C test-suite TIMED=1 $T
+          for t in $T; do echo "=================== test-suite/$t"; cat "test-suite/$t" || echo "MISSING LOG $t"; done
+          bad=0
+          for t in $T; do
+            if [ ! -f "test-suite/$t" ]; then echo "RESULT NOLOG $t"; bad=1
+            elif grep -q 'Error!\|FAIL' "test-suite/$t"; then echo "RESULT FAILED $t"; bad=1
+            else echo "RESULT PASSED $t"; fi
+          done
+          [ "$bad" = 0 ]
