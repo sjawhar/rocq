@@ -1,0 +1,53 @@
+name: label-v4.1 fixtures and Corelib labels
+on: [push]
+permissions:
+  contents: read
+jobs:
+  run:
+    strategy:
+      matrix:
+        case: [baseline, z-zcheck-unlogged]
+      fail-fast: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - run: sudo apt-get update
+      - uses: actions/checkout@v4
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ocaml-variants.4.14.2+options,ocaml-option-flambda
+          dune-cache: true
+      - run: opam install --deps-only ./coqide-server.opam ./rocq*.opam
+      - name: Apply the mutation; build the theories with -location-free-label
+        run: |
+          git log -1 --format='tested commit %H'
+          if [ "${{ matrix.case }}" != baseline ] && [ -f ".github/t2fork-mutations/${{ matrix.case }}.patch" ]; then
+            git apply --verbose ".github/t2fork-mutations/${{ matrix.case }}.patch"
+          fi
+          sed -i 's/(rocq (flags :standard -w +default))/(rocq (flags :standard -w +default -location-free-label))/' dune
+          grep -n 'location-free-label' dune
+          git diff --stat
+      - run: opam exec -- make world
+      - name: Labels of the theories
+        run: |
+          T=$(find _build -name library_label.exe | head -1)
+          cd _build/default
+          find theories user-contrib -name '*.vo' 2>/dev/null | sort | while read f; do printf '%s %s\n' "$f" "$("$OLDPWD/$T" --check "$f")"; done > /tmp/labels.txt
+          wc -l /tmp/labels.txt
+          awk '{print $2}' /tmp/labels.txt | sort | uniq -c
+          echo "BEGIN-LABELS"; base64 -w 0 /tmp/labels.txt; echo; echo "END-LABELS"
+          sha256sum /tmp/labels.txt
+      - name: Run the fixtures
+        run: |
+          set +e
+          T="misc/library-label-zcheck.log misc/library-label-reproducible.log"
+          for t in $T; do [ -f "test-suite/${t%.log}.sh" ] || T=${T/$t/}; done
+          opam exec -- make -k -C test-suite TIMED=1 $T
+          bad=0
+          for t in $T; do
+            echo "=================== test-suite/$t"; cat "test-suite/$t" || echo "MISSING LOG $t"
+            if [ ! -f "test-suite/$t" ]; then echo "RESULT NOLOG $t"; bad=1
+            elif grep -q 'Error!\|FAIL' "test-suite/$t"; then echo "RESULT FAILED $t"; bad=1
+            else echo "RESULT PASSED $t"; fi
+          done
+          [ "$bad" = 0 ]
