@@ -1,0 +1,13 @@
+--- a/plugins/micromega/zcheck_oracle.ml
++++ b/plugins/micromega/zcheck_oracle.ml
+@@ -145,8 +145,8 @@
+       term cb.const_type; add "\n";
+       (match cb.const_body with
+        | Def b -> add "def "; term b
+-       | OpaqueDef _ -> OpacityLog.record c cb; incr opaque; add "opaque"
+-       | Undef _ -> OpacityLog.record c cb; add "undef"
++       | OpaqueDef _ -> incr opaque; add "opaque"
++       | Undef _ -> add "undef"
+        | Primitive p -> add "primitive "; add (CPrimitives.to_string p)
+        | Symbol _ -> add "symbol")
+     | `Mind m ->
