@@ -1,0 +1,32 @@
+--- a/plugins/extraction/table.mli
++++ b/plugins/extraction/table.mli
+@@ -154,7 +154,7 @@
+ 
+ (*s Target language. *)
+ 
+-type lang = Ocaml | Haskell | Scheme | JSON
++type lang = Cobol | Ocaml | Haskell | Scheme | JSON
+ val lang : unit -> lang
+ 
+ (*s Table for custom inlining *)
+--- a/plugins/extraction/table.ml
++++ b/plugins/extraction/table.ml
+@@ -672,7 +672,7 @@
+ 
+ (*s Extraction Lang *)
+ 
+-type lang = Ocaml | Haskell | Scheme | JSON
++type lang = Cobol | Ocaml | Haskell | Scheme | JSON
+ 
+ let lang_ref = Summary.ref Ocaml ~name:"ExtrLang"
+ 
+--- a/plugins/extraction/dune
++++ b/plugins/extraction/dune
+@@ -2,6 +2,7 @@
+  (name extraction_plugin)
+  (public_name rocq-runtime.plugins.extraction)
+  (synopsis "Rocq's extraction plugin")
++ (flags :standard -w -8)
+  (libraries rocq-runtime.vernac))
+ 
+ (deprecated_library_name

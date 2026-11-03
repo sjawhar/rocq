@@ -1,0 +1,10 @@
+--- a/vernac/keepFacts.ml
++++ b/vernac/keepFacts.ml
+@@ -297,6 +297,7 @@
+           if GlobRef.Set_env.mem gr !active then raise (Full_walk "a cycle");
+           active := GlobRef.Set_env.add gr !active;
+           let edges = match v, gr with
++            | Some _, GlobRef.ConstRef c -> Assumptions.type_references c
+             | Some refs, _ -> refs
+             | None, GlobRef.ConstRef c -> Assumptions.type_references c
+             | None, (GlobRef.VarRef _ | GlobRef.IndRef _ | GlobRef.ConstructRef _) ->

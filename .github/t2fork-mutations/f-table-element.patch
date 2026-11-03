@@ -1,0 +1,42 @@
+--- a/pretyping/detyping.ml
++++ b/pretyping/detyping.ml
+@@ -268,7 +268,27 @@
+          else " are not printed using a `let' form")
+   end)
+ 
+-module PrintingIf  = Goptions.MakeRefTable(PrintingCasesIf)
++module PrintingCasesIfRef = struct
++  type t = Names.GlobRef.t
++  module Set = Names.GlobRef.Set_env
++  let encode env r = Names.GlobRef.IndRef (PrintingCasesIf.encode env r)
++  let subst s = function
++    | Names.GlobRef.IndRef i -> Names.GlobRef.IndRef (PrintingCasesIf.subst s i)
++    | x -> x
++  let check_local l = function
++    | Names.GlobRef.IndRef i -> PrintingCasesIf.check_local l i
++    | _ -> ()
++  let discharge x = x
++  let printer = function
++    | Names.GlobRef.IndRef i -> PrintingCasesIf.printer i
++    | _ -> Pp.mt ()
++  let key = PrintingCasesIf.key
++  let title = PrintingCasesIf.title
++  let member_message x b = match x with
++    | Names.GlobRef.IndRef i -> PrintingCasesIf.member_message i b
++    | _ -> Pp.mt ()
++end
++module PrintingIf  = Goptions.MakeRefTable(PrintingCasesIfRef)
+ module PrintingLet = Goptions.MakeRefTable(PrintingCasesLet)
+ 
+ (** univ and sort detyping *)
+--- a/pretyping/detyping.ml
++++ b/pretyping/detyping.ml
+@@ -624,7 +624,7 @@
+         st
+       else if PrintingLet.active ci.ci_ind then
+         LetStyle
+-      else if PrintingIf.active ci.ci_ind then
++      else if PrintingIf.active (Names.GlobRef.IndRef ci.ci_ind) then
+         IfStyle
+       else
+         st
