@@ -24,8 +24,8 @@ jobs:
           if [ "${{ matrix.case }}" != baseline ] && [ -f ".github/t2fork-mutations/${{ matrix.case }}.patch" ]; then
             git apply --verbose ".github/t2fork-mutations/${{ matrix.case }}.patch"
           fi
-          sed -i 's/(rocq (flags :standard -w +default))/(rocq (flags :standard -w +default -location-free-label))/' dune
-          grep -n 'location-free-label' dune
+          sed -i 's/let common = Arg.\[ A "-w"; A "+default"; A "-q" \] in/let common = Arg.[ A "-w"; A "+default"; A "-q"; A "-location-free-label" ] in/' tools/dune_rule_gen/coq_rules.ml
+          grep -n 'location-free-label' tools/dune_rule_gen/coq_rules.ml
           git diff --stat
       - run: opam exec -- make world
       - name: Labels of the theories
@@ -35,6 +35,7 @@ jobs:
           find theories user-contrib -name '*.vo' 2>/dev/null | sort | while read f; do printf '%s %s\n' "$f" "$("$OLDPWD/$T" --check "$f")"; done > /tmp/labels.txt
           wc -l /tmp/labels.txt
           awk '{print $2}' /tmp/labels.txt | sort | uniq -c
+          if grep -q ' md5 ' /tmp/labels.txt; then echo "FAIL a theory library has no label"; fi
           echo "BEGIN-LABELS"; base64 -w 0 /tmp/labels.txt; echo; echo "END-LABELS"
           sha256sum /tmp/labels.txt
       - name: Run the fixtures
