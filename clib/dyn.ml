@@ -112,6 +112,8 @@ module Self : PreS = struct
       let () = Printf.eprintf "Unknown dynamic tag %i\n%!" s in
       assert false
 
+  let repr_opt s = Int.Map.find_opt s !dyntab
+
   let name s =
     let hash = Hashtbl.hash s in
     if Int.Map.mem hash !dyntab then Some (Any hash) else None
