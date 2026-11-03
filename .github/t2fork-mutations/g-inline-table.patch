@@ -1,0 +1,24 @@
+--- a/pretyping/detyping.ml
++++ b/pretyping/detyping.ml
+@@ -270,6 +270,21 @@
+ 
+ module PrintingIf  = Goptions.MakeRefTable(PrintingCasesIf)
+ module PrintingLet = Goptions.MakeRefTable(PrintingCasesLet)
++
++module PrintingZzzInline = Goptions.MakeRefTable (struct
++  type t = Names.GlobRef.t
++  module Set = Names.GlobRef.Set_env
++  let encode _ r = Nametab.global r
++  let subst _ x = x
++  let check_local _ _ = ()
++  let discharge x = x
++  let printer _ = Pp.mt ()
++  let key = ["Printing"; "Zzz"; "Inline"]
++  let title = "Zzz inline table: "
++  let member_message _ _ = Pp.mt ()
++end)
++
++let () = ignore (PrintingZzzInline.active)
+ 
+ (** univ and sort detyping *)
+ 
