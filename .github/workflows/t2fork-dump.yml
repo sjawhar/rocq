@@ -1,0 +1,27 @@
+name: label-v4 merge representation dump
+on: [push]
+permissions:
+  contents: read
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - run: sudo apt-get update
+      - uses: actions/checkout@v4
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ocaml-variants.4.14.2+options,ocaml-option-flambda
+          dune-cache: true
+      - run: opam install --deps-only ./coqide-server.opam ./rocq*.opam
+      - run: opam exec -- make world
+      - name: Dump the representation
+        run: |
+          T=_build/install/default/bin/rocq-library-label
+          [ -x "$T" ] || T=$(find _build -name library_label.exe | head -1)
+          echo "BEGIN-VO-REPRESENTATION"
+          "$T" --vo-representation | base64 -w 0
+          echo
+          echo "END-VO-REPRESENTATION"
+          "$T" --vo-representation | sha256sum
+          "$T" --vo-representation | head -3
