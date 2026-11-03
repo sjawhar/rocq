@@ -32,7 +32,6 @@ type 'constr pcofix_guard_error =
   | RecCallInTypeOfAbstraction of 'constr
   | RecCallInNonRecArgOfConstructor of 'constr
   | RecCallInTypeOfDef of 'constr
-  | RecCallInNonMainMutual of 'constr
   | RecCallInCaseFun of 'constr
   | RecCallInCaseArg of 'constr
   | RecCallInCasePred of 'constr
@@ -81,10 +80,10 @@ type ('constr, 'types, 'r) ptype_error =
   | BadCaseRelevance of 'r * 'constr
   | BadInvert
   | BadVariance of { lev : Level.t; expected : Variance.t; actual : Variance.t }
-  | BadQVariance of { qvar : Sorts.QVar.t; expected : Variance.t; actual : Variance.t }
   | UndeclaredUsedVariables of { declared_vars : Id.Set.t; inferred_vars : Id.Set.t }
   | IllFormedConstant of Constant.t * KerName.t
   | IllFormedInductive of MutInd.t * KerName.t
+  | ArrayTooLong of int
 
 type type_error = (constr, types, Sorts.relevance) ptype_error
 
@@ -186,9 +185,6 @@ let error_bad_invert env =
 let error_bad_variance env ~lev ~expected ~actual =
   raise (TypeError (env, BadVariance {lev;expected;actual}))
 
-let error_bad_qvariance env ~qvar ~expected ~actual =
-  raise (TypeError (env, BadQVariance {qvar;expected;actual}))
-
 let error_undeclared_used_variables env ~declared_vars ~inferred_vars =
   raise (TypeError (env, UndeclaredUsedVariables {declared_vars; inferred_vars}))
 
@@ -197,6 +193,9 @@ let error_ill_formed_constant env cst kn =
 
 let error_ill_formed_inductive env ind kn =
   raise (TypeError (env, IllFormedInductive (ind, kn)))
+
+let error_array_too_long env len =
+  raise (TypeError (env, ArrayTooLong len))
 
 let map_pfix_guard_error f = function
 | NotEnoughAbstractionInFixBody _ | NotEnoughArgumentsForFixCall _ as e -> e
@@ -211,7 +210,6 @@ let map_pcofix_guard_error f = function
 | RecCallInTypeOfAbstraction c -> RecCallInTypeOfAbstraction (f c)
 | RecCallInNonRecArgOfConstructor c -> RecCallInNonRecArgOfConstructor (f c)
 | RecCallInTypeOfDef c -> RecCallInTypeOfDef (f c)
-| RecCallInNonMainMutual c -> RecCallInNonMainMutual (f c)
 | RecCallInCaseFun c -> RecCallInCaseFun (f c)
 | RecCallInCaseArg c -> RecCallInCaseArg (f c)
 | RecCallInCasePred c -> RecCallInCasePred (f c)
@@ -227,7 +225,8 @@ let map_ptype_error fr f = function
 | UndeclaredQualities _ | UndeclaredUniverses _ | NotAllowedSProp
 | UnsatisfiedUnivConstraints _
 | UnsatisfiedPConstraints _
-| ReferenceVariables _ | BadInvert | BadVariance _ | BadQVariance _ | UndeclaredUsedVariables _ | IllFormedConstant _ | IllFormedInductive _ as e -> e
+| ReferenceVariables _ | BadInvert | BadVariance _ | UndeclaredUsedVariables _ | IllFormedConstant _ | IllFormedInductive _
+| ArrayTooLong _ as e -> e
 | NotAType j -> NotAType (on_judgment f j)
 | BadAssumption j -> BadAssumption (on_judgment f j)
 | ElimArity (pi, c, ar) -> ElimArity (pi, f c, ar)
