@@ -1,0 +1,11 @@
+--- a/vernac/libkeyObjects.ml
++++ b/vernac/libkeyObjects.ml
+@@ -308,7 +308,7 @@
+     | Error what -> Error ("object segment: " ^ what)
+     | Ok objects ->
+       let input =
+-        (version, vmlibrary_format_version, blind_compiled compiled, syntax, objects,
++        (3, vmlibrary_format_version, blind_compiled compiled, syntax, objects,
+          summary_view summary) in
+       match Libkey.label (Obj.repr input) with
+       | label -> Ok label

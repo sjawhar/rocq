@@ -1,0 +1,11 @@
+--- a/vernac/attempts.ml
++++ b/vernac/attempts.ml
+@@ -258,7 +258,7 @@
+   let read =
+     List.concat_map (fun a ->
+         match a.request with
+-        | Ml_module _ -> []
++        | Ml_module _ -> a.found
+         | Require_qualified _ | Require_absolute _ | Load _ -> a.found)
+       t.attempts
+   in

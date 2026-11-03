@@ -1,0 +1,11 @@
+--- a/vernac/mltop.ml
++++ b/vernac/mltop.ml
+@@ -465,7 +465,7 @@
+          implicit dependency, not the digests of the plugins' files
+          ([mdigests], which the object still stores and which a rebuild of
+          the plugin moves: LibkeyObjects, label version 4). *)
+-      interface_key = Key_stripped (fun o -> { o with mdigests = [] }) }
++      interface_key = Key_stripped (fun o -> { o with mdigests = []; mnames = [] }) }
+ 
+ (* The plugins' files as findlib resolves them, for the attempted-resolution
+    records ([Attempts]). *)

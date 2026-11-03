@@ -1,0 +1,70 @@
+name: v4 fixture mutations
+
+# Each job builds the v4 head with one mutation applied (none for "baseline")
+# and runs the label fixtures. Baseline must pass. A mutation job must fail,
+# and its log names the fixture check that failed.
+
+on: [push]
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    strategy:
+      matrix:
+        mutation:
+          - baseline
+          - a-plugin-digest
+          - b-attempts-digest
+          - c-plugin-name
+          - d1-version-not-in-key
+          - d2-layout-version-printed
+          - e-payload-repr
+          - B1-strategy-log
+          - B3-closure-bodies
+      fail-fast: false
+    name: ${{ matrix.mutation }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: APT update
+        run: sudo apt-get update
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5
+          dune-cache: true
+      - name: Get Rocq dependencies
+        run: opam install --deps-only ./coqide-server.opam ./rocq*.opam
+      - name: Apply the mutation
+        run: |
+          git log -1 --format='tested commit %H (parent %P)'
+          if [ "${{ matrix.mutation }}" != baseline ]; then
+            git apply --verbose ".github/t2fork-mutations/${{ matrix.mutation }}.patch"
+          fi
+          git diff --stat
+          git diff
+      - name: Build Rocq
+        run: opam exec -- make world
+      - name: Run the label fixtures
+        run: |
+          set +e
+          T="misc/library-label-plugin.log misc/library-label-attempts.log misc/vo-format.log misc/vo-format-rule.log misc/library-label-keepfacts.log unit-tests/vernac/libkeyObjects_test.ml.log"
+          opam exec -- make -k -C test-suite TIMED=1 $T
+          rc=$?
+          for t in $T; do
+            echo "=================== test-suite/$t"
+            cat "test-suite/$t" || echo "MISSING LOG test-suite/$t"
+          done
+          echo "=================== summary"
+          bad=0
+          for t in $T; do
+            if [ ! -f "test-suite/$t" ]; then echo "RESULT NOLOG $t"; bad=1
+            elif grep -q 'Error!\|FAIL' "test-suite/$t"; then echo "RESULT FAILED $t"; grep -n 'FAIL\|Error!' "test-suite/$t" | head -20; bad=1
+            else echo "RESULT PASSED $t"; fi
+          done
+          echo "make exit $rc, fixtures bad=$bad"
+          [ "$rc" = 0 ] && [ "$bad" = 0 ]

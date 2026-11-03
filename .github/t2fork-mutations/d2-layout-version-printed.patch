@@ -1,0 +1,11 @@
+--- a/checker/library_label.ml
++++ b/checker/library_label.ml
+@@ -442,7 +442,7 @@
+     | "--axiom-report-json" -> print_endline (axiom_report_json f (read f))
+     | _ -> usage ()
+     end
+-  | ["--layout-version"] -> Printf.printf "%d\n" LibkeyObjects.version
++  | ["--layout-version"] -> Printf.printf "%d\n" (LibkeyObjects.version - 1)
+   | ["--vmlibrary-format-version"] ->
+     Printf.printf "%d\n" LibkeyObjects.vmlibrary_format_version
+   | ["--vo-representation"] -> print_string (vo_representation ())

@@ -1,0 +1,10 @@
+--- a/tactics/redexpr.ml
++++ b/tactics/redexpr.ml
+@@ -130,7 +130,6 @@
+          body forms, and only in a compile under -location-free-label, its
+          workers and the children it forks; in any other process the call
+          does nothing (it neither reads nor fails on an inherited log). *)
+-      OpacityLog.record sp cb;
+       if Declareops.is_opaque cb (* FIXME *) then
+         user_err
+           (str "Cannot make" ++ spc () ++
