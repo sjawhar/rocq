@@ -251,6 +251,20 @@ let rec lft_fconstr n ft =
 let lift_fconstr k f =
   if Int.equal k 0 then f else lft_fconstr k f
 
+(* [lift_primitive_value n m] lifts a value of a primitive type (the head
+   [knr] found for the FInt / FFloat / FString / FArray case) without
+   introducing an [FLIFT] node: the reduction of a primitive operator
+   inspects the head constructor of its arguments ([FNativeEntries.get_parray]
+   and friends), so the lift has to be pushed inside the array.  Integer,
+   float and string literals are closed, hence unaffected by a lift. *)
+let lift_primitive_value n m =
+  if Int.equal n 0 then m
+  else match [@ocaml.warning "-4"] m.term with
+    | FArray (u,t,ty) ->
+      { mark = m.mark;
+        term = FArray (u, Parray.map (lift_fconstr n) t, lift_fconstr n ty) }
+    | _ -> lift_fconstr n m
+
 let clos_rel e i =
   match expand_rel i e with
     | Inl(n,mt) -> lift_fconstr n mt
@@ -1937,7 +1951,11 @@ let rec knr : 'a. _ -> _ -> pat_state: 'a depth -> _ -> _ -> 'a =
       knit info tab ~pat_state (on_fst (subs_cons v) e) bd stk
   | FInt _ | FFloat _ | FString _ | FArray _ ->
     (match [@ocaml.warning "-4"] strip_update_shift_app m stk with
-     | (_, _, _, Zprimitive(op,(_,u as c),rargs,nargs)::s) ->
+     | (depth, _, _, Zprimitive(op,(_,u as c),rargs,nargs)::s) ->
+       (* [m] was found under a shift of [depth], while the arguments
+          already collected and the stack [s] live in the shifted context,
+          so the shift has to be applied to [m] (rocq#22772). *)
+       let m = lift_primitive_value depth m in
        let (rargs, nargs) = skip_native_args (m::rargs) nargs in
        begin match nargs with
          | [] ->

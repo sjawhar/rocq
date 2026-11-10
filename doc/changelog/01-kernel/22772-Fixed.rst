@@ -1,0 +1,6 @@
+- **Fixed:**
+  The lazy reduction machine dropped the de Bruijn shift accumulated on the
+  stack when a value of a primitive type was the argument of a primitive
+  operator, so a primitive array built under a binder was read in the wrong
+  context and conversion accepted a false equation
+  (fixes `#22772 <https://github.com/rocq-prover/rocq/issues/22772>`_).
