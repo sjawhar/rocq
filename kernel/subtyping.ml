@@ -460,11 +460,27 @@ let check_constant ?(cache=true) (cst, ustate) trace env mp1 l strengthen1 info1
       cst'
       end
 
+(* The invariant of [Mod_subst]: an [Equiv] relates names with the same
+   label. Substitution relies on it: [Mod_subst.subst_con0_flat] and
+   [subst_mind_flat] rebuild a canonical name from the user name's label,
+   so a functor application would turn an alias that changes label into a
+   name the functor never referred to. The alias checks below compare
+   declarations, not names, so they test the labels first. Honest files
+   pass: coqc adds every [Equiv] through [Mod_subst.add_kn_delta_resolver],
+   which asserts the invariant, and [-merge-inductives] merges only blocks
+   with the same label. *)
+let same_label user canonical =
+  Id.equal (KerName.label user) (KerName.label canonical)
+
 let check_constant_alias env cst cb =
   let user = Constant.user cst in
   let canonical = Constant.canonical cst in
   if KerName.equal user canonical then ()
   else
+    let () =
+      if not (same_label user canonical) then
+        error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+    in
     (* coqc writes an alias only for a field that it strengthened, whose
        body is then [Def]. Any other alias would be compared below as a
        signature parameter, on its type alone, and in the type of a sealed
@@ -510,8 +526,16 @@ let check_inductive_alias env mind mib =
   let canonical = MutInd.canonical mind in
   if KerName.equal user canonical then ()
   else
+    let () =
+      if not (same_label user canonical) then
+        error_signature_mismatch [] (KerName.label user)
+          (NotEqualInductiveAliases (mind, MutInd.make1 canonical))
+    in
     let target = MutInd.make1 canonical in
     let target_body = Environ.lookup_mind target env in
+    (* The labels are equal: [check_inductive] compares [user], which is
+       [KerName.make user_mp target_label], and [add_kn_delta_resolver]
+       below cannot fail its assertion. *)
     let target_mp, target_label = KerName.repr canonical in
     let user_mp = KerName.modpath user in
     let target_resolver = empty_delta_resolver target_mp in
