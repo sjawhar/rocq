@@ -72,8 +72,10 @@
 #                     match
 #   refuse-<name>/answer/*.v
 #                     optional, the answer the config is refused on, laid
-#                     out like answer/ and built like a bad answer; without
-#                     it, the honest answer
+#                     out like answer/ and compiled as answer/ is (its own
+#                     coqc-flags, the case's order and pre-checked
+#                     libraries), with no vendor or cwd tree; without it,
+#                     the honest answer
 #   fail-config/expected-reason
 #                     optional, a regular expression the failed reason must
 #                     match
@@ -594,7 +596,9 @@ run_case() {
   done
 
   # configs that must be refused, on the honest answer or on an answer of
-  # their own, built as a bad answer is
+  # their own, laid out like answer/ and compiled as answer/ is (its own
+  # coqc-flags, the case's order and pre-checked libraries), with no vendor
+  # or cwd tree
   local ref
   for ref in "$c"/refuse-*; do
     [ -d "$ref" ] || continue
@@ -793,7 +797,7 @@ case_sibling() {
 # The libraries sit under a root with a dotted prefix and in
 # subdirectories, the shape a task tree takes (-Q tree Top, Sub/B.v).
 #
-# The two forms, which the count reads too.
+# The forms, which the count reads too.
 norec_forms=(norec positional)
 
 case_norec() {
@@ -884,7 +888,7 @@ case_norec() {
 # The trees are read-only recordings; COMPARE_FORGERIES points at them and
 # the case is skipped where they are not mounted.
 : "${COMPARE_FORGERIES:=/mnt/durable/sami/eval-driven-development/round4/verified-grading/wrong-answers-e2e/trees}"
-# The six forgeries, which the count reads too.
+# The forgeries, which the count reads too.
 forgery_names=(os-22378 os-22383 os-22391 os-22675 os-vm357 os-parray630)
 
 case_forgeries() {

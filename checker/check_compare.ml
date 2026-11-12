@@ -1145,21 +1145,20 @@ let verdict_word = function Ok _ -> "accept" | Error _ -> "refuse"
 let indmerge_agree ~side ~block mine theirs =
   Option.iter (fun file ->
       let oc = open_out_gen [Open_wronly; Open_append; Open_creat; Open_text] 0o644 file in
-      output_string oc
-        (Printf.sprintf "%s %s comparator=%s indmerge=%s\n"
-           side block (verdict_word mine) (verdict_word theirs));
+      Printf.fprintf oc "%s %s comparator=%s indmerge=%s\n"
+        side block (verdict_word mine) (verdict_word theirs);
       close_out oc)
     indmerge_cross_check_log;
-  let what = "indmerge cross-check, " ^ side ^ " side, block " ^ block ^ ": " in
+  let what () = "indmerge cross-check, " ^ side ^ " side, block " ^ block ^ ": " in
   match mine, theirs with
   | Ok _, Ok _ | Error _, Error _ -> ()
   | Ok _, Error d ->
     CErrors.anomaly
-      Pp.(str (what ^ "the comparator accepts it and Indmerge.eq_mib refuses it: ")
+      Pp.(str (what () ^ "the comparator accepts it and Indmerge.eq_mib refuses it: ")
           ++ Indmerge.pr_diff d ++ str ".")
   | Error d, Ok _ ->
     CErrors.anomaly
-      Pp.(str (what ^ "Indmerge.eq_mib accepts it and the comparator refuses it: " ^ d ^ "."))
+      Pp.(str (what () ^ "Indmerge.eq_mib accepts it and the comparator refuses it: " ^ d ^ "."))
 
 (* The compare side: a challenge block and the answer's block of the same
    name, or the two blocks of one module-type field. *)
