@@ -44,10 +44,15 @@ let record fd i =
   let line = Printf.sprintf "%d %d\n" (Unix.getpid ()) i in
   assert (Unix.write_substring fd line 0 (String.length line) = String.length line)
 
+(* The record that [run] appends, from the main process, once [finish] has
+   returned: no check may come after it. No check or table read records
+   this number (they record [i >= 0] and [- (l + 1)]). *)
+let finished = min_int
+
 (* [n] deferred checks, [-j jobs], then [finish]. A check [refuse] raises;
    check [i] records itself, then runs [work i]. Returns the log, or the
    exception that [defer] or [finish] raised (after [abort], as the
-   checker does).
+   checker does). When [finish] returns, the log ends with [finished].
 
    No batch is dealt while the checks are deferred, unless [windows] is
    given: the checks are then cut into [windows] equal parts, and the
@@ -90,7 +95,9 @@ let run ?(jobs = 2) ?refuse ?(work = fun _ -> ()) ?(windows = 0) ?(libs = [])
                      work i)
                done;
                before_finish read;
-               CheckWorkers.finish (); None
+               CheckWorkers.finish ();
+               record fd finished;
+               None
              with e -> CheckWorkers.abort (); Some e
            in
            (* No worker is left behind. *)
@@ -113,7 +120,8 @@ let assert_exactly_once n log =
 
 let assert_tables_once libs log =
   let seen = Array.make libs 0 in
-  List.iter (fun (_, i) -> if i < 0 then seen.(- i - 1) <- seen.(- i - 1) + 1) log;
+  List.iter (fun (_, i) ->
+      if i < 0 && i <> finished then seen.(- i - 1) <- seen.(- i - 1) + 1) log;
   Array.iteri (fun l c ->
       if c <> 1 then
         assert_failure (Printf.sprintf "the table of library %d was read %d times" l c))
@@ -199,7 +207,7 @@ let assert_no_exception = function
 (* The main process only queues and deals checks, and waits for workers:
    it checks a proof itself only when it cannot fork. *)
 let assert_main_checked_nothing log =
-  if List.exists (fun (p, _) -> p = me) log then
+  if List.exists (fun (p, i) -> p = me && i <> finished) log then
     assert_failure "the main process checked a proof"
 
 let pr_batches l = String.concat "; " (List.map (fun b -> String.concat "," (List.map string_of_int b)) l)
@@ -209,14 +217,68 @@ let assert_batches expected log =
   let got = List.sort compare (List.map (fun p -> checks_of p log) (pids_of log)) in
   assert_equal ~printer:pr_batches (List.sort compare expected) got
 
-let assert_batches_as_documented ~slots n log = assert_batches (expected_batches ~slots n) log
+(* Checks, whatever the timing, what [finish] dealt to [slots] workers from
+   [n] checks deferred without libraries, as [log] records it. A batch here
+   is the checks that one worker ran. [defer] dealt none of them: [run]
+   sets the window to [infinity] and, without [windows], never ends it, so
+   only [finish] deals, whatever the time the checks take to defer.
+
+   Which checks a worker runs depends on the timing. A worker's budget is
+   wall time, so on a loaded machine even the default budget may run out:
+   the worker stops after one of its checks and gives the rest back. And
+   when a slot is free and nothing is queued, [finish] asks the worker with
+   the largest batch to release the checks it has not started. Either way
+   the checks given back are dealt again. So the batches are not one exact
+   sequence: a run of 200 checks at -j 2 once logged batches of 50, 38, 28,
+   21, 16, 12, 9, 7, 5, 4, 3, 2, 1, 1, 1, 1, 1 checks, where a run in which
+   nothing is given back has 50, 38, ..., 3, 2, 2, 1, 1, 1. What is checked
+   holds in any order in which the workers take their batches and end:
+   - every check runs exactly once;
+   - the run ends after the last check: [finished] is the last record;
+   - each batch keeps to the dealing. When a slot is free and [r] checks
+     are queued, [finish] deals [deal 1 (ceil (r / (2 * slots)))]. The
+     checks of a run without libraries all belong to one group, so they
+     make one run of the queue, cut into pieces of that size, and the batch
+     is the first piece: the first [ceil (r / (2 * slots))] queued checks.
+     Its worker runs at least the first of them and at most all of them.
+     A check goes back to the queue only if its worker will not run it:
+     it comes after the check at which the budget stopped the worker, or
+     after the count that the worker's release message names, which its
+     final report must equal. So when a batch is dealt, the checks that
+     earlier batches run are not queued: their workers hold them or have
+     run them. A batch thus runs at most
+     [ceil ((n - c) / (2 * slots))] checks, where [c] is the number of
+     checks run by the batches dealt before it.
+   The log does not say in which order the batches were dealt. If some
+   order keeps every batch within that bound, the order from the largest
+   batch to the smallest does too: a larger batch just after a smaller one
+   can be swapped with it, and both stay within the bound. So that order is
+   checked. *)
+let assert_dealt_by_finish ~slots n log =
+  assert_exactly_once n log;
+  (match List.rev log with
+   | (p, i) :: _ when p = me && i = finished -> ()
+   | _ -> assert_failure "the last record is not the end of the run");
+  let sizes =
+    List.sort (fun a b -> compare b a)
+      (List.map (fun p -> List.length (checks_of p log)) (pids_of log))
+  in
+  let pr_sizes = String.concat "," (List.map string_of_int sizes) in
+  ignore (List.fold_left (fun left k ->
+      let most = (left + 2 * slots - 1) / (2 * slots) in
+      if k > most then
+        assert_failure (Printf.sprintf
+                          "batches of %s checks: one of %d with %d left, more than %d"
+                          pr_sizes k left most);
+      left - k)
+      n sizes)
 
 let () = add_test "no early stop: every check runs once" (fun () ->
     let result, log = run ~budget:CheckWorkers.default_budget n in
     assert_no_exception result;
     assert_exactly_once n log;
     assert_main_checked_nothing log;
-    assert_batches_as_documented ~slots:2 n log)
+    assert_dealt_by_finish ~slots:2 n log)
 
 (* Fewer than 2N x 10 checks left: they are still dealt to workers, down
    to batches of one check. *)
@@ -225,7 +287,7 @@ let () = add_test "few checks left: all dealt, in batches as documented" (fun ()
     assert_no_exception result;
     assert_exactly_once 30 log;
     assert_main_checked_nothing log;
-    assert_batches_as_documented ~slots:4 30 log;
+    assert_dealt_by_finish ~slots:4 30 log;
     assert_bool "batches of one check" (List.exists (fun p -> List.length (checks_of p log) = 1) (pids_of log)))
 
 (* [k] checks that each wait until all [k] have started, so [k] workers
