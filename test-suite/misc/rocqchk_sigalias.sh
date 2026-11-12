@@ -5,8 +5,11 @@
 # and d declared in the type of a sealed module M, an alias of M.d to M.c
 # proves False, although M's implementation has c := true and d := false. The
 # same holds for an alias that keeps its label (M2.c to M1.c) and for an alias
-# in the type of a functor's parameter. See misc/rocqchk_delta_alias.sh for
-# forged aliases of definitions.
+# in the type of a functor's parameter. The aliases of cases sealed (M.d to
+# M.c) and functor (X.d to X.c) change label, so the label test of
+# Subtyping.check_constant_alias refuses them first; only case cross reaches
+# its refusal of an alias whose body is not a definition. See
+# misc/rocqchk_delta_alias.sh for forged aliases of definitions.
 
 set -e
 

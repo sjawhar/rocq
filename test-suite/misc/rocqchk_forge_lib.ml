@@ -26,8 +26,10 @@
      [mbid; module_type_body; signature]; structure: list of (label, field);
      field tags 0 constant, 1 inductive, 2 rules, 3 module, 4 module type;
    - constant_body: 2 body (Undef 0 | Def 1 [term] | ...), 3 type;
-   - term: Const is tag 10 [(constant, instance)]; constant: Same (tag 0)
-     [kn] | Dual (tag 1) [user kn; canonical kn]; kn: [modpath; label; hash];
+   - term: Const is tag 10 [(constant, instance)], Ind tag 11
+     [((mutual inductive, index), instance)]; constant and mutual
+     inductive: Same (tag 0) [kn] | Dual (tag 1) [user kn; canonical kn];
+     kn: [modpath; label; hash];
    - delta resolver: [root; module map; kernel-name map], the last an Int.Map
      from a name's stored hash to a KerName.Map of delta hints, Equiv being
      tag 1 [kn]; maps are the standard library's AVL nodes [l; key; data; r;
@@ -230,7 +232,7 @@ let kn_equal a b =
   a == b
   || (String.equal (kn_label a) (kn_label b) && compare (kn_mp a) (kn_mp b) = 0)
 
-(* The user name of a constant. *)
+(* The user name of a constant or an inductive. *)
 let cst_user c = field c 0
 
 let dual user canonical = block 1 [| user; canonical |]
@@ -240,12 +242,14 @@ let mp_is_bound mp = tag mp = 1
 
 (* {1 Terms} *)
 
-(* Copy-on-write map of [fc] over the Const nodes of a term. [fc] gets the
-   (constant, instance) pair and returns its replacement, or None. *)
-let rec map_constr fc c =
+(* Copy-on-write map of [fc] over the Const nodes of a term, and of [fi] over
+   its Ind nodes. [fc] gets the (constant, instance) pair, [fi] the
+   ((inductive, index), instance) pair, and each returns its replacement, or
+   None. [fi] leaves every Ind node as it is by default. *)
+let rec map_constr ?(fi = fun _ -> None) fc c =
   if Obj.is_int c then c
   else
-    let m = map_constr fc in
+    let m = map_constr ~fi fc in
     match tag c with
     | 5 -> c |> upd 0 m |> upd 2 m (* Cast *)
     | 6 | 7 -> c |> upd 1 m |> upd 2 m (* Prod, Lambda *)
@@ -253,6 +257,8 @@ let rec map_constr fc c =
     | 9 -> c |> upd 0 m |> upd 1 (map_array m) (* App *)
     | 10 -> (* Const *)
       (match fc (field c 0) with Some p -> block 10 [| p |] | None -> c)
+    | 11 -> (* Ind *)
+      (match fi (field c 0) with Some p -> block 11 [| p |] | None -> c)
     | 13 -> (* Case: info, instance, params, return, invert, scrutinee, branches *)
       c
       |> upd 2 (map_array m)
@@ -267,14 +273,22 @@ let rec map_constr fc c =
     | _ -> c
 
 (* The type and, for a definition, the body of a constant_body. *)
-let map_cb fc cb =
+let map_cb ?fi fc cb =
   cb
-  |> upd 3 (map_constr fc)
-  |> upd 2 (fun body -> if is_block body && tag body = 1 then upd 0 (map_constr fc) body else body)
+  |> upd 3 (map_constr ?fi fc)
+  |> upd 2 (fun body ->
+         if is_block body && tag body = 1 then upd 0 (map_constr ?fi fc) body else body)
 
+(* The constants, and the inductives, that the type and the body of a
+   constant_body name, in the order map_cb meets them. *)
 let cb_constants cb =
   let acc = ref [] in
   ignore (map_cb (fun p -> acc := field p 0 :: !acc; None) cb);
+  List.rev !acc
+
+let cb_inductives cb =
+  let acc = ref [] in
+  ignore (map_cb ~fi:(fun p -> acc := field (field p 0) 0 :: !acc; None) (fun _ -> None) cb);
   List.rev !acc
 
 (* A rewrite of Const nodes that counts what it changes. *)
@@ -336,9 +350,11 @@ let impl_kind i =
   else
     match tag i with 0 -> "Algebraic" | 1 -> "Struct" | t -> Printf.sprintf "implementation tag %d" t
 
-(* The first constant mentioned by a constant of [struc] whose user name has
-   label [label] and a module path satisfying [in_mp]. *)
-let find_kn struc ~label ~in_mp =
+(* The first name, among the constants ([names] = cb_constants, the default)
+   or the inductives ([names] = cb_inductives) that a constant of [struc]
+   names, whose user name has label [label] and a module path satisfying
+   [in_mp]. *)
+let find_kn ?(names = cb_constants) struc ~label ~in_mp =
   let found = ref None in
   List.iter
     (fun it ->
@@ -349,11 +365,11 @@ let find_kn struc ~label ~in_mp =
             let u = cst_user c in
             if Option.is_none !found && String.equal (kn_label u) label && in_mp (kn_mp u)
             then found := Some u)
-          (cb_constants (field sfb 0)))
+          (names (field sfb 0)))
     (list_of struc);
   match !found with
   | Some kn -> kn
-  | None -> fail "no constant labelled %s is mentioned there" label
+  | None -> fail "no declaration labelled %s is mentioned there" label
 
 let root_struc disk =
   let root = field (field disk 0) 1 in
