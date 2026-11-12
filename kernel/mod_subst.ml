@@ -60,6 +60,11 @@ module Deltamap = struct
   let find_mp mp reso = ModPath.Map.find mp reso.mmap
   let find_kn kn reso = KerName.Map.find kn reso.kmap
   let fold_kn f reso i = KerName.Map.fold f reso.kmap i
+  (** the hints of [reso] rewritten by [f]; [reso] itself when [f] returns
+      each hint unchanged *)
+  let map_kn f reso =
+    let kmap = KerName.Map.Smart.map f reso.kmap in
+    if kmap == reso.kmap then reso else { reso with kmap }
   let fold fmp fkn reso accu =
     ModPath.Map.fold fmp reso.mmap (KerName.Map.fold fkn reso.kmap accu)
   let join map1 map2 = fold add_mp add_kn map1 map2
@@ -246,6 +251,15 @@ let map_kn_delta_resolver ?(fc = fun c -> c) f resolver =
   in
   Deltamap.fold mp_id kn_map resolver
     (empty_delta_resolver (Deltamap.root resolver))
+
+(* rocqchk does not trust the term an [Inline] hint of a file carries, see
+   checker/safe_checking.ml. *)
+let drop_inline_bodies resolver =
+  let drop = function
+    | Inline (lev, Some _) -> Inline (lev, None)
+    | Inline (_, None) | Equiv _ as hint -> hint
+  in
+  Deltamap.map_kn drop resolver
 
 let map_mbid_flat mbid mp resolve =
   let () = assert (ModPath.equal mp (Deltamap.root resolve)) in

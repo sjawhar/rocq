@@ -40,6 +40,12 @@ val map_kn_delta_resolver :
   ?fc:(Constr.t -> Constr.t) ->
   (KerName.t -> KerName.t) -> delta_resolver -> delta_resolver
 
+(** [drop_inline_bodies reso] turns each [Inline (lev, Some t)] hint into
+    [Inline (lev, None)], the hint of a [Parameter Inline]: a substitution
+    through the result keeps the constant where one through [reso] puts
+    [t]. It returns [reso] itself when no hint carries a term. *)
+val drop_inline_bodies : delta_resolver -> delta_resolver
+
 (** [add_inline_delta_resolver kn v reso] assumes that root(reso) ⊆ modpath(kn). *)
 val add_inline_delta_resolver :
   KerName.t -> (int * constr UVars.univ_abstracted option) -> delta_resolver -> delta_resolver
