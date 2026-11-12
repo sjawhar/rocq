@@ -27,6 +27,7 @@ val check_subtypes : ?direct:bool -> ('a, Conversion.graph_inconsistency) Conver
 
 (** Check that a declaration whose user and canonical names differ is a valid
     alias of the canonical declaration already present in the environment.
+    An alias must keep its target's label (the invariant of [Mod_subst]).
     A constant alias must be a definition: coqc writes an alias only for a
     field it strengthened to [Def]. *)
 val check_constant_alias : env -> Constant.t -> Declarations.constant_body -> unit
