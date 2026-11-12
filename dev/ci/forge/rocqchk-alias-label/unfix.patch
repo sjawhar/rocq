@@ -1,0 +1,89 @@
+diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
+index b28e32f..473dc57 100644
+--- a/kernel/safe_typing.ml
++++ b/kernel/safe_typing.ml
+@@ -1634,12 +1634,63 @@ let start_library dir senv =
+     opaquetab = Opaqueproof.empty_opaquetab;
+   }
+ 
++(* Forge row dev/ci/forge/rocqchk-alias-label: this code exists only in the
++   reverted build, which writes the forged .vo. The library is the variant
++   that its client part was compiled against: in the functor F (P : S),
++   lemma is an axiom of type A.X.k = false, and a module Forge_label marks
++   it. The forger gives lemma the statement and the proof that the honest
++   library has, k = false := P.X.f, and records in the resolver of F's body
++   that F.k is an alias of P.X.d, from label k to label d; lemma's statement
++   names F.k by that alias. This is the F that
++   test-suite/misc/rocqchk-alias-label/forge.ml writes from the honest
++   library (whose client is compiled against the variant). F's
++   implementation is FullStruct: its signature is its only body. *)
++let forge_label mp struc =
++  let id = Id.of_string in
++  if Option.is_empty (List.assoc_f_opt Id.equal (id "Forge_label") struc) then struc
++  else
++    let fk = KerName.make (MPdot (mp, id "F")) (id "k") in
++    let axk = KerName.make (MPdot (MPdot (mp, id "A"), id "X")) (id "k") in
++    let forge_body px (l, field) = match field with
++      | SFBconst cb when Id.equal l (id "lemma") ->
++        (* The axiom's statement names A.X.k where the honest one names F.k. *)
++        let alias = Constant.make fk (KerName.make px (id "d")) in
++        let rec rename c = match Constr.kind c with
++          | Const (k, u) when KerName.equal (Constant.user k) axk -> mkConstU (alias, u)
++          | _ -> Constr.map rename c
++        in
++        let proof = mkConstU (Constant.make1 (KerName.make px (id "f")), UVars.Instance.empty) in
++        (l, SFBconst { cb with const_body = Def proof; const_type = rename cb.const_type })
++      | _ -> (l, field)
++    in
++    let forge (l, field) = match field with
++      | SFBmodule f when Id.equal l (id "F") ->
++        begin match mod_type f with
++        | MoreFunctor (p, ptype, NoFunctor body) ->
++          let px = MPdot (MPbound p, id "X") in
++          let body = List.map (forge_body px) body in
++          (* [add_kn_delta_resolver] asserts that an alias keeps its label, so
++             the entry is added as F.k to itself and then pointed at P.X.d. *)
++          let xd = KerName.make px (id "d") in
++          let delta =
++            Mod_subst.map_kn_delta_resolver (fun k -> if KerName.equal k fk then xd else k)
++              (Mod_subst.add_kn_delta_resolver fk fk (mod_delta f))
++          in
++          let f = set_signature (MoreFunctor (p, ptype, NoFunctor body)) f in
++          (l, SFBmodule (set_delta delta f))
++        | _ -> assert false
++        end
++      | _ -> (l, field)
++    in
++    List.map forge struc
++
+ let export ~output_native_objects senv dir =
+   let () = check_current_library dir senv in
+   let mp = senv.modpath in
+   (* With -merge-inductives, undo every merge this process made, so that the
+      .vo carries only names its reader can justify for itself. *)
+-  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
++  let str = Indmerge.unmerge_exported (List.rev senv.revstruct) |> forge_label mp in
++  let str = NoFunctor str in
+   let mb =
+     Mod_declarations.make_module_body str
+       (Indmerge.unmerge_delta senv.modresolver) senv.local_retroknowledge
+diff --git a/kernel/subtyping.ml b/kernel/subtyping.ml
+index c15ddfe..eaea8f5 100644
+--- a/kernel/subtyping.ml
++++ b/kernel/subtyping.ml
+@@ -477,10 +477,11 @@ let check_constant_alias env cst cb =
+   let canonical = Constant.canonical cst in
+   if KerName.equal user canonical then ()
+   else
+-    let () =
+-      if not (same_label user canonical) then
+-        error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+-    in
++    (* Forge row dev/ci/forge/rocqchk-alias-label: the reverted build does
++       not refuse a constant alias whose label differs from its target's
++       (727b0852, "rocqchk: refuse an alias whose label differs from its
++       target's"). [check_inductive_alias] keeps its test: the forge has no
++       inductive alias. *)
+     (* coqc writes an alias only for a field that it strengthened, whose
+        body is then [Def]. Any other alias would be compared below as a
+        signature parameter, on its type alone, and in the type of a sealed
