@@ -1548,7 +1548,7 @@ let end_modtype l senv =
 (** {6 Inclusion of module or module type } *)
 
 let warn_modtype_include =
-  CWarnings.create ~name:"include-module-type-in-module" ~category:CWarnings.CoreCategories.deprecated ~default:AsError
+  CWarnings.create ~name:"include-module-type-in-module" ~category:CWarnings.CoreCategories.deprecated
     (fun (mp, mp') ->
       Pp.(str "Inclusion of the module type " ++ ModPath.print mp ++ str " in the plain module " ++ ModPath.print mp' ++ str " is deprecated."))
 
