@@ -499,7 +499,7 @@ and collect_signature_axioms axioms sign mp =
         (* rocqchk does not check a primitive's declared type against the
            type of its operator ([check_constant_declaration] skips it), so
            that type is trusted as an axiom's is, and -o lists the primitive
-           among the axioms, as it did before rocq#22623 was ported. *)
+           among the axioms. *)
         | Undef _ | Primitive _ | Symbol _ -> axioms_add kn axioms
       in
       axioms

@@ -1,9 +1,9 @@
 (* The honest library of the rocq-fdelta-sealedac forge (dispatch://BET-885):
    A is sealed by S, in whose signature A.X.c is declared-only (with
    hc : c = true) and A.X.d is a definition; R is the functor F applied to A,
-   sealed by T. This is BET-885's functor-delta case "sealedAc",
-   honest/Lib.v and honest/Client.v in one file, on the Corelib prelude.
-   rocqchk must accept it. *)
+   sealed by T. This is
+   test-suite/misc/rocqchk-nested-resolver/sealedAc/honest/Lib.v and
+   Client.v in one file, on the Corelib prelude. rocqchk must accept it. *)
 
 Module Type XF.
   Parameter c : bool.
