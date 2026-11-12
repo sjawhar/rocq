@@ -24,42 +24,10 @@
 
 set -e
 
+. misc/rocqchk_forge_common.bash
+
 D=misc/rocqchk-nested-resolver
-
-# chk <dir> <rocqchk arguments>: rocqchk's output goes to <dir>/out.log.
-chk() {
-  local d=$1
-  shift
-  "$BIN"rocqchk "$@" > "$D/$d/out.log" 2>&1
-}
-
-accepts() {
-  local d=$1
-  shift
-  if ! chk "$d" "$@"; then
-    echo "rocqchk refused honest files ($d): rocqchk $*"
-    cat "$D/$d/out.log"
-    exit 1
-  fi
-}
-
-# Upstream's rocqchk prints a module typing error as "Module typing error"
-# (rocq-prover/rocq#22373). 9.2's rocqchk has no printer for it and reports
-# the exception itself, "Modops.ModuleTypingError".
-refuses() {
-  local d=$1
-  shift
-  if chk "$d" "$@"; then
-    echo "rocqchk accepted a forged delta resolver and a closed proof of False ($d): rocqchk $*"
-    cat "$D/$d/out.log"
-    exit 1
-  fi
-  if ! grep -Eq "Module typing error|ModuleTypingError" "$D/$d/out.log"; then
-    echo "unexpected rocqchk failure for a forged delta resolver ($d): rocqchk $*"
-    cat "$D/$d/out.log"
-    exit 1
-  fi
-}
+forgery="a forged delta resolver"
 
 rm -f "$D"/with/*.vo "$D"/with/*.vok "$D"/with/*.vos "$D"/with/*.glob "$D/with/out.log"
 $coqc -noinit -R "$D/with" NestedResolver "$D/with/WithModule.v"
@@ -93,9 +61,10 @@ for c in sealed sealedAc sameLabel inductive; do
   for v in honest forged; do
     if [ "$v" = honest ]; then check=accepts; else check=refuses; fi
     # As a grader runs it, and with the default options.
-    $check "$c" -o -bytecode-compiler yes -R "$C/$v" NestedResolver \
-      -norec NestedResolver.Lib NestedResolver.Client
-    $check "$c" -R "$C/$v" NestedResolver NestedResolver.Lib NestedResolver.Client
+    for mode in grader default; do
+      mode_args $mode "$C/$v" NestedResolver Client
+      $check "$c" "${mode_argv[@]}"
+    done
   done
   refuses "$c" -R "$C/forged" NestedResolver -norec NestedResolver.Lib
 done
