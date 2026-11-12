@@ -257,8 +257,15 @@ let check_recursivity r1 r2 = match r1, r2 with
 | Finite, Finite | BiFinite, BiFinite | CoFinite, CoFinite -> true
 | (Finite | BiFinite | CoFinite), _ -> false
 
+(* Only whether each side is private matters. [Some false] and [Some true]
+   are one private block seen from inside and from outside its module:
+   [Modops.add_structure] turns every [Some _] into [Some true] when it adds
+   a module to the environment. The [Direct] view reads a closed module's
+   block from the environment, so it sees [Some true] where that module's
+   structure, and the signature, hold [Some false]. A private block against
+   a non-private one, either way round, stays refused (#15842). *)
 let check_private error p1 p2 =
-  if Option.equal Bool.equal p1 p2 then ()
+  if Bool.equal (Option.has_some p1) (Option.has_some p2) then ()
   else error (PrivateStatusExpected p2)
 
 let check_primitive error p1 p2 = match p1, p2 with
