@@ -32,6 +32,60 @@ End M_private.
 
 Fail Module FAIL : T_private := M_private.
 
+(* A private implementation of a private signature is legal. coqc reads a
+   closed module's inductive from the environment for algebraic sealing,
+   "<:" and functor application, and the environment holds it with
+   mind_private = Some true where the signature holds Some false. *)
+
+Module Type T_private_both.
+
+  Unset Elimination Schemes.
+
+  Private Inductive Box := box (_:nat).
+
+End T_private_both.
+
+Module M_private_both.
+
+  Private Inductive Box := box (_:nat).
+
+End M_private_both.
+
+Module DONTFAIL_private : T_private_both := M_private_both.
+
+Module DONTFAIL_private2 <: T_private_both := M_private_both.
+
+Module F_private (X : T_private_both).
+
+  Definition b : X.Box := X.box 0.
+
+End F_private.
+
+Module DONTFAIL_private3 := F_private M_private_both.
+
+(* A functor parameter as the argument, also held with Some true *)
+Module DONTFAIL_private4 (Y : T_private_both) := F_private Y.
+
+(* A non-private implementation of a private signature stays refused *)
+
+Module M_not_private.
+
+  Inductive Box := box (_:nat).
+
+End M_not_private.
+
+Fail Module FAIL : T_private_both := M_not_private.
+
+(* and so does a private implementation of a non-private signature,
+   through "<:" and functor application too *)
+
+Fail Module FAIL <: T_private := M_private.
+
+Module F_not_private (X : T_private).
+End F_not_private.
+
+Fail Module FAIL := F_not_private M_private.
+
 Module Type T_primitive.
 
   Unset Elimination Schemes.
