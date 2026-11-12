@@ -11,6 +11,8 @@
 
 set -e
 
+. misc/rocqchk_forge_common.bash
+
 D=misc/rocqchk-alias-label
 
 rm -f "$D"/*/*.vo "$D"/*/*.vok "$D"/*/*.vos "$D"/*/*.glob "$D"/out.log
@@ -22,21 +24,11 @@ for dir in honest donor; do
   done
 done
 
-# chk <dir> <mode>: rocqchk on LabelAlias.Lib and LabelAlias.Client in <dir>,
-# as a grader runs it or with the default options.
-chk() {
-  case $2 in
-    grader) "$BIN"rocqchk -o -bytecode-compiler yes -R "$1" LabelAlias -norec LabelAlias.Lib LabelAlias.Client ;;
-    default) "$BIN"rocqchk -R "$1" LabelAlias LabelAlias.Lib LabelAlias.Client ;;
-  esac > "$D/out.log" 2>&1
-}
-
+# LabelAlias.Lib and LabelAlias.Client, as a grader runs rocqchk and with the
+# default options.
 for mode in grader default; do
-  if ! chk "$D/honest" $mode; then
-    echo "rocqchk ($mode) refused the honest libraries"
-    cat "$D/out.log"
-    exit 1
-  fi
+  mode_args $mode "$D/honest" LabelAlias Client
+  must_accept "$D/out.log" "rocqchk ($mode) refused the honest libraries" "${mode_argv[@]}"
 done
 
 F="$D/forged"
@@ -47,16 +39,8 @@ ocaml "$D/forge.ml" label "$D/honest/Lib.vo" "$F/Lib.vo"
 ocaml "$D/forge.ml" client "$D/donor/Client.vo" "$F/Lib.vo" LabelAlias.Lib "$F/Client.vo"
 
 for mode in grader default; do
-  if chk "$F" $mode; then
-    echo "rocqchk ($mode) accepted a forged alias that changes its label and a closed proof of False"
-    cat "$D/out.log"
-    exit 1
-  fi
-  # 9.2's rocqchk has no printer for a module typing error and reports the
-  # exception itself (see misc/rocqchk_delta_alias.sh).
-  if ! grep -Eq "Module typing error|ModuleTypingError" "$D/out.log"; then
-    echo "unexpected rocqchk ($mode) failure for a forged alias that changes its label"
-    cat "$D/out.log"
-    exit 1
-  fi
+  mode_args $mode "$F" LabelAlias Client
+  must_refuse "$D/out.log" "$typing_error" \
+    "rocqchk ($mode) accepted a forged alias that changes its label and a closed proof of False" \
+    "unexpected rocqchk ($mode) failure for a forged alias that changes its label" "${mode_argv[@]}"
 done

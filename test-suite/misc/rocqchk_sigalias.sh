@@ -5,10 +5,15 @@
 # and d declared in the type of a sealed module M, an alias of M.d to M.c
 # proves False, although M's implementation has c := true and d := false. The
 # same holds for an alias that keeps its label (M2.c to M1.c) and for an alias
-# in the type of a functor's parameter. See misc/rocqchk_delta_alias.sh for
-# forged aliases of definitions.
+# in the type of a functor's parameter. The aliases of cases sealed (M.d to
+# M.c) and functor (X.d to X.c) change label, so the label test of
+# Subtyping.check_constant_alias refuses them first; only case cross reaches
+# its refusal of an alias whose body is not a definition. See
+# misc/rocqchk_delta_alias.sh for forged aliases of definitions.
 
 set -e
+
+. misc/rocqchk_forge_common.bash
 
 D=misc/rocqchk-sigalias
 
@@ -22,21 +27,11 @@ for f in Lib Sealed Cross Functor; do
   $coqc -noinit -R "$D/donor" SigAlias "$D/donor/$f.v"
 done
 
-# chk <dir> <client> <mode>: rocqchk on SigAlias.Lib and SigAlias.<client> in
-# <dir>, as a grader runs it or with the default options.
-chk() {
-  case $3 in
-    grader) "$BIN"rocqchk -o -bytecode-compiler yes -R "$1" SigAlias -norec SigAlias.Lib "SigAlias.$2" ;;
-    default) "$BIN"rocqchk -R "$1" SigAlias SigAlias.Lib "SigAlias.$2" ;;
-  esac > "$D/out.log" 2>&1
-}
-
+# SigAlias.Lib and SigAlias.<client>, as a grader runs rocqchk and with the
+# default options.
 for mode in grader default; do
-  if ! chk "$D/honest" Client $mode; then
-    echo "rocqchk ($mode) refused the honest libraries"
-    cat "$D/out.log"
-    exit 1
-  fi
+  mode_args $mode "$D/honest" SigAlias Client
+  must_accept "$D/out.log" "rocqchk ($mode) refused the honest libraries" "${mode_argv[@]}"
 done
 
 for kind in sealed cross functor; do
@@ -53,17 +48,9 @@ for kind in sealed cross functor; do
   ocaml "$D/forge.ml" client "$D/donor/$client.vo" "$F/Lib.vo" SigAlias.Lib "$F/$client.vo"
 
   for mode in grader default; do
-    if chk "$F" $client $mode; then
-      echo "rocqchk ($mode) accepted a forged $kind alias between declared-only fields and a closed proof of False"
-      cat "$D/out.log"
-      exit 1
-    fi
-    # 9.2's rocqchk has no printer for a module typing error and reports the
-    # exception itself (see misc/rocqchk_delta_alias.sh).
-    if ! grep -Eq "Module typing error|ModuleTypingError" "$D/out.log"; then
-      echo "unexpected rocqchk ($mode) failure for a forged $kind alias"
-      cat "$D/out.log"
-      exit 1
-    fi
+    mode_args $mode "$F" SigAlias $client
+    must_refuse "$D/out.log" "$typing_error" \
+      "rocqchk ($mode) accepted a forged $kind alias between declared-only fields and a closed proof of False" \
+      "unexpected rocqchk ($mode) failure for a forged $kind alias" "${mode_argv[@]}"
   done
 done

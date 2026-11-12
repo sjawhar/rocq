@@ -10,40 +10,16 @@
 # type becomes the implementation's, the binder b capturing Rel 1, and the
 # client proves False. In case functor, the hint is in the resolver of A, and
 # F A gives lem the type (forall b, eq bool b b) -> eq bool true false that
-# the client's T asks for. A corrupted pair may be refused with any error;
-# the script prints which.
+# the client's T asks for. With the term of the hint dropped, these checks
+# compare M.d or A.d, which is true, with the bound b: rocqchk must refuse
+# each corrupted pair with a module typing error.
 
 set -e
 
+. misc/rocqchk_forge_common.bash
+
 D=misc/rocqchk-inline-hint
-
-# chk <dir> <rocqchk arguments>: rocqchk's output goes to <dir>/out.log.
-chk() {
-  local d=$1
-  shift
-  "$BIN"rocqchk "$@" > "$D/$d/out.log" 2>&1
-}
-
-accepts() {
-  local d=$1
-  shift
-  if ! chk "$d" "$@"; then
-    echo "rocqchk refused honest files ($d): rocqchk $*"
-    cat "$D/$d/out.log"
-    exit 1
-  fi
-}
-
-refuses() {
-  local d=$1
-  shift
-  if chk "$d" "$@"; then
-    echo "rocqchk accepted a forged inline hint and a closed proof of False ($d): rocqchk $*"
-    cat "$D/$d/out.log"
-    exit 1
-  fi
-  echo "refused ($d): rocqchk $*: $(grep -m1 -E 'Error|Anomaly' "$D/$d/out.log")"
-}
+forgery="a forged inline hint"
 
 for c in sealed functor; do
   C=$D/$c
@@ -71,9 +47,10 @@ for c in sealed functor; do
   for v in honest forged; do
     if [ "$v" = honest ]; then check=accepts; else check=refuses; fi
     # As a grader runs it, and with the default options.
-    $check "$c" -o -bytecode-compiler yes -R "$C/$v" InlineHint \
-      -norec InlineHint.Lib InlineHint.Client
-    $check "$c" -R "$C/$v" InlineHint InlineHint.Lib InlineHint.Client
+    for mode in grader default; do
+      mode_args $mode "$C/$v" InlineHint Client
+      $check "$c" "${mode_argv[@]}"
+    done
   done
 done
 
