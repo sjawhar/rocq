@@ -7,8 +7,8 @@ bar_1: bar = 1
 bar_1: bar = 1
 B.bar_1: B.bar = 1
 bar_1: bar = 1
-B.bar_1: B.bar = 1
 one_bar: 1 = bar
+B.bar_1: B.bar = 1
 baz_foo: baz tt = foo
 baz: unit -> t
 baz_foo: baz tt = foo
