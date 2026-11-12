@@ -10,8 +10,9 @@
 # type becomes the implementation's, the binder b capturing Rel 1, and the
 # client proves False. In case functor, the hint is in the resolver of A, and
 # F A gives lem the type (forall b, eq bool b b) -> eq bool true false that
-# the client's T asks for. A corrupted pair may be refused with any error;
-# the script prints which.
+# the client's T asks for. With the term of the hint dropped, these checks
+# compare M.d or A.d, which is true, with the bound b: rocqchk must refuse
+# each corrupted pair with a module typing error.
 
 set -e
 
@@ -34,6 +35,9 @@ accepts() {
   fi
 }
 
+# Upstream's rocqchk prints a module typing error as "Module typing error"
+# (rocq-prover/rocq#22373). 9.2's rocqchk has no printer for it and reports
+# the exception itself, "Modops.ModuleTypingError".
 refuses() {
   local d=$1
   shift
@@ -42,7 +46,11 @@ refuses() {
     cat "$D/$d/out.log"
     exit 1
   fi
-  echo "refused ($d): rocqchk $*: $(grep -m1 -E 'Error|Anomaly' "$D/$d/out.log")"
+  if ! grep -Eq "Module typing error|ModuleTypingError" "$D/$d/out.log"; then
+    echo "unexpected rocqchk failure for a forged inline hint ($d): rocqchk $*"
+    cat "$D/$d/out.log"
+    exit 1
+  fi
 }
 
 for c in sealed functor; do
