@@ -4,8 +4,16 @@
 # case, forge.ml records one in a library compiled by coqc, and a client
 # compiled against <case>/donor/Lib.v proves False from it:
 # - parameter: M2.c becomes an alias of M1.c in the type of M2, where both
-#   are declared-only, M1.c := true and M2.c := false.
-# See misc/rocqchk_delta_alias.sh for forged aliases between definitions.
+#   are declared-only, M1.c := true and M2.c := false;
+# - nested: the resolver of A, but not that of its submodule X, makes A.X.d
+#   an alias of A.Y.d, with A.Y.d := true and A.X.d := false, and the
+#   functor application F A substitutes with the former;
+# - nested-inductive: the same with A.X.I, which has no constructor, and
+#   A.Y.I, which has one;
+# - nested-missing: the same as nested with X declared before Y, so that
+#   the alias names a declaration that is not yet in the environment.
+# See misc/rocqchk_delta_alias.sh for forged aliases between definitions,
+# and coqchk/with_module_resolver.v for honest resolvers that differ.
 
 set -e
 
@@ -17,7 +25,7 @@ chk() {
 }
 
 fail=0
-for case in parameter; do
+for case in parameter nested nested-inductive nested-missing; do
   C=$D/$case
   rm -rf "$C/forged"
   rm -f "$C"/*/*.vo "$C"/*/*.vok "$C"/*/*.vos "$C"/*/*.glob "$C/out.log"

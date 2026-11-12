@@ -232,6 +232,44 @@ let lookup_module mp env =
 
 let mk_mtb sign delta = Mod_declarations.make_module_type sign delta
 
+(** A module [X] at path [mp], a field of a structure whose delta resolver
+    is [res], has a resolver of its own, [mod_delta X], and so has each module
+    nested in it. The environment registers the constants and inductives of
+    each module under that module's own resolver ([Modops.add_structure]),
+    and the alias check of [check_structure_field] sees only that one; but a
+    module alias or a functor application ([check_mexpr]) and module
+    subtyping ([Subtyping.check_subtypes]) substitute them through the whole
+    resolver of a module that contains them. [res] could thus give one of
+    them a canonical name that no check has compared it with, and make two
+    declarations convertible that are not.
+
+    coqc adds each closed module's resolver to the enclosing one, so the two
+    mostly give the same canonical names. They can still differ in an honest
+    file: in [S with Module X := M], the entries that the resolver of [S] had
+    for the names of [X] override those of [M], and a field of [M] converts
+    with the canonical name that [S] gives it. So a name that [res] resolves
+    differently from the resolver of the module that declares it is checked
+    as an alias of [res]'s canonical name, by the check every other alias
+    gets, in [env], which holds [X] and everything declared before it. A
+    functor is skipped: the names of its body are bound. *)
+let check_nested_resolver env res mp mb =
+  let rec check_body mp mb = match mod_type mb with
+    | MoreFunctor _ -> ()
+    | NoFunctor struc -> List.iter (check_field mp (mod_delta mb)) struc
+  and check_field mp own (lab, field) =
+    let kn = KerName.make mp lab in
+    let can = Mod_subst.kn_of_delta res kn in
+    let differs = not (KerName.equal can (Mod_subst.kn_of_delta own kn)) in
+    match field with
+    | SFBconst cb ->
+      if differs then Subtyping.check_constant_alias env (Constant.make kn can) cb
+    | SFBmind mib ->
+      if differs then Subtyping.check_inductive_alias env (MutInd.make kn can) mib
+    | SFBmodule mb -> check_body (MPdot (mp, lab)) mb
+    | SFBmodtype _ | SFBrules _ -> ()
+  in
+  check_body mp mb
+
 let rec check_mexpr env mse mp_mse res = match mse with
   | MEident mp ->
     let mb = lookup_module mp env in
@@ -330,7 +368,9 @@ and check_structure_field : type a. _ -> _ -> _ -> _ -> a Mod_subst.delta_resolv
   | SFBmodule msb ->
       let mp = MPdot(mp, lab) in
       let st = check_module env st mp msb in
-      Modops.add_module mp msb env, st
+      let env = Modops.add_module mp msb env in
+      let () = check_nested_resolver env res mp msb in
+      env, st
   | SFBmodtype mty ->
       let mp = MPdot (mp, lab) in
       let () = check_module_type env mp mty in
