@@ -115,9 +115,8 @@ val validator_progress : unit -> unit
 val note_cook : unit -> unit
 (** Called by the cook of an opaque body ([Mod_checking]): counts it when
     it runs outside a worker, so in the main process. With [-j] that is a
-    sealed module's constant, whose cooked body the main process needs,
-    and a check that the main process ran itself because it could not
-    fork. The count is printed by [-d checker-workers]. *)
+    check that the main process ran itself because it could not fork. The
+    count is printed by [-d checker-workers]. *)
 
 val note_table_read : bytes:int -> unit
 (** Counts one table of opaque proofs read and parsed by this process, and

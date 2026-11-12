@@ -51,10 +51,12 @@ let unsafe_flags = ref None
 let start_summary enabled =
   unsafe_flags := if enabled then Some empty_unsafe_flags else None
 
-(* An admitted library is never walked, and the environment holds only the
-   interface of its sealed modules, so the sections below cannot see an unsafe
-   flag inside one. Saying so beats printing <none>, which a reader takes for
-   "nothing unsafe here". *)
+(* An admitted library is never checked, so no flag of it is recorded, and the
+   environment holds only the interface of its sealed modules, so the flag
+   sections below cannot see an unsafe flag inside one. (The axioms section
+   can: [Mod_checking.collect_module_axioms] walks an admitted library's
+   implementations too.) Saying so beats printing <none>, which a reader takes
+   for "nothing unsafe here". *)
 let admitted = ref []
 
 let record_admitted name =
@@ -181,14 +183,8 @@ let pr_assumptions ass axs =
   else
     hv 2 (str ass ++ str ":" ++ fnl() ++ prlist_with_sep fnl str axs)
 
-let pr_axioms env opac =
-  let add c cb acc =
-    if Declareops.constant_has_body cb then acc else
-      match Cmap.find_opt c opac with
-      | None -> Cset.add c acc
-      | Some s -> Cset.union s acc in
-  let csts = fold_constants add env Cset.empty in
-  let csts = Cset.fold (fun c acc -> Constant.to_string c :: acc) csts [] in
+let pr_axioms env axioms =
+  let csts = List.map KerName.to_string axioms in
   pr_assumptions "Axioms" csts
 
 let pr_type_in_type env flags =
@@ -228,25 +224,25 @@ let pr_indices_matter env flags =
     else acc) env [] in
   pr_assumptions "Inductives relying on indices not mattering" (add_missing inds flags.indices_matter)
 
-let print_context env opac =
-  if !output_context then begin
-    let flags = current_unsafe_flags () in
-    Feedback.msg_notice
-      (hov 0
-      (fnl() ++ str"CONTEXT SUMMARY" ++ fnl() ++
-      str"===============" ++ fnl() ++ fnl() ++
-      str "* " ++ hov 0 (pr_impredicative_set env ++ fnl()) ++ fnl() ++
-      str "* " ++ hov 0 (pr_rewrite_rules env ++ fnl()) ++ fnl() ++
-      str "* " ++ hov 0 (pr_axioms env opac ++ fnl()) ++ fnl() ++
-      str "* " ++ hov 0 (pr_type_in_type env flags ++ fnl()) ++ fnl() ++
-      pr_unchecked_eliminations env flags ++
-      str "* " ++ hov 0 (pr_unguarded env flags ++ fnl()) ++ fnl() ++
-      str "* " ++ hov 0 (pr_nonpositive env flags ++ fnl()) ++ fnl() ++
-      str "* " ++ hov 0 (pr_indices_matter env flags ++ fnl()) ++
-      pr_admitted ())
-      )
-  end
+let print_context env axioms = match axioms with
+| None -> ()
+| Some axioms ->
+  let flags = current_unsafe_flags () in
+  Feedback.msg_notice
+    (hov 0
+    (fnl() ++ str"CONTEXT SUMMARY" ++ fnl() ++
+    str"===============" ++ fnl() ++ fnl() ++
+    str "* " ++ hov 0 (pr_impredicative_set env ++ fnl()) ++ fnl() ++
+    str "* " ++ hov 0 (pr_rewrite_rules env ++ fnl()) ++ fnl() ++
+    str "* " ++ hov 0 (pr_axioms env axioms ++ fnl()) ++ fnl() ++
+    str "* " ++ hov 0 (pr_type_in_type env flags ++ fnl()) ++ fnl() ++
+    pr_unchecked_eliminations env flags ++
+    str "* " ++ hov 0 (pr_unguarded env flags ++ fnl()) ++ fnl() ++
+    str "* " ++ hov 0 (pr_nonpositive env flags ++ fnl()) ++ fnl() ++
+    str "* " ++ hov 0 (pr_indices_matter env flags ++ fnl()) ++
+    pr_admitted ())
+    )
 
-let stats env opac =
-  print_context env opac;
+let stats env axioms =
+  print_context env axioms;
   print_memory_stat ()

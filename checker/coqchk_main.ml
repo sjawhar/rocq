@@ -231,7 +231,7 @@ let add_compile s =
     between coqtop and coqc. *)
 
 let compile_files senv =
-  CheckLibrary.recheck_library senv
+  CheckLibrary.recheck_library ~output_context:!Check_stat.output_context senv
     ~norec:(List.rev !norec_list)
     ~admit:(List.rev !admit_list)
     ~check:(List.rev !compile_list)
@@ -753,9 +753,14 @@ let run_compare env =
 let main () =
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
-  let senv, opac = run senv in
+  let senv, axioms = run senv in
   let env = Safe_typing.env_of_safe_env senv in
   Option.iter (print_statement_report env) !statement_report;
   run_compare env;
-  Check_stat.stats env opac;
+  let axioms =
+    if !Check_stat.output_context then
+      Some (Mod_checking.constants_of_axioms axioms)
+    else None
+  in
+  Check_stat.stats env axioms;
   exit 0
