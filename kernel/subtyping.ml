@@ -467,9 +467,13 @@ let check_constant_alias env cst cb =
   else
     let target = Constant.make1 canonical in
     let target_body = Environ.lookup_constant target env in
+    (* An honest alias is a field that [Modops.strengthen_const] turned
+       into [Def target], whatever the target's own body: a parameter, an
+       opaque constant, a primitive operator or a symbol. Strengthen the
+       target the same way, so that such an alias converts with it. *)
     let target_body =
       match target_body.const_body, cb.const_body with
-      | (Undef _ | OpaqueDef _), Def _ ->
+      | (Undef _ | OpaqueDef _ | Primitive _ | Symbol _), Def _ ->
         let instance =
           make_abstract_instance (constant_polymorphic_context target_body)
         in
