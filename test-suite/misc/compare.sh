@@ -878,6 +878,8 @@ case_norec() {
 # the fix for each, so none of them may reach a passing verdict. Three
 # outcomes count as not-pass, and the case prints which one each takes:
 # the forgery does not compile, rocqchk refuses it, or the verdict is fail.
+# The answer's Main.v proves False by "exact bottom" when the tree's
+# Forge.v declares bottom, and by "exact contradiction" otherwise.
 #
 # The trees are read-only recordings; COMPARE_FORGERIES points at them and
 # the case is skipped where they are not mounted.
@@ -891,6 +893,11 @@ case_forgeries() {
     skipped=$((skipped + $(held_of forgeries)))
     return
   fi
+  # <log> -> its first error line and the next one, joined: Rocq prints
+  # "Error:" alone and the message on the line after it.
+  first_error() {
+    grep -m1 -i -A1 error "$1" | paste -sd ' ' | cut -c1-110
+  }
   local f
   for f in "${forgery_names[@]}"; do
     local src="$COMPARE_FORGERIES/$f/plain/Lib"
@@ -905,19 +912,21 @@ case_forgeries() {
     done
     printf '%s\n' 'Require Import Forge.' 'Theorem forged : False.' 'Proof.' 'Admitted.' \
       > "$work/challenge/Main.v"
+    local proof=contradiction
+    grep -Eq '^(Definition|Lemma|Theorem) bottom ' "$src/Forge.v" && proof=bottom
     printf '%s\n' 'Require Import Forge.' 'Theorem forged : False.' \
-      'Proof. exact contradiction. Qed.' > "$work/answer/Main.v"
+      "Proof. exact $proof. Qed." > "$work/answer/Main.v"
     local order="Forge.v Main.v"
     [ -f "$src/hurkens.v" ] && order="hurkens.v Forge.v Main.v"
     local ok="" v
     for v in $order; do
       (cd "$work/challenge" && coqc -R . Top "$v") > "$work/cc" 2>&1 \
-        || { ok="the challenge does not compile: $(grep -m1 -i error "$work/cc" | cut -c1-110)"; break; }
+        || { ok="the challenge does not compile: $(first_error "$work/cc")"; break; }
     done
     if [ -z "$ok" ]; then
       for v in $order; do
         (cd "$work/answer" && coqc -R . Top "$v") > "$work/ac" 2>&1 \
-          || { ok="the answer does not compile: $(grep -m1 -i error "$work/ac" | cut -c1-110)"; break; }
+          || { ok="the answer does not compile: $(first_error "$work/ac")"; break; }
       done
     fi
     if [ -z "$ok" ]; then
@@ -940,7 +949,7 @@ case_forgeries() {
       completed "$code" "$work/log"
       keep_verdict "$work/out.json" forgeries "$f"
       if [ "$code" != "0" ]; then
-        ok="rocqchk refuses it: $(grep -m1 -i error "$work/log" | cut -c1-110)"
+        ok="rocqchk refuses it: $(first_error "$work/log")"
       elif grep -q '"verdict":"fail"' "$work/out.json"; then
         ok="the verdict is fail"
       else
