@@ -327,3 +327,60 @@ let subst_rewrite_rules subst ({ rewrules_rules } as rules) =
   in
   if rewrules_rules == body' then rules else
     { rewrules_rules = body' }
+
+let eq_rewrite_rules_body rrb1 rrb2 =
+  let eq_opt = Option.equal Int.equal in
+  let eq_quality_pattern q1 q2 = match q1, q2 with
+    | PQVar q1, PQVar q2 -> eq_opt q1 q2
+    | PQConstant c1, PQConstant c2 -> Sorts.Quality.Constants.equal c1 c2
+    | (PQVar _ | PQConstant _), _ -> false
+  in
+  let eq_mask (qs1, us1) (qs2, us2) =
+    Array.equal eq_quality_pattern qs1 qs2 && Array.equal eq_opt us1 us2
+  in
+  let eq_sort_pattern s1 s2 = match s1, s2 with
+    | PSProp, PSProp | PSSProp, PSSProp | PSSet, PSSet -> true
+    | PSType u1, PSType u2 -> eq_opt u1 u2
+    | PSQSort (q1, u1), PSQSort (q2, u2) -> eq_opt q1 q2 && eq_opt u1 u2
+    | (PSProp | PSSProp | PSSet | PSType _ | PSQSort _), _ -> false
+  in
+  let rec eq_head h1 h2 = match h1, h2 with
+    | PHRel n1, PHRel n2 -> Int.equal n1 n2
+    | PHSort s1, PHSort s2 -> eq_sort_pattern s1 s2
+    | PHSymbol (c1, u1), PHSymbol (c2, u2) ->
+      Names.Constant.CanOrd.equal c1 c2 && eq_mask u1 u2
+    | PHInd (i1, u1), PHInd (i2, u2) -> Names.Ind.CanOrd.equal i1 i2 && eq_mask u1 u2
+    | PHConstr (c1, u1), PHConstr (c2, u2) ->
+      Names.Construct.CanOrd.equal c1 c2 && eq_mask u1 u2
+    | PHInt i1, PHInt i2 -> Uint63.equal i1 i2
+    | PHFloat f1, PHFloat f2 -> Float64.equal f1 f2
+    | PHString s1, PHString s2 -> Pstring.equal s1 s2
+    | PHLambda (args1, he1), PHLambda (args2, he2) ->
+      Array.equal eq_arg args1 args2 && eq_head_elim he1 he2
+    | PHProd (args1, a1), PHProd (args2, a2) ->
+      Array.equal eq_arg args1 args2 && eq_arg a1 a2
+    | (PHRel _ | PHSort _ | PHSymbol _ | PHInd _ | PHConstr _ | PHInt _
+      | PHFloat _ | PHString _ | PHLambda _ | PHProd _), _ -> false
+  and eq_elim e1 e2 = match e1, e2 with
+    | PEApp args1, PEApp args2 -> Array.equal eq_arg args1 args2
+    | PECase (i1, p1, br1), PECase (i2, p2, br2) ->
+      Names.Ind.CanOrd.equal i1 i2 && eq_arg p1 p2 && Array.equal eq_arg br1 br2
+    | PEProj p1, PEProj p2 -> Names.Projection.Repr.CanOrd.equal p1 p2
+    | (PEApp _ | PECase _ | PEProj _), _ -> false
+  and eq_head_elim (h1, elims1) (h2, elims2) =
+    eq_head h1 h2 && List.equal eq_elim elims1 elims2
+  and eq_arg a1 a2 = match a1, a2 with
+    | EHole n1, EHole n2 -> Int.equal n1 n2
+    | EHoleIgnored, EHoleIgnored -> true
+    | ERigid he1, ERigid he2 -> eq_head_elim he1 he2
+    | (EHole _ | EHoleIgnored | ERigid _), _ -> false
+  in
+  let eq_rule (c1, r1) (c2, r2) =
+    let (n1, nq1, nu1) = r1.nvars and (n2, nq2, nu2) = r2.nvars in
+    let (u1, elims1) = r1.lhs_pat and (u2, elims2) = r2.lhs_pat in
+    Names.Constant.CanOrd.equal c1 c2
+    && Int.equal n1 n2 && Int.equal nq1 nq2 && Int.equal nu1 nu2
+    && eq_mask u1 u2 && List.equal eq_elim elims1 elims2
+    && Constr.equal r1.rhs r2.rhs
+  in
+  List.equal eq_rule rrb1.rewrules_rules rrb2.rewrules_rules
