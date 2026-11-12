@@ -11,7 +11,10 @@
 # - nested-inductive: the same with A.X.I, which has no constructor, and
 #   A.Y.I, which has one;
 # - nested-missing: the same as nested with X declared before Y, so that
-#   the alias names a declaration that is not yet in the environment.
+#   the alias names a declaration that is not yet in the environment;
+# - label: in the body of a functor F (P : S), F.k := P.X.d becomes an alias
+#   of P.X.d, which the functor application F A turns into an alias of
+#   A.X.k := true instead of A.X.d := false.
 # See misc/rocqchk_delta_alias.sh for forged aliases between definitions,
 # and coqchk/with_module_resolver.v for honest resolvers that differ.
 
@@ -25,7 +28,7 @@ chk() {
 }
 
 fail=0
-for case in parameter nested nested-inductive nested-missing; do
+for case in parameter nested nested-inductive nested-missing label; do
   C=$D/$case
   rm -rf "$C/forged"
   rm -f "$C"/*/*.vo "$C"/*/*.vok "$C"/*/*.vos "$C"/*/*.glob "$C/out.log"

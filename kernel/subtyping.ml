@@ -343,6 +343,17 @@ let check_constant (cst, ustate) trace env l info1 cb2 subst1 subst2 =
                Anyway [check_conv] will handle that afterwards. *)
             check_conv (NotConvertibleBodyField (Some (env, c1, c2))) cst poly CONV env c1 c2))
 
+(* The invariant of [Mod_subst]: a resolver relates only names with the
+   same label. Substitution relies on it: [Mod_subst.subst_con0] and
+   [subst_mind] rebuild a canonical name from the user name's label, so a
+   functor application would turn an alias that changes label into a name
+   the functor never referred to. The alias checks below compare
+   declarations, not names, so they test the labels first. Honest files
+   pass: coqc creates every alias with [Mod_subst.add_kn_delta_resolver],
+   which asserts the invariant, and substitutions keep it. *)
+let same_label user canonical =
+  Id.equal (KerName.label user) (KerName.label canonical)
+
 let check_constant_alias env cst cb =
   let user = Constant.user cst in
   let canonical = Constant.canonical cst in
@@ -351,6 +362,7 @@ let check_constant_alias env cst cb =
     let refuse () =
       error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
     in
+    let () = if not (same_label user canonical) then refuse () in
     (* Every field that coqc records an alias for has a [Def] body:
        strengthening ([Modops.strengthen_const]) turns any other body into a
        definition, and the copies made without strengthening (a module alias
@@ -393,11 +405,14 @@ let check_inductive_alias env mind mib =
   else
     let target = MutInd.make1 canonical in
     let () =
-      if not (Environ.mem_mind target env) then
+      if not (same_label user canonical && Environ.mem_mind target env) then
         error_signature_mismatch [] (KerName.label user)
           (NotEqualInductiveAliases (mind, target))
     in
     let target_body = Environ.lookup_mind target env in
+    (* The labels are equal, so [check_inductive] compares [user], which is
+       [KerName.make user_mp target_label], and [add_kn_delta_resolver]
+       below cannot fail its assertion. *)
     let target_mp, target_label = KerName.repr canonical in
     let user_mp = KerName.modpath user in
     let target_resolver = empty_delta_resolver target_mp in
