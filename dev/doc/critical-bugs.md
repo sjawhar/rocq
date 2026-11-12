@@ -76,6 +76,7 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [tactic code could mutate a global cache of values for section variables](#tactic-code-could-mutate-a-global-cache-of-values-for-section-variables)
       - [incorrect handling of universe polymorphism](#incorrect-handling-of-universe-polymorphism)
       - [Forgotten universe substitution with Register Inline on universe polymorphic definition](#forgotten-universe-substitution-with-register-inline-on-universe-polymorphic-definition)
+      - [kernel reduction drops the lift on a primitive array](#kernel-reduction-drops-the-lift-on-a-primitive-array)
     - [Side-effects](#side-effects)
       - [polymorphic side-effects inside monomorphic definitions incorrectly handled as not inlined](#polymorphic-side-effects-inside-monomorphic-definitions-incorrectly-handled-as-not-inlined)
       - [Section variables used in side effects not checked by Proof using](#section-variables-used-in-side-effects-not-checked-by-proof-using)
@@ -313,6 +314,32 @@ and lack of checking of relevance marks on constants in coqchk
 - exploit / GH issue: [#21701](https://github.com/rocq-prover/rocq/issues/21701)
 - risk: unknown (no development in CI was affected)
 
+#### incorrect variance inference with letin in constructor type
+- component: inductive declarations, universe polymorphism
+- introduced: V8.6 (cumulative inductives)
+- impacted released versions: V8.6 to V9.2.0
+- impacted rocqchk versions: same
+- fixed in: V9.2.1, V9.3
+- found by: OpenAI
+- issue: #22385
+- risk: the bug comes from being able to bind a constructor type letin in a match,
+  which means those letins cannot be irrelevant for conversion.
+  Differences in reduction may mean the bug is harder to exploit before V8.19, see issue.
+
+#### incorrect reification in lazy machine of matches with universe polymorphism
+- component: "lazy" reduction
+- introduced: V8.17
+- impacted released versions: V8.17 to V9.2.0
+- impacted rocqchk versions: same
+- fixed in: V9.2.1, V9.3
+- found by: OpenAI
+- issue: #22380
+- risk: reification of the lazy machine is only trusted
+  when it is used to check an application or match/proj
+  (typically in `f x`, the inferred type of `f` is reduced to expose a `forall`).
+  The bug occurs when the reduced type has a stuck match on a universe polymorphic inductive.
+  The exploit in the issue uses Definitional UIP but the code is incorrect even without that flag.
+
 ### Module system
 
 #### missing universe constraints in typing "with" clause of a module type
@@ -435,6 +462,26 @@ and lack of checking of relevance marks on constants in coqchk
 - issue: #22387
 - risk: need to use module subtyping to confuse inductives with different letins,
   and use those letins in a match.
+
+### Including functor application generates garbage delta-resolvers
+
+- component: module inclusion and functors
+- introduced: unclear, only exploitable since #21905
+- impacted released versions: V9.3+rc1
+- fixed in: 9.2.1, 9.3.0
+- found by: Pierre-Marie Pédrot flanked by Claude Opus 5
+- issue: #22409
+- risk: any development relying on inclusion of functor applications
+
+#### Subtyping of inductive types ignores uniform parameters making it inconsistent with propext
+
+- component: module subtyping and nested inductive types
+- introduced: the underlying bug has always been there but only exploitable since 9.2 (#21632)
+- impacted released versions: until V9.3.1
+- fixed in: 9.3.1
+- found by: Pierre-Marie Pédrot flanked by Claude Opus 5
+- issue: #22510
+- risk: not a full proof of False, but dangerous when using propext
 
 ### Universes
 
@@ -578,6 +625,17 @@ fix.
 - risk: needs a sort polymorphic inductive declared in a section with
   a section polymorphic sort and sort polymorphism in the inductive command (cf bug file)
 
+#### variance inference ignores stack of stuck irrelevant to relevant matches
+- component: inductive declarations, universe polymorphism
+- introduced: 8.13
+- impacted released versions: V8.13 to V9.2.0
+- impacted rocqchk versions: same
+- fixed in: V9.2.1, V9.3 ([#22377](https://github.com/rocq-prover/rocq/pull/22377))
+- found by: OpenAI
+- issue: [#22376](https://github.com/rocq-prover/rocq/issues/22376)
+- risk: needs a cumulative inductive in which a match on an empty SProp
+  inductive or inductive using Definitional UIP appears
+
 #### Missing universe substitution in primitive array instance in lazy
 
 - component: lazy, primitive arrays
@@ -601,6 +659,18 @@ fix.
 - risk: low (needs to use universe substitution in letin from the
   inductive indices to incorrectly convert match return clauses and
   somehow derive inconsistency from there)
+
+#### missing universe substitution when converting matches with letin in constructor type
+- component: conversion
+- introduced: V8.17
+- impacted released versions: V8.17 to V9.2.0
+- impacted rocqchk versions: same
+- fixed in: V9.2.1, V9.3 ([#22393](https://github.com/rocq-prover/rocq/pull/22393))
+- found by: OpenAI
+- issue: [#22391](https://github.com/rocq-prover/rocq/issues/22391)
+- risk: needs to convert stuck matches of a universe polymorphic inductive
+  with a letin in the constructor type. The bug only appears if a polymorphic
+  universe is used in the letin's body, and the match uses the letin.
 
 ### Primitive projections
 
@@ -892,6 +962,20 @@ For instance `α` and `__U03b1_` were the same in the native compiler.
 - additional note: does not seem to be exploitable before 8.8 (until 8.6 Register
   Inline fails with anomaly on universe polymorphic constants, and before
   8.8 Register Inline only affects native which fails in ocamlopt)
+
+#### kernel reduction drops the lift on a primitive array
+
+- component: lazy reduction, primitive arrays
+- introduced: V8.13 (introduction of primitive arrays)
+- impacted released versions: V8.13 to V9.3.0
+- impacted coqchk versions: same
+- fixed in: V9.2.1, V9.3.1, V9.4
+- found by: Jan-Oliver Kaiser
+- exploit: test-suite/bugs/bug_22772.v
+- GH issue number: rocq-prover/rocq#22772
+- risk: when reducing a primitive array under binders, the lift on the
+  array was eagerly dropped, producing wrong normal forms and letting the
+  kernel accept ill-typed terms
 
 ### Side-effects
 
