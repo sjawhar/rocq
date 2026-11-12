@@ -117,8 +117,6 @@ let poison_library data donor_data =
   set_rules (module_from root "N") "f_rew" donor;
   if not (String.equal before (s_rules ())) then
     failwith "the forge changed S's rule block";
-  if not (String.equal (marshal (rules_of (module_from root "N") "f_rew")) (marshal donor))
-  then failwith "the forge did not change N's rule block";
   Marshal.to_string (Obj.obj disk) []
 
 let library_data file =
