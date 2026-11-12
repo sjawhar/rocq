@@ -58,6 +58,16 @@ val subst_mind_body : substitution -> mutual_inductive_body -> mutual_inductive_
 
 val subst_rewrite_rules : substitution -> rewrite_rules_body -> rewrite_rules_body
 
+(** [eq_rewrite_rules_body b1 b2] holds when the two blocks have the same
+    rules in the same order: for each rule, the same symbol, [nvars],
+    instance mask, eliminations and right-hand side. Names are compared by
+    their canonical part and terms by [Constr.equal], as the kernel compares
+    terms. Module subtyping accepts a rewrite-rule block of a signature only
+    when the implementation has an equal block: the signature then states
+    exactly the rules the implementation already has, which were checked
+    with the implementation, so no new rule enters the environment. *)
+val eq_rewrite_rules_body : rewrite_rules_body -> rewrite_rules_body -> bool
+
 val mind_ntypes : mutual_inductive_body -> int
 
 val inductive_polymorphic_context : mutual_inductive_body -> AbstractContext.t

@@ -35,7 +35,7 @@ type namedobject =
   | Constant of constant_body
   | IndType of inductive * mutual_inductive_body
   | IndConstr of constructor * mutual_inductive_body
-  | Rules
+  | Rules of rewrite_rules_body
 
 type namedmodule =
   | Module of module_body
@@ -196,7 +196,7 @@ let make_labmap mp list =
   let add_one (l,e) map =
    match e with
     | SFBconst cb -> { map with objs = Id.Map.add l (Constant cb) map.objs }
-    | SFBrules _ -> { map with objs = Id.Map.add l Rules map.objs }
+    | SFBrules rrb -> { map with objs = Id.Map.add l (Rules rrb) map.objs }
     | SFBmind mib -> { map with objs = add_mib_nameobjects mp l mib map.objs }
     | SFBmodule mb -> { map with mods = Id.Map.add l (Module mb) map.mods }
     | SFBmodtype mtb -> { map with mods = Id.Map.add l (Modtype mtb) map.mods }
@@ -402,7 +402,7 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
     check_conv err cst poly CUMUL env t1 t2
   in
   match info1 with
-    | IndType _ | IndConstr _ | Rules -> error DefinitionFieldExpected
+    | IndType _ | IndConstr _ | Rules _ -> error DefinitionFieldExpected
     | Constant cb1_0 ->
       let cb2_0 = cb2 in
       let () = assert (List.is_empty cb1_0.const_hyps && List.is_empty cb2_0.const_hyps) in
@@ -458,6 +458,18 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
       cst'
       end
 
+(* A rewrite-rule block of the signature is accepted only when the
+   implementation has a block with the same label that is equal to it once
+   both sides are substituted, see [Declareops.eq_rewrite_rules_body]. *)
+let check_rewrite_rules trace l info1 rrb2 subst1 subst2 =
+  match info1 with
+  | Some (Rules rrb1)
+    when Declareops.eq_rewrite_rules_body
+        (Declareops.subst_rewrite_rules subst1 rrb1)
+        (Declareops.subst_rewrite_rules subst2 rrb2) -> ()
+  | Some (Constant _ | IndType _ | IndConstr _ | Rules _) | None ->
+    error_signature_mismatch trace l NoRewriteRulesSubtyping
+
 let rec check_modules state trace env mp1 msb1 mp2 msb2 subst1 subst2 =
   let mty1 = module_type_of_module msb1 in
   let mty2 = module_type_of_module msb2 in
@@ -474,8 +486,10 @@ and check_signatures (cst, ustate) trace env mp1 sig1 dir mp2 sig2 subst1 subst2
         | SFBmind mib2 ->
             check_inductive (cst, ustate) trace env mp1 l (get_obj env mp1 view l)
               mp2 mib2 subst1 subst2 reso1 reso2
-        | SFBrules _ ->
-            error_signature_mismatch trace l NoRewriteRulesSubtyping
+        | SFBrules rrb2 ->
+            let info1 = Id.Map.find_opt l (Lazy.force view.sv_map).objs in
+            let () = check_rewrite_rules trace l info1 rrb2 subst1 subst2 in
+            cst
         | SFBmodule msb2 ->
             let mp1' = MPdot (mp1, l) in
             let mp2' = MPdot (mp2, l) in
