@@ -26,7 +26,9 @@ open Environ
 val check_subtypes : ?direct:bool -> ('a, Conversion.graph_inconsistency) Conversion.universe_state -> env -> ModPath.t -> ModPath.t -> module_type_body -> 'a
 
 (** Check that a declaration whose user and canonical names differ is a valid
-    alias of the canonical declaration already present in the environment. *)
+    alias of the canonical declaration already present in the environment.
+    A constant alias must be a definition: coqc writes an alias only for a
+    field it strengthened to [Def]. *)
 val check_constant_alias : env -> Constant.t -> Declarations.constant_body -> unit
 val check_inductive_alias : env -> MutInd.t -> Declarations.mutual_inductive_body -> unit
 
