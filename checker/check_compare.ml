@@ -558,21 +558,32 @@ let read_config file =
      rests on does not tolerate the same condition in the agent's own
      declaration.
 
-     Without an object, [indices-not-mattering] tolerates the kind wherever
-     it appears: every inductive of an image built without [-indices-matter]
-     may carry it, and the route this comparator replaces always allows it.
-     [uip] is allowed by the route this comparator replaces when the task
-     enables [allow_uip]; this comparator accepts a kind-only [uip] entry
-     when its config requests one. [answer-universe-constraints] is also
-     kind-only, but has a narrower meaning: it skips only the
-     answer-to-challenge universe comparison. It names no declaration, so an
-     object would not make the requested relaxation more precise.
+     [assumed-positive], [unsafe-fixpoint] and [type-in-type] are refused
+     with an object or without ([never_tolerated]): each is how a proof of
+     False is written, and the route this comparator replaces denies it
+     whatever the object (grading-tools [_axiom_kinds.py],
+     [_ALWAYS_ALLOWED_KINDS]). The check comes before the object is read,
+     so both forms reach it.
 
-     The rest -- [assumed-positive], [unsafe-fixpoint], [type-in-type],
-     [unchecked-eliminations] -- are how a proof of False is written, and
-     the replaced route denies them by name or vouches for one object at a
-     time, so a kind-only entry for them is refused here rather than left to
-     a config to get right. *)
+     [unchecked-eliminations] is how a proof of False is written too, but
+     the replaced route vouches for one name at a time, so it is tolerated
+     on a named object alone, and a kind-only entry for it is refused.
+
+     [indices-not-mattering] and [uip] take both forms. Without an object,
+     [indices-not-mattering] tolerates the kind wherever it appears: every
+     inductive of an image built without [-indices-matter] may carry it, and
+     the replaced route always allows it. The config has no [allow_uip]
+     input, so a kind-only [uip] entry is that switch: writing it is the
+     task saying definitional UIP is allowed wherever its proof reaches. An
+     entry with an object allows it on that object alone, when the object is
+     the task's declaration, and leaving both out is the task saying it is
+     not allowed.
+
+     [answer-universe-constraints] is kind-only, and has a narrower meaning:
+     it skips only the answer-to-challenge universe comparison. It names no
+     declaration, so an object would not make the requested relaxation more
+     precise, and an entry with one is refused. *)
+  let never_tolerated = ["assumed-positive"; "unsafe-fixpoint"; "type-in-type"] in
   let kind_only_allowed =
     ["indices-not-mattering"; "uip"; answer_universe_constraints]
   in
@@ -582,21 +593,25 @@ let read_config file =
       List.map (fun e ->
           let e = as_obj "a tolerated flag" e in
           fields "a tolerated flag" ["kind"; "object"] e;
-          match get e "kind", get e "object" with
-          | Some k, Some o ->
-            let k = as_string "a tolerated flag's kind" k in
+          let k = match get e "kind" with
+            | None -> cfg_error "a tolerated flag needs a kind"
+            | Some k -> as_string "a tolerated flag's kind" k
+          in
+          if List.exists (String.equal k) never_tolerated then
+            cfg_error ("the tolerated flag " ^ k ^ " is refused with an object or without: " ^
+                       "the route this comparator replaces denies it whatever the object");
+          match get e "object" with
+          | Some o ->
             if String.equal k answer_universe_constraints then
               cfg_error ("the tolerated flag " ^ answer_universe_constraints ^
                          " does not name an object");
             k, Some (as_string "a tolerated flag's object" o)
-          | Some k, None ->
-            let k = as_string "a tolerated flag's kind" k in
+          | None ->
             if not (List.exists (String.equal k) kind_only_allowed) then
               cfg_error ("the tolerated flag " ^ k ^ " needs an object: only " ^
                          "indices-not-mattering and uip tolerate every object; " ^
                          answer_universe_constraints ^ " is a global check");
-            k, None
-          | None, _ -> cfg_error "a tolerated flag needs a kind")
+            k, None)
         (as_list "tolerated_flags" v)
   in
   let rewrite_rules = match get top "rewrite_rules" with

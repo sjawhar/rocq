@@ -80,12 +80,16 @@ val read_config : string -> config
     alone, matched by the name it prints AND, by the rule for permitted
     axioms, only when the flagged object is the task's declaration of that
     name, so a relaxed condition the standard library rests on does not
-    tolerate the same condition in the agent's own declaration. Without an
-    object, [indices-not-mattering] applies wherever it appears: every
-    inductive of an image built without [-indices-matter] may carry it, and
-    the replaced route always allows it. [uip] is allowed by that route when
-    the task enables [allow_uip]; this comparator accepts a kind-only [uip]
-    entry when its config requests one.
+    tolerate the same condition in the agent's own declaration.
+    [indices-not-mattering] and [uip] take both forms. Without an object,
+    [indices-not-mattering] applies wherever it appears: every inductive of
+    an image built without [-indices-matter] may carry it, and the replaced
+    route always allows it. The config has no [allow_uip] input, so a
+    kind-only [uip] entry is that switch: writing it is the task saying
+    definitional UIP is allowed wherever its proof reaches. A [uip] entry
+    with an object allows it on that object alone, when the object is the
+    task's declaration, and leaving both out is the task saying it is not
+    allowed.
 
     [rewrite_rules] (default [false]) is whether the answer may declare a
     rewrite rule. Without it, every theorem fails when a library the answer
@@ -109,10 +113,14 @@ val read_config : string -> config
     summarizes the first failing constraints and their remaining count. It is
     not recorded when the direction already passes.
 
-    Every other kind without an object is an error:
-    [assumed-positive], [unsafe-fixpoint], [type-in-type] and
-    [unchecked-eliminations] are how a proof of False is written, and the
-    replaced route denies them by name or vouches for one object at a time.
+    [assumed-positive], [unsafe-fixpoint] and [type-in-type] are an error
+    with an object or without: each is how a proof of False is written, and
+    the replaced route denies it whatever the object (grading-tools
+    [_axiom_kinds.py], [_ALWAYS_ALLOWED_KINDS]). [unchecked-eliminations]
+    without an object is an error: it is how a proof of False is written
+    too, and the replaced route vouches for one name at a time, so it is
+    tolerated on a named object alone. Any other kind without an object is
+    an error as well.
     @raise CErrors.UserError on any of these errors. *)
 
 val prechecked_libraries : config -> string list
