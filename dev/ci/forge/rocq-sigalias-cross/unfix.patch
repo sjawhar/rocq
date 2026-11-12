@@ -1,0 +1,1513 @@
+diff --git a/checker/mod_checking.ml b/checker/mod_checking.ml
+index ab8ff05..97bcbae 100644
+--- a/checker/mod_checking.ml
++++ b/checker/mod_checking.ml
+@@ -390,9 +390,7 @@ and check_structure_field env opac mp lab res opacify = function
+       let kn = KerName.make mp lab in
+       let kn = Mod_subst.constant_of_delta_kn res kn in
+       let () = Check_stat.record_constant kn cb in
+-      let env', opac = check_constant_declaration env opac kn cb (Cset.mem kn opacify) in
+-      let () = Subtyping.check_constant_alias env kn cb in
+-      env', opac
++      check_constant_declaration env opac kn cb (Cset.mem kn opacify)
+   | SFBmind mib ->
+       let kn = KerName.make mp lab in
+       let kn = Mod_subst.mind_of_delta_kn res kn in
+@@ -400,9 +398,7 @@ and check_structure_field env opac mp lab res opacify = function
+         let indices_matter = (Environ.typing_flags env).indices_matter in
+         Check_stat.record_inductive ~indices_matter kn mib
+       in
+-      let env' = CheckInductive.check_inductive env kn mib in
+-      let () = Subtyping.check_inductive_alias env kn mib in
+-      env', opac
++      CheckInductive.check_inductive env kn mib, opac
+   | SFBmodule msb ->
+       let mp = MPdot(mp, lab) in
+       let opac = check_module env opac mp msb opacify in
+diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
+index b28e32f..7ac460a 100644
+--- a/kernel/safe_typing.ml
++++ b/kernel/safe_typing.ml
+@@ -1634,12 +1634,133 @@ let start_library dir senv =
+     opaquetab = Opaqueproof.empty_opaquetab;
+   }
+ 
++(* Forge rows dev/ci/forge/rocq-22456-*: this code exists only in the
++   reverted build, which writes the forged .vo. In a library with a module
++   Forge_donor, each field of module B that Forge_donor also declares gets
++   Forge_donor's declaration, renamed into B, while B's resolver still
++   aliases that field to A's. This is the .vo that upstream's
++   test-suite/misc/rocqchk-delta-alias/forge.ml makes from a compiled file,
++   taking the field from another compiled copy whose B declares it. *)
++let forge_delta_alias mp struc =
++  let fields mb = match Mod_declarations.mod_type mb with
++    | NoFunctor s -> s
++    | MoreFunctor _ -> assert false
++  in
++  let donor_label = Id.of_string "Forge_donor" and b_label = Id.of_string "B" in
++  match List.assoc_f_opt Id.equal donor_label struc with
++  | Some (SFBmodule donor) ->
++    let donor = fields donor in
++    let rename =
++      let b_mp = MPdot (mp, b_label) in
++      Mod_subst.map_mp (MPdot (mp, donor_label)) b_mp (Mod_subst.empty_delta_resolver b_mp)
++    in
++    let forge (l, field) = match field, List.assoc_f_opt Id.equal l donor with
++      | SFBconst _, Some (SFBconst cb) -> (l, SFBconst (Declareops.subst_const_body rename cb))
++      | SFBmind _, Some (SFBmind mib) -> (l, SFBmind (Declareops.subst_mind_body rename mib))
++      | _ -> (l, field)
++    in
++    let forge_b (l, field) = match field with
++      | SFBmodule mb when Id.equal l b_label ->
++        let sign = NoFunctor (List.map forge (fields mb)) in
++        (l, SFBmodule (Mod_declarations.set_signature sign mb))
++      | _ -> (l, field)
++    in
++    List.map forge_b struc
++  | _ -> struc
++
++(* Forge rows dev/ci/forge/rocq-sigalias-*: this code exists only in the
++   reverted build too. The library holds the variant that its client part was
++   compiled against, and a module Forge_sealed, Forge_cross or Forge_functor
++   with the honest declarations. The forger puts the honest module back and
++   records, in a signature whose fields are declared-only, that one field is
++   an alias of another of the same type, renaming each mention of the field
++   that the alias makes reachable: the .vo that BET-885's sigalias forge.ml
++   writes from a library and its client compiled against the variant. *)
++let forge_sigalias mp struc =
++  let open Mod_declarations in
++  let id = Id.of_string in
++  let fields sign = match sign with
++    | NoFunctor s -> s
++    | MoreFunctor _ -> assert false
++  in
++  let field l s = List.assoc_f_opt Id.equal (id l) s in
++  let set l b s = List.map (fun ((l', _) as fb) -> if Id.equal l' (id l) then (l', b) else fb) s in
++  (* The field [name] of the module [marker], renamed to [to_]. *)
++  let honest marker name to_ = match field marker struc with
++    | Some (SFBmodule m) ->
++      let from = MPdot (MPdot (mp, id marker), id name) in
++      let subst = Mod_subst.map_mp from to_ (Mod_subst.empty_delta_resolver to_) in
++      (match field name (fields (mod_type m)) with
++       | Some (SFBmodule b) -> SFBmodule (subst_module subst_dom_codom subst from b)
++       | Some (SFBmodtype b) -> SFBmodtype (subst_modtype subst_dom_codom subst from b)
++       | _ -> assert false)
++    | _ -> assert false
++  in
++  (* Each mention of the constant [a] names [a] with canonical name [b]. *)
++  let alias_names a b =
++    let cst c = if KerName.equal (Constant.user c) a then Constant.make a b else c in
++    let rec constr c = match Constr.kind c with
++      | Const (k, u) -> let k' = cst k in if k' == k then c else Constr.mkConstU (k', u)
++      | _ -> Constr.map constr c
++    in
++    let const cb = { cb with
++      const_type = constr cb.const_type;
++      const_body = (match cb.const_body with Def c -> Def (constr c) | b -> b);
++      const_body_code =
++        Option.map (Vmemitcodes.map_body_code (fun i -> i) cst) cb.const_body_code }
++    in
++    { nmap_const = const; nmap_mind = (fun m -> m); nmap_rules = (fun r -> r);
++      nmap_constr = constr; nmap_delta = (fun d -> d); nmap_retro = (fun r -> r) }
++  in
++  (* The signature of [b], at [p], with its field [a] an alias of [target].
++     [add_kn_delta_resolver] asserts that an alias keeps its label, so the
++     entry is added as [a] to itself and then pointed at [target]. *)
++  let alias p a target b =
++    let a = KerName.make p (id a) in
++    let sign = NoFunctor (map_structure (alias_names a target) (fields (mod_type b))) in
++    let delta =
++      Mod_subst.map_kn_delta_resolver (fun k -> if KerName.equal k a then target else k)
++        (Mod_subst.add_kn_delta_resolver a a (mod_delta b))
++    in
++    set_delta delta (set_signature sign b)
++  in
++  let at l = MPdot (mp, id l) in
++  if Option.has_some (field "Forge_sealed" struc) then
++    match honest "Forge_sealed" "M" (at "M") with
++    | SFBmodule m ->
++      set "M" (SFBmodule (alias (at "M") "d" (KerName.make (at "M") (id "c")) m)) struc
++    | _ -> assert false
++  else if Option.has_some (field "Forge_cross" struc) then
++    match honest "Forge_cross" "M2" (at "M2") with
++    | SFBmodule m ->
++      set "M2" (SFBmodule (alias (at "M2") "c" (KerName.make (at "M1") (id "c")) m)) struc
++    | _ -> assert false
++  else if Option.has_some (field "Forge_functor" struc) then
++    let struc = set "M" (honest "Forge_functor" "M" (at "M")) struc in
++    match field "F" struc with
++    | Some (SFBmodule f) ->
++      (match mod_type f with
++       | MoreFunctor (x, _, NoFunctor body) ->
++         let xp = MPbound x in
++         let t = match honest "Forge_functor" "T" xp with SFBmodtype t -> t | _ -> assert false in
++         let target = KerName.make xp (id "c") in
++         let t = alias xp "d" target t in
++         let body = map_structure (alias_names (KerName.make xp (id "d")) target) body in
++         set "F" (SFBmodule (set_signature (MoreFunctor (x, t, NoFunctor body)) f)) struc
++       | _ -> assert false)
++    | _ -> assert false
++  else struc
++
+ let export ~output_native_objects senv dir =
+   let () = check_current_library dir senv in
+   let mp = senv.modpath in
+   (* With -merge-inductives, undo every merge this process made, so that the
+      .vo carries only names its reader can justify for itself. *)
+-  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
++  let str =
++    Indmerge.unmerge_exported (List.rev senv.revstruct)
++    |> forge_delta_alias mp |> forge_sigalias mp
++  in
++  let str = NoFunctor str in
+   let mb =
+     Mod_declarations.make_module_body str
+       (Indmerge.unmerge_delta senv.modresolver) senv.local_retroknowledge
+diff --git a/kernel/subtyping.ml b/kernel/subtyping.ml
+index 2dea4d2..982ba44 100644
+--- a/kernel/subtyping.ml
++++ b/kernel/subtyping.ml
+@@ -394,7 +394,7 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
+     cst
+ 
+ 
+-let check_constant ?(cache=true) (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 subst2 =
++let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 subst2 =
+   let error why = error_signature_mismatch trace l why in
+   let check_conv why cst poly pb = check_conv_error error why (cst, ustate) poly pb in
+   let check_type poly cst env t1 t2 =
+@@ -412,11 +412,9 @@ let check_constant ?(cache=true) (cst, ustate) trace env mp1 l strengthen1 info1
+       let scb1 = Declareops.subst_const_body subst1 cb1_0 in
+       let scb2 = Declareops.subst_const_body subst2 cb2_0 in
+       (* The outcome only depends on the pair of bodies when both
+-         substitutions leave them physically unchanged, see [CbPairCache].
+-         With [~cache:false] the cache is neither read nor filled. *)
++         substitutions leave them physically unchanged, see [CbPairCache]. *)
+       let context_free = scb1 == cb1_0 && scb2 == cb2_0 in
+-      let use_cache = cache && context_free in
+-      if use_cache && cache_mem l cb1_0 cb2_0 then cst
++      if context_free && cache_mem l cb1_0 cb2_0 then cst
+       else begin
+       let cb1 = match strengthen1 with
+         | Some reso -> Modops.strengthen_const mp1 l scb1 reso
+@@ -455,77 +453,11 @@ let check_constant ?(cache=true) (cst, ustate) trace env mp1 l strengthen1 info1
+       (* Only cache checks that produced no new universe constraints: they
+          are then pure and stay valid in any later state of this process. *)
+       let () =
+-        if use_cache && cst' == cst then cache_add l cb1_0 cb2_0
++        if context_free && cst' == cst then cache_add l cb1_0 cb2_0
+       in
+       cst'
+       end
+ 
+-let check_constant_alias env cst cb =
+-  let user = Constant.user cst in
+-  let canonical = Constant.canonical cst in
+-  if KerName.equal user canonical then ()
+-  else
+-    (* coqc writes an alias only for a field that it strengthened, whose
+-       body is then [Def]. Any other alias would be compared below as a
+-       signature parameter, on its type alone, and in the type of a sealed
+-       module nothing else compares a constant's canonical name with the
+-       implementation: the implementation could give the two names
+-       different values. *)
+-    let () = match cb.const_body with
+-      | Def _ -> ()
+-      | Undef _ | OpaqueDef _ | Primitive _ | Symbol _ ->
+-        error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+-    in
+-    let target = Constant.make1 canonical in
+-    let target_body = Environ.lookup_constant target env in
+-    (* An honest alias is a field that [Modops.strengthen_const] turned
+-       into [Def target], whatever the target's own body: a parameter, an
+-       opaque constant, a primitive operator or a symbol. Strengthen the
+-       target the same way, so that such an alias converts with it. *)
+-    let target_body =
+-      match target_body.const_body, cb.const_body with
+-      | (Undef _ | OpaqueDef _ | Primitive _ | Symbol _), Def _ ->
+-        let instance =
+-          make_abstract_instance (constant_polymorphic_context target_body)
+-        in
+-        { target_body with const_body = Def (mkConstU (target, instance)) }
+-      | _ -> target_body
+-    in
+-    let state = Environ.universes env, Conversion.checked_universes in
+-    (* The cache of [check_constant] is not used here. Its verdicts assume
+-       that canonical names are trustworthy, which is what this check
+-       establishes, and an environment that only grows, which rocqchk does
+-       not have: it checks a module's type and then its implementation
+-       under the same names. A verdict recorded in one of these
+-       environments would skip this check in the other. *)
+-    let _ =
+-      check_constant ~cache:false state [] env (KerName.modpath canonical)
+-        (KerName.label user) None (Constant target_body) cb
+-        empty_subst empty_subst
+-    in
+-    ()
+-
+-let check_inductive_alias env mind mib =
+-  let user = MutInd.user mind in
+-  let canonical = MutInd.canonical mind in
+-  if KerName.equal user canonical then ()
+-  else
+-    let target = MutInd.make1 canonical in
+-    let target_body = Environ.lookup_mind target env in
+-    let target_mp, target_label = KerName.repr canonical in
+-    let user_mp = KerName.modpath user in
+-    let target_resolver = empty_delta_resolver target_mp in
+-    let user_resolver =
+-      add_kn_delta_resolver user canonical (empty_delta_resolver user_mp)
+-    in
+-    let state = Environ.universes env, Conversion.checked_universes in
+-    let _ =
+-      check_inductive state [] env target_mp target_label
+-        (IndType ((target, 0), target_body)) user_mp mib empty_subst empty_subst
+-        target_resolver user_resolver
+-    in
+-    ()
+-
+ let rec check_modules state trace env mp1 msb1 mp2 msb2 subst1 subst2 =
+   let mty1 = module_type_of_module msb1 in
+   let mty2 = module_type_of_module msb2 in
+diff --git a/kernel/subtyping.mli b/kernel/subtyping.mli
+index dec3b1b..84dd834 100644
+--- a/kernel/subtyping.mli
++++ b/kernel/subtyping.mli
+@@ -25,13 +25,6 @@ open Environ
+     subtype's signature. *)
+ val check_subtypes : ?direct:bool -> ('a, Conversion.graph_inconsistency) Conversion.universe_state -> env -> ModPath.t -> ModPath.t -> module_type_body -> 'a
+ 
+-(** Check that a declaration whose user and canonical names differ is a valid
+-    alias of the canonical declaration already present in the environment.
+-    A constant alias must be a definition: coqc writes an alias only for a
+-    field it strengthened to [Def]. *)
+-val check_constant_alias : env -> Constant.t -> Declarations.constant_body -> unit
+-val check_inductive_alias : env -> MutInd.t -> Declarations.mutual_inductive_body -> unit
+-
+ val check_polymorphic_universes :
+   Environ.env ->
+   UVars.AbstractContext.t -> UVars.AbstractContext.t ->
+diff --git a/test-suite/coqchk/alias_primitive.v b/test-suite/coqchk/alias_primitive.v
+deleted file mode 100644
+index a94d057..0000000
+--- a/test-suite/coqchk/alias_primitive.v
++++ /dev/null
+@@ -1,26 +0,0 @@
+-(* Honest module aliases of a module that declares primitives: rocqchk must
+-   accept the aliases they make. include_primitive.v covers Include; this
+-   covers [Module N := P.], an alias of that alias, and the alias that a
+-   functor application makes of its argument. *)
+-
+-Module P.
+-  Primitive int := #int63_type.
+-  Primitive add := #int63_add.
+-End P.
+-
+-Module N := P.
+-Module N2 := N.
+-
+-Module Type HasAdd.
+-  Parameter add : P.int -> P.int -> P.int.
+-End HasAdd.
+-
+-Module F (X : HasAdd).
+-  Module M := X.
+-End F.
+-
+-Module R := F P.
+-
+-Definition double (x : N2.int) : N2.int := N2.add x x.
+-Definition same : P.add = N2.add := eq_refl.
+-Definition same_applied : P.add = R.M.add := eq_refl.
+diff --git a/test-suite/coqchk/alias_symbol.v b/test-suite/coqchk/alias_symbol.v
+deleted file mode 100644
+index 7d58f9a..0000000
+--- a/test-suite/coqchk/alias_symbol.v
++++ /dev/null
+@@ -1,24 +0,0 @@
+-(* -*- mode: coq; coq-prog-args: ("-allow-rewrite-rules") -*- *)
+-(* An honest module alias that a functor application makes of a module
+-   that declares a rewrite-rule symbol: rocqchk must accept it.
+-   include_symbol.v covers Include. A direct [Module N := S.] is not
+-   tested here: the base's own rocqchk already refuses a module alias of a
+-   module with a rewrite rule, a separate issue from the alias check. *)
+-
+-Module S.
+-  Symbol f : nat -> nat.
+-  Rewrite Rule f_rew := f ?n => ?n.
+-End S.
+-
+-Module Type HasF.
+-  Parameter f : nat -> nat.
+-End HasF.
+-
+-Module F (X : HasF).
+-  Module M := X.
+-End F.
+-
+-Module R := F S.
+-
+-Definition f_id_applied : R.M.f 0 = 0 := eq_refl.
+-Definition same_applied : S.f = R.M.f := eq_refl.
+diff --git a/test-suite/coqchk/include_primitive.v b/test-suite/coqchk/include_primitive.v
+deleted file mode 100644
+index 72ae8a9..0000000
+--- a/test-suite/coqchk/include_primitive.v
++++ /dev/null
+@@ -1,14 +0,0 @@
+-(* An honest Include of a module that declares primitives: rocqchk must
+-   accept the aliases it makes. *)
+-
+-Module P.
+-  Primitive int := #int63_type.
+-  Primitive add := #int63_add.
+-End P.
+-
+-Module Q.
+-  Include P.
+-End Q.
+-
+-Definition double (x : Q.int) : Q.int := Q.add x x.
+-Definition same : P.add = Q.add := eq_refl.
+diff --git a/test-suite/coqchk/include_symbol.v b/test-suite/coqchk/include_symbol.v
+deleted file mode 100644
+index 9567b11..0000000
+--- a/test-suite/coqchk/include_symbol.v
++++ /dev/null
+@@ -1,15 +0,0 @@
+-(* -*- mode: coq; coq-prog-args: ("-allow-rewrite-rules") -*- *)
+-(* An honest Include of a module that declares a rewrite-rule symbol:
+-   rocqchk must accept the aliases it makes. *)
+-
+-Module S.
+-  Symbol f : nat -> nat.
+-  Rewrite Rule f_rew := f ?n => ?n.
+-End S.
+-
+-Module T.
+-  Include S.
+-End T.
+-
+-Definition f_id : T.f 0 = 0 := eq_refl.
+-Definition same : S.f = T.f := eq_refl.
+diff --git a/test-suite/misc/rocqchk-delta-alias/bad/Attack.v b/test-suite/misc/rocqchk-delta-alias/bad/Attack.v
+deleted file mode 100644
+index cf1145e..0000000
+--- a/test-suite/misc/rocqchk-delta-alias/bad/Attack.v
++++ /dev/null
+@@ -1,15 +0,0 @@
+-Unset Elimination Schemes.
+-
+-Inductive bool : Set := true | false.
+-
+-Module A.
+-  Definition x : bool := true.
+-  Inductive inhabited : Prop := witness : inhabited.
+-End A.
+-
+-(* These declarations have the same user names as the included declarations
+-   in good/Attack.v, but incompatible bodies. *)
+-Module B.
+-  Definition x : bool := false.
+-  Inductive inhabited : Prop := .
+-End B.
+diff --git a/test-suite/misc/rocqchk-delta-alias/forge.ml b/test-suite/misc/rocqchk-delta-alias/forge.ml
+deleted file mode 100644
+index 842bdc5..0000000
+--- a/test-suite/misc/rocqchk-delta-alias/forge.ml
++++ /dev/null
+@@ -1,154 +0,0 @@
+-(* Replace a declaration in B by an incompatible declaration from another
+-   compiled copy of the same logical library, while retaining the target's
+-   resolver that aliases B's declaration to A's. The code is deliberately
+-   independent of Rocq's OCaml libraries: this is an untrusted file producer,
+-   not another path through the kernel API. *)
+-
+-type segment = {
+-  name : string;
+-  pos : int64;
+-  len : int64;
+-  hash : string;
+-}
+-
+-let input_int64 ch =
+-  let rec go i accu =
+-    if i = 0 then accu
+-    else
+-      go (i - 1)
+-        (Int64.logor (Int64.shift_left accu 8)
+-           (Int64.of_int (input_byte ch)))
+-  in
+-  go 8 0L
+-
+-let output_int64 ch n =
+-  for shift = 7 downto 0 do
+-    output_byte ch
+-      (Int64.to_int (Int64.logand 255L (Int64.shift_right_logical n (8 * shift))))
+-  done
+-
+-let read_segments ch =
+-  seek_in ch 8;
+-  let summary_pos = input_int64 ch in
+-  LargeFile.seek_in ch summary_pos;
+-  let n = input_binary_int ch in
+-  Array.init n (fun _ ->
+-      let name = really_input_string ch (input_binary_int ch) in
+-      let pos = input_int64 ch in
+-      let len = input_int64 ch in
+-      let hash = really_input_string ch 16 in
+-      { name; pos; len; hash })
+-
+-let field v i = Obj.field v i
+-
+-let structure_of_module mb =
+-  let signature = field mb 1 in
+-  if Obj.is_int signature || Obj.tag signature <> 0 || Obj.size signature <> 1
+-  then failwith "unexpected functorized module";
+-  field signature 0
+-
+-let find_field name structure =
+-  let rec loop cell =
+-    if Obj.is_int cell then failwith ("missing structure field " ^ name)
+-    else
+-      let item = field cell 0 in
+-      let label = field item 0 in
+-      if not (Obj.is_int label) && Obj.tag label = Obj.string_tag
+-         && String.equal (Obj.obj label) name
+-      then field item 1
+-      else loop (field cell 1)
+-  in
+-  loop structure
+-
+-let find_declaration expected_tag kind module_body name =
+-  let body = find_field name (structure_of_module module_body) in
+-  if Obj.is_int body || Obj.tag body <> expected_tag || Obj.size body <> 1 then
+-    failwith (name ^ " is not " ^ kind);
+-  body
+-
+-let root_module data =
+-  let disk = Obj.repr (Marshal.from_string data 0) in
+-  disk, structure_of_module (field (field disk 0) 1)
+-
+-let module_from root name =
+-  let body = find_field name root in
+-  if Obj.is_int body || Obj.tag body <> 3 || Obj.size body <> 1 then
+-    failwith (name ^ " is not a module");
+-  field body 0
+-
+-let poison_library mode data donor_data =
+-  let disk, root = root_module data in
+-  let _, donor_root = root_module donor_data in
+-  let name, tag, kind = match mode with
+-    | "constant" -> "x", 0, "a constant"
+-    | "inductive" -> "inhabited", 1, "an inductive"
+-    | _ -> failwith "expected mutation kind constant or inductive"
+-  in
+-  let target = find_declaration tag kind (module_from root "B") name in
+-  let donor = find_declaration tag kind (module_from donor_root "B") name in
+-  Obj.set_field target 0 (field donor 0);
+-  Marshal.to_string (Obj.obj disk) []
+-
+-let library_data file =
+-  let input = open_in_bin file in
+-  let segments = read_segments input in
+-  let rec find i =
+-    if i = Array.length segments then failwith "missing library segment"
+-    else if String.equal segments.(i).name "library" then segments.(i)
+-    else find (i + 1)
+-  in
+-  let segment = find 0 in
+-  LargeFile.seek_in input segment.pos;
+-  let data = really_input_string input (Int64.to_int segment.len) in
+-  close_in input;
+-  data
+-
+-let () =
+-  let file = Sys.argv.(1) in
+-  let donor_data = library_data Sys.argv.(2) in
+-  let mode = Sys.argv.(3) in
+-  let input = open_in_bin file in
+-  let header = really_input_string input 8 in
+-  let segments = read_segments input in
+-  let contents =
+-    Array.map
+-      (fun segment ->
+-        LargeFile.seek_in input segment.pos;
+-        let data = really_input_string input (Int64.to_int segment.len) in
+-        let data =
+-          if String.equal segment.name "library" then
+-            poison_library mode data donor_data
+-          else data
+-        in
+-        segment.name, data)
+-      segments
+-  in
+-  close_in input;
+-  let temporary = file ^ ".forged" in
+-  let output = open_out_bin temporary in
+-  output_string output header;
+-  output_int64 output 0L;
+-  let rewritten =
+-    Array.map
+-      (fun (name, data) ->
+-        let pos = LargeFile.pos_out output in
+-        output_string output data;
+-        let hash = Digest.string data in
+-        output_string output hash;
+-        { name; pos; len = Int64.of_int (String.length data); hash })
+-      contents
+-  in
+-  let summary_pos = LargeFile.pos_out output in
+-  output_binary_int output (Array.length rewritten);
+-  Array.iter
+-    (fun segment ->
+-      output_binary_int output (String.length segment.name);
+-      output_string output segment.name;
+-      output_int64 output segment.pos;
+-      output_int64 output segment.len;
+-      output_string output segment.hash)
+-    rewritten;
+-  LargeFile.seek_out output 8L;
+-  output_int64 output summary_pos;
+-  close_out output;
+-  Sys.rename temporary file
+diff --git a/test-suite/misc/rocqchk-delta-alias/good/Attack.v b/test-suite/misc/rocqchk-delta-alias/good/Attack.v
+deleted file mode 100644
+index b0fbe51..0000000
+--- a/test-suite/misc/rocqchk-delta-alias/good/Attack.v
++++ /dev/null
+@@ -1,36 +0,0 @@
+-Unset Elimination Schemes.
+-
+-Inductive bool : Set := true | false.
+-
+-Module A.
+-  Definition x : bool := true.
+-  Inductive inhabited : Prop := witness : inhabited.
+-End A.
+-
+-(* Both declarations are legitimately aliases of A's declarations. *)
+-Module B.
+-  Include A.
+-End B.
+-
+-Inductive eq (A0 : Type) (x0 : A0) : forall _ : A0, Prop :=
+-| eq_refl : eq A0 x0 x0.
+-
+-Inductive False : Prop := .
+-Inductive True : Prop := I : True.
+-
+-Definition discr (b : bool) : Prop :=
+-  match b with
+-  | true => True
+-  | false => False
+-  end.
+-
+-Definition alias : eq bool A.x B.x := eq_refl bool A.x.
+-
+-(* This has type False after B.x's body is replaced by false. *)
+-Definition transported : discr B.x :=
+-  match alias in eq _ _ y return discr y with
+-  | eq_refl _ _ => I
+-  end.
+-
+-(* This inhabits an empty inductive after B.inhabited is replaced. *)
+-Definition inductive_transport : B.inhabited := A.witness.
+diff --git a/test-suite/misc/rocqchk-sigalias/donor/Cross.v b/test-suite/misc/rocqchk-sigalias/donor/Cross.v
+deleted file mode 100644
+index f0e4025..0000000
+--- a/test-suite/misc/rocqchk-sigalias/donor/Cross.v
++++ /dev/null
+@@ -1,12 +0,0 @@
+-(* Against the forged Lib.vo of case "cross", M2.f's type reads M2.c = false
+-   and M2.c's canonical name is M1.c. *)
+-
+-Require Import SigAlias.Lib.
+-
+-Definition both : eq bool true false :=
+-  eq_trans bool true M1.c false (eq_sym bool M1.c true M1.e) M2.f.
+-
+-Definition contradiction : False :=
+-  match both in eq _ _ y return discr y with
+-  | eq_refl _ _ => I
+-  end.
+diff --git a/test-suite/misc/rocqchk-sigalias/donor/Functor.v b/test-suite/misc/rocqchk-sigalias/donor/Functor.v
+deleted file mode 100644
+index fa56534..0000000
+--- a/test-suite/misc/rocqchk-sigalias/donor/Functor.v
++++ /dev/null
+@@ -1,9 +0,0 @@
+-(* Against the forged Lib.vo of case "functor", N.both comes from F's proof of
+-   true = false, which type-checks because X.d is an alias of X.c. *)
+-
+-Require Import SigAlias.Lib.
+-
+-Definition contradiction : False :=
+-  match N.both in eq _ _ y return discr y with
+-  | eq_refl _ _ => I
+-  end.
+diff --git a/test-suite/misc/rocqchk-sigalias/donor/Lib.v b/test-suite/misc/rocqchk-sigalias/donor/Lib.v
+deleted file mode 100644
+index d702e00..0000000
+--- a/test-suite/misc/rocqchk-sigalias/donor/Lib.v
++++ /dev/null
+@@ -1,81 +0,0 @@
+-(* The library the forged clients are compiled against: honest/Lib.v, except
+-   that T's f and TF's f say c = false and M1.c = false (axioms of M and M2
+-   here), so that coqc accepts the clients' proofs of true = false, and that
+-   F also proves it, for the sealed N. Each forged client then records the
+-   forged Lib.vo's digest instead of this file's. The forged library of case
+-   "functor" is this file's Lib.vo with honest/Lib.v's T and M. *)
+-
+-Unset Elimination Schemes.
+-
+-Inductive bool : Set := true | false.
+-
+-Inductive eq (A : Type) (x : A) : forall _ : A, Prop :=
+-| eq_refl : eq A x x.
+-
+-Definition eq_sym (A : Type) (x y : A) (H : eq A x y) : eq A y x :=
+-  match H in eq _ _ z return eq A z x with
+-  | eq_refl _ _ => eq_refl A x
+-  end.
+-
+-Definition eq_trans (A : Type) (x y z : A) (H1 : eq A x y) (H2 : eq A y z)
+-  : eq A x z :=
+-  match H2 in eq _ _ w return eq A x w with
+-  | eq_refl _ _ => H1
+-  end.
+-
+-Inductive False : Prop := .
+-Inductive True : Prop := I : True.
+-
+-Definition discr (b : bool) : Prop :=
+-  match b with
+-  | true => True
+-  | false => False
+-  end.
+-
+-Module Type T.
+-  Parameter c d : bool.
+-  Parameter e : eq bool c true.
+-  Parameter f : eq bool c false.
+-End T.
+-
+-Module M : T.
+-  Definition c : bool := true.
+-  Definition d : bool := false.
+-  Definition e : eq bool c true := eq_refl bool true.
+-  Parameter f : eq bool c false.
+-End M.
+-
+-Module Type TT.
+-  Parameter c : bool.
+-  Parameter e : eq bool c true.
+-End TT.
+-
+-Module M1 : TT.
+-  Definition c : bool := true.
+-  Definition e : eq bool c true := eq_refl bool true.
+-End M1.
+-
+-Module Type TF.
+-  Parameter c : bool.
+-  Parameter f : eq bool M1.c false.
+-End TF.
+-
+-Module M2 : TF.
+-  Definition c : bool := false.
+-  Parameter f : eq bool M1.c false.
+-End M2.
+-
+-Module F (X : T).
+-  (* dd gives the forger X.d's kernel name. *)
+-  Definition dd : eq bool X.d X.d := eq_refl bool X.d.
+-  Definition uses : eq bool X.c true := X.e.
+-  Definition both : eq bool true false :=
+-    eq_trans bool true X.c false (eq_sym bool X.c true X.e) X.f.
+-End F.
+-
+-Module Type TN.
+-  Parameter uses : eq bool M.c true.
+-  Parameter both : eq bool true false.
+-End TN.
+-
+-Module N : TN := F M.
+diff --git a/test-suite/misc/rocqchk-sigalias/donor/Sealed.v b/test-suite/misc/rocqchk-sigalias/donor/Sealed.v
+deleted file mode 100644
+index d77e0e1..0000000
+--- a/test-suite/misc/rocqchk-sigalias/donor/Sealed.v
++++ /dev/null
+@@ -1,12 +0,0 @@
+-(* Against the forged Lib.vo of case "sealed", M.f's type reads M.d = false
+-   and M.d's canonical name is M.c. *)
+-
+-Require Import SigAlias.Lib.
+-
+-Definition both : eq bool true false :=
+-  eq_trans bool true M.c false (eq_sym bool M.c true M.e) M.f.
+-
+-Definition contradiction : False :=
+-  match both in eq _ _ y return discr y with
+-  | eq_refl _ _ => I
+-  end.
+diff --git a/test-suite/misc/rocqchk-sigalias/forge.ml b/test-suite/misc/rocqchk-sigalias/forge.ml
+deleted file mode 100644
+index dc65b07..0000000
+--- a/test-suite/misc/rocqchk-sigalias/forge.ml
++++ /dev/null
+@@ -1,544 +0,0 @@
+-(* Forge .vo files whose module signatures record a delta-resolver alias
+-   between two declared-only fields (Parameters), for rocqchk_sigalias.sh.
+-
+-   Like ../rocqchk-delta-alias/forge.ml, whose segment reading and writing is
+-   copied here unchanged, this uses only the OCaml standard library: it is an
+-   untrusted file producer, not another path through the kernel API. The value
+-   layouts it relies on are checker/values.ml's:
+-
+-   - library segment: (compiled_library, _, _); compiled_library fields
+-     0 name, 1 root module_body, 4 dependencies (dirpath, vodigest) array;
+-   - summary segment: field 1, the same dependencies;
+-   - module_body: 0 implementation wrapper, 1 signature, 2 algebraic type,
+-     3 delta resolver; module_type_body: 1 signature, 3 delta resolver;
+-   - signature: NoFunctor (tag 0) [structure] | MoreFunctor (tag 1)
+-     [mbid; module_type_body; signature]; structure: list of (label, field);
+-     field tags 0 constant, 1 inductive, 2 rules, 3 module, 4 module type;
+-   - constant_body: 2 body (Undef 0 | Def 1 [term] | ...), 3 type;
+-   - term: Const is tag 10 [(constant, instance)]; constant: Same (tag 0)
+-     [kn] | Dual (tag 1) [user kn; canonical kn]; kn: [modpath; label; hash];
+-   - delta resolver: [root; module map; kernel-name map], the last an Int.Map
+-     from a name's stored hash to a KerName.Map of delta hints, Equiv being
+-     tag 1 [kn]; maps are the standard library's AVL nodes [l; key; data; r;
+-     height].
+-
+-   Commands (each writes a new file; the input is left as it is):
+-     forge.ml sealed HONEST_LIB.vo OUT.vo
+-     forge.ml cross HONEST_LIB.vo OUT.vo
+-     forge.ml functor DONOR_LIB.vo HONEST_LIB.vo OUT.vo
+-     forge.ml client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo *)
+-
+-let fail fmt = Printf.ksprintf failwith fmt
+-let say fmt = Printf.ksprintf (fun s -> print_string s; print_newline ()) fmt
+-
+-(* {1 Segments, as upstream's forge.ml} *)
+-
+-type segment = {
+-  name : string;
+-  pos : int64;
+-  len : int64;
+-  hash : string;
+-}
+-
+-let input_int64 ch =
+-  let rec go i accu =
+-    if i = 0 then accu
+-    else
+-      go (i - 1)
+-        (Int64.logor (Int64.shift_left accu 8)
+-           (Int64.of_int (input_byte ch)))
+-  in
+-  go 8 0L
+-
+-let output_int64 ch n =
+-  for shift = 7 downto 0 do
+-    output_byte ch
+-      (Int64.to_int (Int64.logand 255L (Int64.shift_right_logical n (8 * shift))))
+-  done
+-
+-let read_segments ch =
+-  seek_in ch 8;
+-  let summary_pos = input_int64 ch in
+-  LargeFile.seek_in ch summary_pos;
+-  let n = input_binary_int ch in
+-  Array.init n (fun _ ->
+-      let name = really_input_string ch (input_binary_int ch) in
+-      let pos = input_int64 ch in
+-      let len = input_int64 ch in
+-      let hash = really_input_string ch 16 in
+-      { name; pos; len; hash })
+-
+-let read_vo file =
+-  let input = open_in_bin file in
+-  let header = really_input_string input 8 in
+-  let segments = read_segments input in
+-  let contents =
+-    Array.map
+-      (fun segment ->
+-        LargeFile.seek_in input segment.pos;
+-        segment.name, really_input_string input (Int64.to_int segment.len))
+-      segments
+-  in
+-  close_in input;
+-  header, segments, contents
+-
+-let write_vo file header contents =
+-  let temporary = file ^ ".forged" in
+-  let output = open_out_bin temporary in
+-  output_string output header;
+-  output_int64 output 0L;
+-  let rewritten =
+-    Array.map
+-      (fun (name, data) ->
+-        let pos = LargeFile.pos_out output in
+-        output_string output data;
+-        let hash = Digest.string data in
+-        output_string output hash;
+-        { name; pos; len = Int64.of_int (String.length data); hash })
+-      contents
+-  in
+-  let summary_pos = LargeFile.pos_out output in
+-  output_binary_int output (Array.length rewritten);
+-  Array.iter
+-    (fun segment ->
+-      output_binary_int output (String.length segment.name);
+-      output_string output segment.name;
+-      output_int64 output segment.pos;
+-      output_int64 output segment.len;
+-      output_string output segment.hash)
+-    rewritten;
+-  LargeFile.seek_out output 8L;
+-  output_int64 output summary_pos;
+-  close_out output;
+-  Sys.rename temporary file;
+-  rewritten
+-
+-let segment_value contents name =
+-  match Array.find_opt (fun (n, _) -> String.equal n name) contents with
+-  | Some (_, data) -> Obj.repr (Marshal.from_string data 0)
+-  | None -> fail "no %s segment" name
+-
+-(* Rewrite the segments named in [edits] with their functions, keep the
+-   others byte for byte, and write [dst] with fresh segment checksums. *)
+-let rewrite_vo ~src ~dst edits =
+-  let header, _, contents = read_vo src in
+-  List.iter
+-    (fun (name, _) ->
+-      if not (Array.exists (fun (n, _) -> String.equal n name) contents) then
+-        fail "%s has no %s segment" src name)
+-    edits;
+-  let contents =
+-    Array.map
+-      (fun (name, data) ->
+-        match List.assoc_opt name edits with
+-        | None -> name, data
+-        | Some edit ->
+-          let value = edit (Obj.repr (Marshal.from_string data 0)) in
+-          name, Marshal.to_string (Obj.obj value) [])
+-      contents
+-  in
+-  let segments = write_vo dst header contents in
+-  Array.iter
+-    (fun s ->
+-      say "wrote %s: segment %s, %Ld bytes, checksum %s" dst s.name s.len
+-        (Digest.to_hex s.hash))
+-    segments
+-
+-(* {1 Values} *)
+-
+-let field = Obj.field
+-let tag = Obj.tag
+-let size = Obj.size
+-let is_block o = not (Obj.is_int o)
+-let to_str (o : Obj.t) : string = Obj.obj o
+-let to_int (o : Obj.t) : int = Obj.obj o
+-let empty = Obj.repr 0
+-
+-let block t fields =
+-  let b = Obj.new_block t (Array.length fields) in
+-  Array.iteri (fun i v -> Obj.set_field b i v) fields;
+-  b
+-
+-let expect what t o =
+-  if Obj.is_int o || tag o <> t then
+-    fail "%s: expected a block with tag %d, found %s" what t
+-      (if Obj.is_int o then Printf.sprintf "the integer %d" (to_int o)
+-       else Printf.sprintf "tag %d" (tag o))
+-
+-(* [o] with field [i] replaced by [f] of it; [o] is copied only when the field
+-   changes, so that a value shared with another part of the file is never
+-   modified in place. *)
+-let upd i f o =
+-  let x = field o i in
+-  let y = f x in
+-  if y == x then o
+-  else begin
+-    let o' = Obj.dup o in
+-    Obj.set_field o' i y;
+-    o'
+-  end
+-
+-let set i v o = upd i (fun _ -> v) o
+-
+-let map_array f a =
+-  let res = ref a in
+-  for i = 0 to size a - 1 do
+-    let x = field a i in
+-    let y = f x in
+-    if y != x then begin
+-      if !res == a then res := Obj.dup a;
+-      Obj.set_field !res i y
+-    end
+-  done;
+-  !res
+-
+-let rec list_of o = if Obj.is_int o then [] else field o 0 :: list_of (field o 1)
+-
+-let rec map_list f l =
+-  if Obj.is_int l then l
+-  else
+-    let hd = field l 0 and tl = field l 1 in
+-    let hd' = f hd and tl' = map_list f tl in
+-    if hd' == hd && tl' == tl then l else block 0 [| hd'; tl' |]
+-
+-(* {1 Names} *)
+-
+-let dp_to_string dp = String.concat "." (List.rev_map to_str (list_of dp))
+-
+-let rec mp_to_string mp =
+-  match tag mp with
+-  | 0 -> dp_to_string (field mp 0)
+-  | 1 ->
+-    let mbid = field mp 0 in
+-    Printf.sprintf "<%s#%d>" (to_str (field mbid 1)) (to_int (field mbid 0))
+-  | 2 -> mp_to_string (field mp 0) ^ "." ^ to_str (field mp 1)
+-  | t -> fail "module path with tag %d" t
+-
+-let kn_mp kn = field kn 0
+-let kn_label kn = to_str (field kn 1)
+-let kn_hash kn = to_int (field kn 2)
+-let kn_to_string kn = mp_to_string (kn_mp kn) ^ "." ^ kn_label kn
+-
+-let kn_equal a b =
+-  a == b
+-  || (String.equal (kn_label a) (kn_label b) && compare (kn_mp a) (kn_mp b) = 0)
+-
+-let cst_user c = field c 0
+-
+-let dual user canonical = block 1 [| user; canonical |]
+-
+-let mp_is_dot name mp = tag mp = 2 && String.equal (to_str (field mp 1)) name
+-let mp_is_bound mp = tag mp = 1
+-
+-(* {1 Terms} *)
+-
+-(* Copy-on-write map of [fc] over the Const nodes of a term. [fc] gets the
+-   (constant, instance) pair and returns its replacement, or None. *)
+-let rec map_constr fc c =
+-  if Obj.is_int c then c
+-  else
+-    let m = map_constr fc in
+-    match tag c with
+-    | 5 -> c |> upd 0 m |> upd 2 m (* Cast *)
+-    | 6 | 7 -> c |> upd 1 m |> upd 2 m (* Prod, Lambda *)
+-    | 8 -> c |> upd 1 m |> upd 2 m |> upd 3 m (* LetIn *)
+-    | 9 -> c |> upd 0 m |> upd 1 (map_array m) (* App *)
+-    | 10 -> (* Const *)
+-      (match fc (field c 0) with Some p -> block 10 [| p |] | None -> c)
+-    | 13 -> (* Case: info, instance, params, return, invert, scrutinee, branches *)
+-      c
+-      |> upd 2 (map_array m)
+-      |> upd 3 (upd 0 (upd 1 m))
+-      |> upd 4 (fun iv -> if Obj.is_int iv then iv else upd 0 (map_array m) iv)
+-      |> upd 5 m
+-      |> upd 6 (map_array (upd 1 m))
+-    | 14 | 15 -> (* Fix, CoFix: (_, (names, types, bodies)) *)
+-      upd 0 (upd 1 (fun prec -> prec |> upd 1 (map_array m) |> upd 2 (map_array m))) c
+-    | 16 -> upd 2 m c (* Proj *)
+-    | 20 -> c |> upd 1 (map_array m) |> upd 2 m |> upd 3 m (* Array *)
+-    | _ -> c
+-
+-(* The type and, for a definition, the body of a constant_body. *)
+-let map_cb fc cb =
+-  cb
+-  |> upd 3 (map_constr fc)
+-  |> upd 2 (fun body -> if is_block body && tag body = 1 then upd 0 (map_constr fc) body else body)
+-
+-let cb_constants cb =
+-  let acc = ref [] in
+-  ignore (map_cb (fun p -> acc := field p 0 :: !acc; None) cb);
+-  List.rev !acc
+-
+-(* A rewrite of Const nodes that counts what it changes. *)
+-let counted count f p =
+-  match f p with
+-  | Some _ as r -> incr count; r
+-  | None -> None
+-
+-(* Name the constant [user] as an alias of [canonical] where a term mentions
+-   it: (user) becomes (user, canonical). *)
+-let retarget ~user ~canonical p =
+-  let c = field p 0 in
+-  if kn_equal (cst_user c) user then Some (block 0 [| dual (cst_user c) canonical; field p 1 |])
+-  else None
+-
+-(* {1 Structures and modules} *)
+-
+-let item_label item = to_str (field item 0)
+-let item_field item = field item 1
+-
+-let struc_find struc name =
+-  match List.find_opt (fun it -> String.equal (item_label it) name) (list_of struc) with
+-  | Some it -> item_field it
+-  | None -> fail "no field %s" name
+-
+-let struc_update struc name f =
+-  let found = ref false in
+-  let struc =
+-    map_list
+-      (fun it ->
+-        if String.equal (item_label it) name then begin
+-          found := true;
+-          upd 1 f it
+-        end
+-        else it)
+-      struc
+-  in
+-  if not !found then fail "no field %s" name;
+-  struc
+-
+-let nofunctor what sign =
+-  expect (what ^ "'s signature (NoFunctor)") 0 sign;
+-  field sign 0
+-
+-let module_of struc name =
+-  let sfb = struc_find struc name in
+-  expect ("field " ^ name ^ " (a module)") 3 sfb;
+-  field sfb 0
+-
+-let impl_of mb = field (field mb 0) 0
+-
+-let impl_kind i =
+-  if Obj.is_int i then
+-    match to_int i with 0 -> "Abstract" | 1 -> "FullStruct" | n -> Printf.sprintf "implementation %d" n
+-  else
+-    match tag i with 0 -> "Algebraic" | 1 -> "Struct" | t -> Printf.sprintf "implementation tag %d" t
+-
+-(* The first constant mentioned by a constant of [struc] whose user name has
+-   label [label] and a module path satisfying [in_mp]. *)
+-let find_kn struc ~label ~in_mp =
+-  let found = ref None in
+-  List.iter
+-    (fun it ->
+-      let sfb = item_field it in
+-      if Option.is_none !found && tag sfb = 0 then
+-        List.iter
+-          (fun c ->
+-            let u = cst_user c in
+-            if Option.is_none !found && String.equal (kn_label u) label && in_mp (kn_mp u)
+-            then found := Some u)
+-          (cb_constants (field sfb 0)))
+-    (list_of struc);
+-  match !found with
+-  | Some kn -> kn
+-  | None -> fail "no constant labelled %s is mentioned there" label
+-
+-let root_struc disk =
+-  let root = field (field disk 0) 1 in
+-  let i = impl_of root in
+-  if is_block i then fail "the library's root module has a %s implementation" (impl_kind i);
+-  nofunctor "the library" (field root 1)
+-
+-let set_root_struc disk struc =
+-  let compiled = field disk 0 in
+-  Obj.set_field compiled 1 (upd 1 (set 0 struc) (field compiled 1))
+-
+-(* {1 Delta resolvers} *)
+-
+-let height m = if Obj.is_int m then 0 else to_int (field m 4)
+-
+-let create l k d r =
+-  let hl = height l and hr = height r in
+-  block 0 [| l; k; d; r; Obj.repr (if hl >= hr then hl + 1 else hr + 1) |]
+-
+-(* The standard library's Map.bal. *)
+-let bal l k d r =
+-  let hl = height l and hr = height r in
+-  if hl > hr + 2 then begin
+-    let ll = field l 0 and lv = field l 1 and ld = field l 2 and lr = field l 3 in
+-    if height ll >= height lr then create ll lv ld (create lr k d r)
+-    else
+-      create (create ll lv ld (field lr 0)) (field lr 1) (field lr 2)
+-        (create (field lr 3) k d r)
+-  end
+-  else if hr > hl + 2 then begin
+-    let rl = field r 0 and rv = field r 1 and rd = field r 2 and rr = field r 3 in
+-    if height rr >= height rl then create (create l k d rl) rv rd rr
+-    else
+-      create (create l k d (field rl 0)) (field rl 1) (field rl 2)
+-        (create (field rl 3) rv rd rr)
+-  end
+-  else create l k d r
+-
+-let rec map_add cmp k d m =
+-  if Obj.is_int m then create empty k d empty
+-  else
+-    let c = cmp k (field m 1) in
+-    if c = 0 then create (field m 0) k d (field m 3)
+-    else if c < 0 then bal (map_add cmp k d (field m 0)) (field m 1) (field m 2) (field m 3)
+-    else bal (field m 0) (field m 1) (field m 2) (map_add cmp k d (field m 3))
+-
+-let rec map_find cmp k m =
+-  if Obj.is_int m then None
+-  else
+-    let c = cmp k (field m 1) in
+-    if c = 0 then Some (field m 2)
+-    else map_find cmp k (field m (if c < 0 then 0 else 3))
+-
+-let int_compare a b = compare (to_int a) (to_int b)
+-
+-(* KerName.compare: the label, then the module path. Only the label part is
+-   needed for the names this file adds. *)
+-let kn_compare a b =
+-  if a == b then 0
+-  else
+-    let c = String.compare (kn_label a) (kn_label b) in
+-    if c <> 0 then c
+-    else if compare (kn_mp a) (kn_mp b) = 0 then 0
+-    else fail "two names labelled %s share a hash bucket; ModPath.compare is not reimplemented here" (kn_label a)
+-
+-(* HMap.add: bucket by the name's stored hash, then a KerName.Map. *)
+-let hmap_add kn hint hmap =
+-  let h = kn_hash kn in
+-  if h < 0 then fail "%s carries no hash" (kn_to_string kn);
+-  let bucket = match map_find int_compare (Obj.repr h) hmap with Some b -> b | None -> empty in
+-  map_add int_compare (Obj.repr h) (map_add kn_compare kn hint bucket) hmap
+-
+-let add_equiv reso user canonical = upd 2 (hmap_add user (block 1 [| canonical |])) reso
+-
+-let vodigest_to_string v =
+-  if tag v = 0 then Digest.to_hex (to_str (field v 0))
+-  else Printf.sprintf "vodigest tag %d" (tag v)
+-
+-(* {1 Forgeries} *)
+-
+-(* Cases "sealed" and "cross". In module [um]'s signature, record that
+-   [um].[ul] is an alias of [tm].[tl]: add the resolver entry, and, in the
+-   type of field [rf], name [um].[ul] as (user [um].[ul], canonical
+-   [tm].[tl]), which is how a term must name it once the resolver says so
+-   (Typeops.check_constant refuses any other canonical name). The module's
+-   implementation and its resolver are not touched. *)
+-let forge_alias ~um ~ul ~tm ~tl ~rf disk =
+-  let root = root_struc disk in
+-  let sig_struc name = nofunctor ("module " ^ name) (field (module_of root name) 1) in
+-  let user = find_kn (sig_struc um) ~label:ul ~in_mp:(mp_is_dot um) in
+-  let canonical = find_kn (sig_struc tm) ~label:tl ~in_mp:(mp_is_dot tm) in
+-  say "forging: in %s's signature, %s becomes an alias of %s" um (kn_to_string user)
+-    (kn_to_string canonical);
+-  let count = ref 0 in
+-  let rename = counted count (retarget ~user ~canonical) in
+-  let mb = module_of root um in
+-  let mb =
+-    mb
+-    |> upd 1 (upd 0 (fun struc -> struc_update struc rf (upd 0 (map_cb rename))))
+-    |> upd 3 (fun reso -> add_equiv reso user canonical)
+-  in
+-  if !count = 0 then fail "%s.%s does not mention %s" um rf (kn_to_string user);
+-  say "forging: renamed %d mention(s) of %s in %s.%s" !count (kn_to_string user) um rf;
+-  set_root_struc disk (struc_update root um (set 0 mb));
+-  disk
+-
+-(* Case "functor". [disk] is donor/Lib.vo: F (X : T) proves true = false from
+-   X.f : X.c = false. Put the honest T and M back, then make the type of F's
+-   parameter read as the honest T: f's type names X.d, as (user X.d,
+-   canonical X.c), and the parameter's resolver says X.d is an alias of X.c.
+-   Every mention of X.d in F's body becomes (X.d, X.c) too. *)
+-let forge_functor ~honest disk =
+-  let honest_root = root_struc honest in
+-  let root =
+-    List.fold_left
+-      (fun struc name -> struc_update struc name (fun _ -> struc_find honest_root name))
+-      (root_struc disk) [ "T"; "M" ]
+-  in
+-  say "forging: fields T and M are honest/Lib.vo's";
+-  let fmb = module_of root "F" in
+-  let sign = field fmb 1 in
+-  expect "F's signature (MoreFunctor)" 1 sign;
+-  let mtb = field sign 1 in
+-  let param = nofunctor "F's parameter" (field mtb 1) in
+-  let body = nofunctor "F's body" (field sign 2) in
+-  let xc = find_kn param ~label:"c" ~in_mp:mp_is_bound in
+-  let xd = find_kn body ~label:"d" ~in_mp:mp_is_bound in
+-  if compare (kn_mp xc) (kn_mp xd) <> 0 then
+-    fail "X.c is %s but X.d is %s" (kn_to_string xc) (kn_to_string xd);
+-  say "forging: in F's parameter type, %s becomes an alias of %s" (kn_to_string xd) (kn_to_string xc);
+-  let in_f = ref 0 and in_body = ref 0 and in_impl = ref 0 in
+-  (* f's type: X.c = false becomes (X.d, canonical X.c) = false *)
+-  let to_xd p =
+-    let c = field p 0 in
+-    if kn_equal (cst_user c) xc then Some (block 0 [| dual xd xc; field p 1 |]) else None
+-  in
+-  let param = struc_update param "f" (upd 0 (map_cb (counted in_f to_xd))) in
+-  let mtb = mtb |> upd 1 (set 0 param) |> upd 3 (fun reso -> add_equiv reso xd xc) in
+-  let rename count =
+-    map_list
+-      (upd 1 (fun sfb ->
+-           if tag sfb = 0 then upd 0 (map_cb (counted count (retarget ~user:xd ~canonical:xc))) sfb
+-           else sfb))
+-  in
+-  let sign = sign |> set 1 mtb |> upd 2 (upd 0 (rename in_body)) in
+-  let fmb = set 1 sign fmb in
+-  let fmb =
+-    upd 0
+-      (upd 0 (fun i -> if is_block i && tag i = 1 then upd 1 (rename in_impl) i else i))
+-      fmb
+-  in
+-  if !in_f = 0 then fail "F's parameter's f does not mention %s" (kn_to_string xc);
+-  say "forging: renamed %d mention(s) of %s in the parameter's f, %d of %s in F's body, %d in F's %s implementation"
+-    !in_f (kn_to_string xc) !in_body (kn_to_string xd) !in_impl (impl_kind (impl_of fmb));
+-  set_root_struc disk (struc_update root "F" (set 0 fmb));
+-  disk
+-
+-(* The client: record [digest] as the dependency [lib_dp]'s, in the summary
+-   and in the compiled library (Safe_typing.import compares the latter with
+-   the library rocqchk loads). *)
+-let patch_deps ~what ~lib_dp ~digest deps =
+-  let n = ref 0 in
+-  for i = 0 to size deps - 1 do
+-    let d = field deps i in
+-    if String.equal (dp_to_string (field d 0)) lib_dp then begin
+-      say "forging: %s dependency %s: %s -> %s" what lib_dp (vodigest_to_string (field d 1))
+-        (Digest.to_hex digest);
+-      Obj.set_field deps i (block 0 [| field d 0; block 0 [| Obj.repr digest |] |]);
+-      incr n
+-    end
+-  done;
+-  if !n = 0 then fail "the %s records no dependency %s" what lib_dp
+-
+-let library_hash file =
+-  let _, segments, _ = read_vo file in
+-  match Array.find_opt (fun s -> String.equal s.name "library") segments with
+-  | Some s -> s.hash
+-  | None -> fail "%s has no library segment" file
+-
+-let () =
+-  match List.tl (Array.to_list Sys.argv) with
+-  | [ "sealed"; src; dst ] ->
+-    rewrite_vo ~src ~dst [ "library", forge_alias ~um:"M" ~ul:"d" ~tm:"M" ~tl:"c" ~rf:"f" ]
+-  | [ "cross"; src; dst ] ->
+-    rewrite_vo ~src ~dst [ "library", forge_alias ~um:"M2" ~ul:"c" ~tm:"M1" ~tl:"c" ~rf:"f" ]
+-  | [ "functor"; donor; honest; dst ] ->
+-    let _, _, contents = read_vo honest in
+-    let honest = segment_value contents "library" in
+-    rewrite_vo ~src:donor ~dst [ "library", forge_functor ~honest ]
+-  | [ "client"; src; lib; lib_dp; dst ] ->
+-    let digest = library_hash lib in
+-    rewrite_vo ~src ~dst
+-      [ ("summary", fun sd -> patch_deps ~what:"summary" ~lib_dp ~digest (field sd 1); sd);
+-        ("library", fun disk ->
+-            patch_deps ~what:"library" ~lib_dp ~digest (field (field disk 0) 4); disk) ]
+-  | _ ->
+-    prerr_endline
+-      "usage: ocaml forge.ml sealed LIB.vo OUT.vo | cross LIB.vo OUT.vo\n\
+-      \       | functor DONOR_LIB.vo HONEST_LIB.vo OUT.vo | client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo";
+-    exit 2
+diff --git a/test-suite/misc/rocqchk-sigalias/honest/Client.v b/test-suite/misc/rocqchk-sigalias/honest/Client.v
+deleted file mode 100644
+index df5460f..0000000
+--- a/test-suite/misc/rocqchk-sigalias/honest/Client.v
++++ /dev/null
+@@ -1,5 +0,0 @@
+-Require Import SigAlias.Lib.
+-
+-Definition uses_sealed : eq bool M.c true := M.e.
+-Definition uses_cross : eq bool M1.c true := M1.e.
+-Definition uses_functor : eq bool M.c true := N.uses.
+diff --git a/test-suite/misc/rocqchk-sigalias/honest/Lib.v b/test-suite/misc/rocqchk-sigalias/honest/Lib.v
+deleted file mode 100644
+index 26a4ea5..0000000
+--- a/test-suite/misc/rocqchk-sigalias/honest/Lib.v
++++ /dev/null
+@@ -1,79 +0,0 @@
+-(* The honest library of rocqchk_sigalias.sh. Each case's forged copy of this
+-   file records, in a module signature, an alias between two declared-only
+-   fields whose implementations differ. *)
+-
+-Unset Elimination Schemes.
+-
+-Inductive bool : Set := true | false.
+-
+-Inductive eq (A : Type) (x : A) : forall _ : A, Prop :=
+-| eq_refl : eq A x x.
+-
+-Definition eq_sym (A : Type) (x y : A) (H : eq A x y) : eq A y x :=
+-  match H in eq _ _ z return eq A z x with
+-  | eq_refl _ _ => eq_refl A x
+-  end.
+-
+-Definition eq_trans (A : Type) (x y z : A) (H1 : eq A x y) (H2 : eq A y z)
+-  : eq A x z :=
+-  match H2 in eq _ _ w return eq A x w with
+-  | eq_refl _ _ => H1
+-  end.
+-
+-Inductive False : Prop := .
+-Inductive True : Prop := I : True.
+-
+-Definition discr (b : bool) : Prop :=
+-  match b with
+-  | true => True
+-  | false => False
+-  end.
+-
+-(* Case "sealed": in M's signature, M.d becomes an alias of M.c. *)
+-Module Type T.
+-  Parameter c d : bool.
+-  Parameter e : eq bool c true.
+-  Parameter f : eq bool d false.
+-End T.
+-
+-Module M : T.
+-  Definition c : bool := true.
+-  Definition d : bool := false.
+-  Definition e : eq bool c true := eq_refl bool true.
+-  Definition f : eq bool d false := eq_refl bool false.
+-End M.
+-
+-(* Case "cross": in M2's signature, M2.c becomes an alias of M1.c; the alias
+-   keeps its label, as the ones coqc writes do. *)
+-Module Type TT.
+-  Parameter c : bool.
+-  Parameter e : eq bool c true.
+-End TT.
+-
+-Module M1 : TT.
+-  Definition c : bool := true.
+-  Definition e : eq bool c true := eq_refl bool true.
+-End M1.
+-
+-Module Type TF.
+-  Parameter c : bool.
+-  Parameter f : eq bool c false.
+-End TF.
+-
+-Module M2 : TF.
+-  Definition c : bool := false.
+-  Definition f : eq bool c false := eq_refl bool false.
+-End M2.
+-
+-(* Case "functor": in the type of F's parameter, X.d becomes an alias of X.c.
+-   The forged library is donor/Lib.vo with this file's T and M. *)
+-Module F (X : T).
+-  Definition dd : eq bool X.d X.d := eq_refl bool X.d.
+-  Definition uses : eq bool X.c true := X.e.
+-End F.
+-
+-Module Type TN.
+-  Parameter uses : eq bool M.c true.
+-End TN.
+-
+-Module N : TN := F M.
+diff --git a/test-suite/misc/rocqchk_delta_alias.sh b/test-suite/misc/rocqchk_delta_alias.sh
+deleted file mode 100755
+index fb8e481..0000000
+--- a/test-suite/misc/rocqchk_delta_alias.sh
++++ /dev/null
+@@ -1,33 +0,0 @@
+-#!/usr/bin/env bash
+-
+-# rocqchk must not trust a serialized module's delta resolver to establish that
+-# incompatible declarations have the same canonical name.
+-
+-set -e
+-
+-D=misc/rocqchk-delta-alias
+-
+-rm -f "$D"/good/*.vo "$D"/good/*.vok "$D"/good/*.vos "$D"/good/*.glob \
+-      "$D"/bad/*.vo "$D"/bad/*.vok "$D"/bad/*.vos "$D"/bad/*.glob \
+-      "$D"/out.log
+-
+-for kind in constant inductive; do
+-  $coqc -noinit -R "$D/good" DeltaAlias "$D/good/Attack.v"
+-  $coqc -noinit -R "$D/bad" DeltaAlias "$D/bad/Attack.v"
+-  ocaml "$D/forge.ml" "$D/good/Attack.vo" "$D/bad/Attack.vo" "$kind"
+-
+-  if "$BIN"rocqchk -R "$D/good" DeltaAlias DeltaAlias.Attack > "$D/out.log" 2>&1; then
+-    echo "rocqchk accepted a forged $kind delta alias and a closed proof of False"
+-    cat "$D/out.log"
+-    exit 1
+-  fi
+-
+-  # Upstream's rocqchk prints a module typing error as "Module typing error"
+-  # (rocq-prover/rocq#22373). 9.2's rocqchk has no printer for it and reports
+-  # the exception itself, "Modops.ModuleTypingError".
+-  if ! grep -Eq "Module typing error|ModuleTypingError" "$D/out.log"; then
+-    echo "unexpected rocqchk failure for a forged $kind alias"
+-    cat "$D/out.log"
+-    exit 1
+-  fi
+-done
+diff --git a/test-suite/misc/rocqchk_sigalias.sh b/test-suite/misc/rocqchk_sigalias.sh
+deleted file mode 100755
+index 8708ea4..0000000
+--- a/test-suite/misc/rocqchk_sigalias.sh
++++ /dev/null
+@@ -1,69 +0,0 @@
+-#!/usr/bin/env bash
+-
+-# rocqchk must not accept a serialized module signature whose delta resolver
+-# makes a declared-only field (a Parameter) an alias of another one. With c
+-# and d declared in the type of a sealed module M, an alias of M.d to M.c
+-# proves False, although M's implementation has c := true and d := false. The
+-# same holds for an alias that keeps its label (M2.c to M1.c) and for an alias
+-# in the type of a functor's parameter. See misc/rocqchk_delta_alias.sh for
+-# forged aliases of definitions.
+-
+-set -e
+-
+-D=misc/rocqchk-sigalias
+-
+-rm -f "$D"/*/*.vo "$D"/*/*.vok "$D"/*/*.vos "$D"/*/*.glob "$D"/out.log
+-rm -rf "$D"/forged-sealed "$D"/forged-cross "$D"/forged-functor
+-
+-for f in Lib Client; do
+-  $coqc -noinit -R "$D/honest" SigAlias "$D/honest/$f.v"
+-done
+-for f in Lib Sealed Cross Functor; do
+-  $coqc -noinit -R "$D/donor" SigAlias "$D/donor/$f.v"
+-done
+-
+-# chk <dir> <client> <mode>: rocqchk on SigAlias.Lib and SigAlias.<client> in
+-# <dir>, as a grader runs it or with the default options.
+-chk() {
+-  case $3 in
+-    grader) "$BIN"rocqchk -o -bytecode-compiler yes -R "$1" SigAlias -norec SigAlias.Lib "SigAlias.$2" ;;
+-    default) "$BIN"rocqchk -R "$1" SigAlias SigAlias.Lib "SigAlias.$2" ;;
+-  esac > "$D/out.log" 2>&1
+-}
+-
+-for mode in grader default; do
+-  if ! chk "$D/honest" Client $mode; then
+-    echo "rocqchk ($mode) refused the honest libraries"
+-    cat "$D/out.log"
+-    exit 1
+-  fi
+-done
+-
+-for kind in sealed cross functor; do
+-  F="$D/forged-$kind"
+-  client=${kind^}
+-  mkdir "$F"
+-  if [ $kind = functor ]; then
+-    ocaml "$D/forge.ml" functor "$D/donor/Lib.vo" "$D/honest/Lib.vo" "$F/Lib.vo"
+-  else
+-    ocaml "$D/forge.ml" $kind "$D/honest/Lib.vo" "$F/Lib.vo"
+-  fi
+-  # The client as coqc compiled it against donor/Lib.v, recording the forged
+-  # Lib.vo as its dependency.
+-  ocaml "$D/forge.ml" client "$D/donor/$client.vo" "$F/Lib.vo" SigAlias.Lib "$F/$client.vo"
+-
+-  for mode in grader default; do
+-    if chk "$F" $client $mode; then
+-      echo "rocqchk ($mode) accepted a forged $kind alias between declared-only fields and a closed proof of False"
+-      cat "$D/out.log"
+-      exit 1
+-    fi
+-    # 9.2's rocqchk has no printer for a module typing error and reports the
+-    # exception itself (see misc/rocqchk_delta_alias.sh).
+-    if ! grep -Eq "Module typing error|ModuleTypingError" "$D/out.log"; then
+-      echo "unexpected rocqchk ($mode) failure for a forged $kind alias"
+-      cat "$D/out.log"
+-      exit 1
+-    fi
+-  done
+-done
