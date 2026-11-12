@@ -39,7 +39,13 @@ val set_verbose : bool -> unit
 
 (** {6 Comparing two blocks}
 
-    This is the part the Rocq comparator (dispatch://BET-894) calls. *)
+    [merge] decides by [eq_mib], in [rocq c] and in [rocqchk] alike: under
+    -merge-inductives, the merges [rocqchk -compare] makes while it loads
+    the answer and the challenge, each from [Safe_typing.import], decide by
+    it too. The comparator's own declaration comparison
+    (checker/check_compare.ml) does not call [eq_mib]: it keeps level rules
+    of its own and one level map for the whole run. Only its test-only
+    cross-check calls [eq_mib], to hold the two comparisons together. *)
 
 type umap
 (** A bijection between universe levels, built while the two terms are walked
@@ -115,9 +121,22 @@ val merge : Environ.env -> Names.ModPath.t -> Univ.ContextSet.t ->
     a contradicting constraint, which is a proof of [False].
 
     A universe-polymorphic block never merges in v1, whatever [eq_mib] says
-    about it; [eq_mib] still compares one, for the comparator's sake, and the
-    refusal is here. A template-polymorphic block does merge, on
-    [equal_template]'s verdict. *)
+    about it; [eq_mib] still compares one, as the comparator's test-only
+    cross-check asks of it, and the refusal is here. A template-polymorphic
+    block does merge, on [equal_template]'s verdict. *)
+
+val set_eq_mib_observer :
+  (Names.KerName.t -> Declarations.mutual_inductive_body ->
+   Declarations.mutual_inductive_body -> (umap, diff) result -> unit) -> unit
+(** Test-only. [set_eq_mib_observer f] makes [merge] call [f kn mib cand v]
+    at its one call of [eq_mib], once for each candidate it compares in
+    full: [kn] is the name the block being loaded is declared under, [mib]
+    that block renamed as [merge] compares it, [cand] the already-loaded
+    candidate, and [v] the verdict of [eq_mib empty_umap] on the two, which
+    [merge] acts on after [f] returns. The default does nothing. [f] must
+    not raise, except to stop the run. [rocqchk] installs one when
+    ROCQCHK_INDMERGE_CROSS_CHECK is set (checker/check_compare.ml); [rocq c]
+    installs none. *)
 
 val apply_earlier_merges : Names.ModPath.t ->
   Mod_declarations.module_body -> Mod_declarations.module_body
@@ -153,11 +172,12 @@ val swap_state : state -> state
 (** {6 Two directions the merge refuses, both fail-closed} *)
 
 (** A universe-polymorphic block never merges in v1, whatever [eq_mib] says
-    about it; [eq_mib] still compares one, for the comparator's sake, and the
-    refusal is here. A template-polymorphic block does merge, on
-    [equal_template]'s verdict: an [Inductive w (A : Type)] with no attribute
-    is made template automatically, so refusing template blocks would refuse
-    every parameterised [Type]-valued type.
+    about it; [eq_mib] still compares one, as the comparator's test-only
+    cross-check asks of it, and the refusal is here. A template-polymorphic
+    block does merge, on [equal_template]'s verdict: an
+    [Inductive w (A : Type)] with no attribute is made template
+    automatically, so refusing template blocks would refuse every
+    parameterised [Type]-valued type.
 
 
 
@@ -184,7 +204,8 @@ val swap_state : state -> state
     consistent; two files that declare the same private type are two
     quotients, not one type, and identifying them lets one file's match see
     through the other's axiom, which is a proof of [False]. [eq_mib] still
-    compares them, for the comparator; the refusal is in [merge]. *)
+    compares them, as the comparator's test-only cross-check asks of it; the
+    refusal is in [merge]. *)
 
 (** {6 Known limits, none of them fixed here}
 

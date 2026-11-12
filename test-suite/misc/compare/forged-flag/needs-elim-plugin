@@ -1,0 +1,3 @@
+The trees load the elimination-flag plugin: Top.P.Q declares U with the
+elimination check off, and bad-forged-flag and bad-own-object declare their
+own such inductives.

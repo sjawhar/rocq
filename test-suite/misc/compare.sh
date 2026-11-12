@@ -6,8 +6,8 @@
 #   challenge/*.v     the task as the agent receives it, proofs Admitted
 #   answer/*.v        an honest answer; it must pass
 #   bad-<name>/*.v    an answer that must fail: at least one theorem's
-#                     verdict is fail, or, with a file `refuse` in the case
-#                     directory, the run itself must exit non-zero
+#                     verdict is fail, or, with a file `refuse` in bad-<name>/,
+#                     the run itself must exit non-zero
 #   pre/*.v           optional, libraries bound with -Q under the root Pre,
 #                     in pre-order or alphabetically. Shared.vo, when there
 #                     is one, is declared pre-checked; Pin.vo is pinned only
@@ -47,12 +47,40 @@
 #                     (default: alphabetical); an entry <dir>/<file>.v is
 #                     copied from each tree's <dir>/ and compiled as the
 #                     library Top.<dir>.<file>
-#   refuse-<name>/    optional, a directory holding a raw config.json that
-#                     the run must refuse with a non-zero exit
+#   coqc-flags        optional, in a tree (challenge/, answer/, bad-<name>/,
+#                     refuse-<name>/answer/), one line of further coqc flags
+#                     for that tree, for example -allow-rewrite-rules;
+#                     @ELIM_PLUGIN_DIR@ in it becomes the directory of the
+#                     plugin that needs-elim-plugin builds
+#   needs-elim-plugin optional, a marker: the case builds the plugin of
+#                     misc/unchecked-eliminations, src/elim_flag_plugin.cmxs,
+#                     in its own work directory, never in the source
+#                     directory, which misc/unchecked-eliminations.sh cleans
+#                     while other tests run. A plugin that does not build
+#                     fails the case. A tree whose coqc-flags holds
+#                     -I @ELIM_PLUGIN_DIR@ loads it with
+#                       Declare ML Module "coq-test-suite.elim_flag".
+#                     and turns the elimination check off and on with
+#                       Unset Test Elimination Checking.
+#                       Set Test Elimination Checking.
+#   refuse-<name>/    optional, a config the run must refuse with a non-zero
+#                     exit and no verdict file: config.json, used as it is,
+#                     or config.tmpl, filled like the case's config.tmpl
+#   refuse-<name>/expected-reason
+#                     optional, extended regular expressions, one per line
+#                     and at least one, that the refused run's output must
+#                     match
+#   refuse-<name>/answer/*.v
+#                     optional, the answer the config is refused on, laid
+#                     out like answer/ and compiled as answer/ is (its own
+#                     coqc-flags, the case's order and pre-checked
+#                     libraries), with no vendor or cwd tree; without it,
+#                     the honest answer
 #   fail-config/expected-reason
 #                     optional, a regular expression the failed reason must
 #                     match
-
+#   utf8-refusal      optional, a marker: the run must refuse a config whose
+#                     bytes are not UTF-8
 #   bad-<name>/tolerate-<flag>.tmpl
 #                     optional, a config that tolerates <flag>: that bad
 #                     answer must pass under it with the flag recorded
@@ -61,7 +89,32 @@
 #                     failed verdict must match, or, for a bad answer with
 #                     `refuse`, the refused run's output
 #
-# The runner takes a case name, or runs every case when given none.
+# The runner takes a case name, or runs every case when given none. Each
+# `ok` line it prints is one run: a case's honest answer, one of its
+# sub-runs (a bad answer, a tolerance, a refused config, fail-config,
+# utf8-refusal), a named case (sha256, vos, digest, sibling, norec,
+# forgeries), a form of norec or a forgery. A run in which every case
+# passed ends with
+#
+#   compare.sh: <run> ok, <skipped> skipped, <held> held
+#
+# where <held> counts the runs the fixture tree holds (of the named case
+# alone, when the runner is given one), and fails when <run> and <skipped>
+# do not add up to <held>. Only the forgeries are skipped, where their
+# trees are not mounted. `compare.sh --count` prints the whole tree's
+# <held> and runs nothing.
+#
+# COMPARE_STRICT=1 also fails a run that skipped anything, or that leaves a
+# check out for want of python3 (the parse of a verdict file) or of
+# sha256sum (the cross-check of every digest).
+#
+# COMPARE_KEEP_VERDICTS=<dir> keeps the verdict file of each rocqchk run
+# that writes one, as <dir>/<case>/<sub-run>.json, copied before the run's
+# checks. <sub-run> is honest, bad-<name>, bad-<name>.tolerate-<flag>,
+# bad-<name>.tolerate-<flag>.honest (the honest answer under that
+# tolerance), refuse-<name>, fail-config or refuse-invalid-utf8; for the
+# named cases, answer (vos, digest), honest (sibling), <form>.honest and
+# <form>.bad (norec) and <forgery> (forgeries).
 #
 # The challenge and the answer are compiled from the SAME source layout, at
 # the same paths and under the same logical root (Top), which is what the
@@ -76,6 +129,23 @@ here=$(cd "$(dirname "$0")" && pwd)
 cases_dir="$here/compare"
 
 fail() { >&2 echo "FAILURE: $*"; exit 1; }
+
+# The count (see above): the runs that printed an ok line, and the runs
+# skipped.
+ran=0
+skipped=0
+passed() { # <ok line>
+  echo "$1"
+  ran=$((ran + 1))
+}
+
+# A tool that a check needs. Without it the check is left out, unless
+# COMPARE_STRICT=1, where leaving a check out fails the run.
+have() { # <command>
+  command -v "$1" > /dev/null && return
+  [ "${COMPARE_STRICT:-}" != 1 ] || fail "no $1, and COMPARE_STRICT=1 leaves no check out"
+  return 1
+}
 
 # Every rocqchk run is bounded, so a hang fails the suite rather than
 # stalling it. COMPARE_TIMEOUT sets the bound.
@@ -106,9 +176,9 @@ prelude_vo() {
 
 # The verdict file parses, when a JSON reader is at hand. A reader that is
 # not there leaves the check out rather than passing it silently; the suite
-# prints which.
+# prints which, and COMPARE_STRICT=1 fails instead.
 json_valid() {
-  if command -v python3 > /dev/null; then
+  if have python3; then
     python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1"
   else
     echo "  (no python3: the verdict file is not parsed)" >&2
@@ -138,7 +208,7 @@ case_sha256() {
     local got
     got=$(bounded rocqchk -sha256 "$d/v$n")
     [ "$got" = "$2" ] || fail "sha256 vector $n is $got, expected $2"
-    if command -v sha256sum > /dev/null; then
+    if have sha256sum; then
       local ref
       ref=$(sha256sum "$d/v$n" | cut -d' ' -f1)
       [ "$got" = "$ref" ] || fail "sha256 vector $n is $got, sha256sum says $ref"
@@ -155,7 +225,7 @@ case_sha256() {
   check_vector v_896 cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1
   check_vector v_million cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0
   # a file of 1 MiB of random bytes, against sha256sum
-  if command -v sha256sum > /dev/null; then
+  if have sha256sum; then
     head -c 1048576 /dev/urandom > "$d/rand"
     local got ref
     got=$(bounded rocqchk -sha256 "$d/rand")
@@ -163,7 +233,7 @@ case_sha256() {
     [ "$got" = "$ref" ] || fail "sha256 of a random file is $got, sha256sum says $ref"
   fi
   rm -rf "$d"
-  echo "ok sha256"
+  passed "ok sha256"
 }
 
 # ---------------------------------------------------------------- a case
@@ -174,6 +244,11 @@ case_sha256() {
 # image's own libraries are bound by no -Q, and a test must not write into
 # the installation it runs against.
 rocq_env=()
+
+# The directory of the case's elimination-flag plugin, when the case has
+# one (needs-elim-plugin); a tree's coqc-flags reaches it as
+# @ELIM_PLUGIN_DIR@.
+elim_plugin=""
 
 # Compile every .v of <src> into <dst>, under the logical root Top, with the
 # pre-checked library of <pre> on the load path when there is one.
@@ -188,6 +263,11 @@ build_tree() {
   if [ -f "$src/coqc-flags" ]; then
     local extra
     read -r extra < "$src/coqc-flags"
+    if [[ $extra == *"@ELIM_PLUGIN_DIR@"* ]]; then
+      [ -n "$elim_plugin" ] \
+        || fail "$src/coqc-flags names @ELIM_PLUGIN_DIR@, and the case has no needs-elim-plugin"
+      extra=${extra//"@ELIM_PLUGIN_DIR@"/$elim_plugin}
+    fi
     args+=($extra)
   fi
   local f
@@ -203,10 +283,12 @@ build_tree() {
   done
 }
 
+# The order to compile the .v files of <src> in: the order file of <dir>
+# (default: the directory above <src>, the case), else alphabetical.
 file_order() {
-  local src=$1
-  if [ -f "$src/../order" ]; then
-    cat "$src/../order"
+  local src=$1 dir=${2:-$1/..}
+  if [ -f "$dir/order" ]; then
+    cat "$dir/order"
   else
     (cd "$src" && ls *.v | sort)
   fi
@@ -247,7 +329,7 @@ make_config() {
     # Every digest the comparator writes into a config is also checked
     # against sha256sum, so a defect in the comparator's SHA-256 cannot hide
     # behind its own agreement with itself.
-    if command -v sha256sum > /dev/null; then
+    if have sha256sum; then
       local ref
       ref=$(sha256sum "$f" | cut -d' ' -f1)
       [ "$sha" = "$ref" ] || fail "rocqchk -sha256 $f is $sha, sha256sum says $ref"
@@ -263,7 +345,7 @@ make_config() {
     top_path=${BASH_REMATCH[1]}
     [ -f "$chdir/$top_path.vo" ] || fail "no challenge file $top_path.vo to pre-check"
     top_sha=$(bounded rocqchk -sha256 "$chdir/$top_path.vo")
-    if command -v sha256sum > /dev/null; then
+    if have sha256sum; then
       local top_ref
       top_ref=$(sha256sum "$chdir/$top_path.vo" | cut -d' ' -f1)
       [ "$top_sha" = "$top_ref" ] || fail "rocqchk -sha256 $top_path.vo is $top_sha, sha256sum says $top_ref"
@@ -299,12 +381,60 @@ run_compare() {
   echo "$code"
 }
 
+# The elimination-flag plugin of misc/unchecked-eliminations, built in
+# <dir> from the files its _CoqProject names and nothing else:
+# misc/unchecked-eliminations.sh builds and cleans in the source directory
+# while other tests run, so a build product found there may be half
+# written.
+build_elim_plugin() { # <dir> <case name>
+  local from="$here/unchecked-eliminations" to=$1 f
+  mkdir -p "$to"
+  cp "$from/_CoqProject" "$to"/
+  while read -r f || [ -n "$f" ]; do
+    case $f in ''|-*) continue ;; esac
+    mkdir -p "$to/$(dirname "$f")"
+    cp "$from/$f" "$to/$f"
+  done < "$from/_CoqProject"
+  (cd "$to" && export COQBIN="$BIN" && rocq makefile -f _CoqProject -o Makefile \
+      && make src/elim_flag_plugin.cmxs) > "$to/build.log" 2>&1 \
+    || { cat "$to/build.log" >&2; fail "$2: the elimination-flag plugin does not build"; }
+}
+
+# With COMPARE_KEEP_VERDICTS=<dir>, the verdict file a run just wrote is
+# kept as <dir>/<case>/<sub-run>.json.
+keep_verdict() { # <verdict file> <case> <sub-run>
+  [ -n "${COMPARE_KEEP_VERDICTS:-}" ] || return 0
+  [ -f "$1" ] || return 0
+  mkdir -p "$COMPARE_KEEP_VERDICTS/$2"
+  cp "$1" "$COMPARE_KEEP_VERDICTS/$2/$3.json"
+}
+
+# Each extended regular expression of <patterns>, one per line, must match
+# <file>. A patterns file that holds none fails: it would check nothing.
+match_reasons() { # <patterns> <file> <run> <what is matched>
+  local reason reason_count=0
+  while IFS= read -r reason || [ -n "$reason" ]; do
+    [[ $reason =~ [^[:space:]] ]] || continue
+    reason_count=$((reason_count + 1))
+    grep -Eq -- "$reason" "$2" \
+      || { cat "$2"; fail "$3: $4 does not match $reason"; }
+  done < "$1"
+  [ "$reason_count" -gt 0 ] || fail "$3: expected-reason has no patterns"
+}
+
 run_case() {
   local name=$1
   local c="$cases_dir/$name"
   [ -d "$c" ] || fail "no case $name"
   local work
   work=$(mktemp -d)
+
+  # The elimination-flag plugin, when the case's trees load it.
+  elim_plugin=""
+  if [ -f "$c/needs-elim-plugin" ]; then
+    build_elim_plugin "$work/elim-plugin" "$name"
+    elim_plugin="$work/elim-plugin/src"
+  fi
 
   # The image stand-in, reached through ROCQPATH and bound by no -Q.
   rocq_env=()
@@ -347,6 +477,7 @@ run_case() {
   order_a=$(file_order "$c/answer")
   build_tree "$c/answer" "$work/answer" "$pre" "$order_a"
   code=$(run_compare "$work" "$work/answer" "$work/config.json" "$pre")
+  keep_verdict "$work/out.json" "$name" honest
   [ "$code" = "0" ] || { cat "$work/log"; fail "$name: the honest answer exits $code"; }
   [ -f "$work/out.json" ] || fail "$name: no verdict file"
   json_valid "$work/out.json" || fail "$name: the verdict file is not valid JSON"
@@ -419,35 +550,24 @@ run_case() {
     # file was there before it: here, the honest answer's passing one.
     seed_stale_verdict "$work/out.json"
     code=$(run_compare "$work" "$bdir" "$work/config.json" "$pre" "$bvendor" "$vroot" "$bcwd")
+    keep_verdict "$work/out.json" "$name" "$b"
     if [ -f "$bad/refuse" ]; then
       [ "$code" != "0" ] || fail "$name/$b: the run should not have completed"
       [ ! -f "$work/out.json" ] || fail "$name/$b: an earlier verdict file survived the refusal"
       # A refusal that must be a specific one names it, so that the run
       # cannot pass this check by failing for another reason.
       if [ -f "$bad/expected-reason" ]; then
-        local reason
-        while IFS= read -r reason; do
-          [ -z "$reason" ] && continue
-          grep -Eq -- "$reason" "$work/log" \
-            || { cat "$work/log"; fail "$name/$b: the refusal does not match $reason"; }
-        done < "$bad/expected-reason"
+        match_reasons "$bad/expected-reason" "$work/log" "$name/$b" "the refusal"
       fi
     else
       [ "$code" = "0" ] || { cat "$work/log"; fail "$name/$b: the run exits $code"; }
       grep -q '"verdict":"fail"' "$work/out.json" \
         || { cat "$work/out.json"; fail "$name/$b: no theorem failed"; }
       if [ -f "$bad/expected-reason" ]; then
-        local reason reason_count=0
-        while IFS= read -r reason || [ -n "$reason" ]; do
-          [[ $reason =~ [^[:space:]] ]] || continue
-          reason_count=$((reason_count + 1))
-          grep -Eq -- "$reason" "$work/out.json" \
-            || { cat "$work/out.json"; fail "$name/$b: the failure does not match $reason"; }
-        done < "$bad/expected-reason"
-        [ "$reason_count" -gt 0 ] || fail "$name/$b: expected-reason has no patterns"
+        match_reasons "$bad/expected-reason" "$work/out.json" "$name/$b" "the failure"
       fi
     fi
-    echo "  ok $name/$b"
+    passed "  ok $name/$b"
     # A named tolerance is a documented cost: it must turn this exact bad
     # answer into a pass and the verdict must say that it did.
     local tolerate
@@ -458,14 +578,16 @@ run_case() {
       flag=${flag#tolerate-}
       make_config "$tolerate" "$work/challenge" "$work/tolerated-config.json" "$pre"
       code=$(run_compare "$work" "$bdir" "$work/tolerated-config.json" "$pre" "$bvendor" "$vroot")
+      keep_verdict "$work/out.json" "$name" "$b.tolerate-$flag"
       [ "$code" = "0" ] || { cat "$work/log"; fail "$name/$b/$flag: the run exits $code"; }
       grep -q '"verdict":"pass"' "$work/out.json" \
         && ! grep -q '"verdict":"fail"' "$work/out.json" \
         || { cat "$work/out.json"; fail "$name/$b/$flag: the tolerated answer did not pass"; }
       grep -q "\"kind\":\"$flag\"" "$work/out.json" \
         || { cat "$work/out.json"; fail "$name/$b/$flag: the passing verdict does not record $flag"; }
-      echo "  ok $name/$b/$flag"
+      passed "  ok $name/$b/$flag"
       code=$(run_compare "$work" "$work/answer" "$work/tolerated-config.json" "$pre")
+      keep_verdict "$work/out.json" "$name" "$b.tolerate-$flag.honest"
       [ "$code" = "0" ] || { cat "$work/log"; fail "$name/$b/$flag: the unchanged answer exits $code"; }
       grep -q '"verdict":"pass"' "$work/out.json" \
         && ! grep -q "\"kind\":\"$flag\"" "$work/out.json" \
@@ -473,22 +595,37 @@ run_case() {
     done
   done
 
-  # configs that must be refused
+  # configs that must be refused, on the honest answer or on an answer of
+  # their own, laid out like answer/ and compiled as answer/ is (its own
+  # coqc-flags, the case's order and pre-checked libraries), with no vendor
+  # or cwd tree
   local ref
   for ref in "$c"/refuse-*; do
     [ -d "$ref" ] || continue
-    local r
+    local r rtree="$work/answer"
     r=$(basename "$ref")
+    if [ -d "$ref/answer" ]; then
+      local rorder
+      rorder=$(file_order "$ref/answer" "$c")
+      rtree="$work/$r"
+      build_tree "$ref/answer" "$rtree" "$pre" "$rorder"
+    fi
     seed_stale_verdict "$work/out.json"
     if [ -f "$ref/config.tmpl" ]; then
       make_config "$ref/config.tmpl" "$work/challenge" "$work/bad-config.json" "$pre"
     else
       cp "$ref/config.json" "$work/bad-config.json"
     fi
-    code=$(run_compare "$work" "$work/answer" "$work/bad-config.json" "$pre")
+    code=$(run_compare "$work" "$rtree" "$work/bad-config.json" "$pre")
+    keep_verdict "$work/out.json" "$name" "$r"
     [ "$code" != "0" ] || fail "$name/$r: the run should not have completed"
     [ ! -f "$work/out.json" ] || fail "$name/$r: an earlier verdict file survived the refusal"
-    echo "  ok $name/$r"
+    # A refusal that must be a specific one names it, so that the run
+    # cannot pass this check by failing for another reason.
+    if [ -f "$ref/expected-reason" ]; then
+      match_reasons "$ref/expected-reason" "$work/log" "$name/$r" "the refusal"
+    fi
+    passed "  ok $name/$r"
   done
 
   # A config under which the honest answer must fail, rather than one the
@@ -498,20 +635,14 @@ run_case() {
     [ -d "$fc" ] || continue
     make_config "$fc/config.tmpl" "$work/challenge" "$work/fail-config.json" "$pre"
     code=$(run_compare "$work" "$work/answer" "$work/fail-config.json" "$pre")
+    keep_verdict "$work/out.json" "$name" fail-config
     [ "$code" = "0" ] || { cat "$work/log"; fail "$name/fail-config: the run exits $code"; }
     grep -q '"verdict":"fail"' "$work/out.json" \
       || { cat "$work/out.json"; fail "$name/fail-config: the honest answer passed"; }
     if [ -f "$fc/expected-reason" ]; then
-      local reason reason_count=0
-      while IFS= read -r reason || [ -n "$reason" ]; do
-        [[ $reason =~ [^[:space:]] ]] || continue
-        reason_count=$((reason_count + 1))
-        grep -Eq -- "$reason" "$work/out.json" \
-          || { cat "$work/out.json"; fail "$name/fail-config: the failure does not match $reason"; }
-      done < "$fc/expected-reason"
-      [ "$reason_count" -gt 0 ] || fail "$name/fail-config: expected-reason has no patterns"
+      match_reasons "$fc/expected-reason" "$work/out.json" "$name/fail-config" "the failure"
     fi
-    echo "  ok $name/fail-config"
+    passed "  ok $name/fail-config"
   done
 
   # A config whose bytes are not UTF-8. It is written here rather than kept
@@ -521,13 +652,14 @@ run_case() {
     printf '{"theorems": [{"name": "Top.A.\xff"}], "challenge_files": [{"path": "A.vo", "sha256": "%s"}]}\n' \
       "$(bounded rocqchk -sha256 "$work/challenge/A.vo")" > "$work/bad-config.json"
     code=$(run_compare "$work" "$work/answer" "$work/bad-config.json" "$pre")
+    keep_verdict "$work/out.json" "$name" refuse-invalid-utf8
     [ "$code" != "0" ] || fail "$name: a config that is not UTF-8 was accepted"
     [ ! -f "$work/out.json" ] || fail "$name: an earlier verdict file survived the refusal"
-    echo "  ok $name/refuse-invalid-utf8"
+    passed "  ok $name/refuse-invalid-utf8"
   fi
 
   rm -rf "$work"
-  echo "ok $name"
+  passed "ok $name"
 }
 
 # ------------------------------------------------- an answer without proofs
@@ -560,10 +692,11 @@ case_vos() {
   # The answer's own check stops this run, before any comparison.
   seed_stale_verdict "$work/out.json"
   code=$(run_compare "$work" "$work/answer" "$work/config.json" "")
+  keep_verdict "$work/out.json" vos answer
   [ "$code" != "0" ] || { cat "$work/log"; fail "vos: an answer without its proofs was graded"; }
   [ ! -f "$work/out.json" ] || fail "vos: an earlier verdict file survived the refusal"
   rm -rf "$work"
-  echo "ok vos"
+  passed "ok vos"
 }
 
 # ------------------------------- the two sides on different shared libraries
@@ -599,11 +732,12 @@ case_digest() {
   local code
   seed_stale_verdict "$work/out.json"
   code=$(run_compare "$work" "$work/answer" "$work/config.json" "$work/pre2")
+  keep_verdict "$work/out.json" digest answer
   [ "$code" != "0" ] \
     || { cat "$work/log"; fail "digest: the two sides' shared libraries differ and the run passed"; }
   [ ! -f "$work/out.json" ] || fail "digest: an earlier verdict file survived the refusal"
   rm -rf "$work"
-  echo "ok digest"
+  passed "ok digest"
 }
 
 # ------------------- a pre-checked library under the answer's own root
@@ -641,11 +775,12 @@ case_sibling() {
   local code=$?
   set -e
   completed "$code" "$work/log"
+  keep_verdict "$work/out.json" sibling honest
   [ "$code" = "0" ] || { cat "$work/log"; fail "sibling: an honest answer exits $code"; }
   grep -q '"verdict":"pass"' "$work/out.json" \
     || { cat "$work/out.json"; fail "sibling: the honest answer did not pass"; }
   rm -rf "$work"
-  echo "ok sibling"
+  passed "ok sibling"
 }
 
 # ------------------------- the answer libraries named only by -norec
@@ -661,6 +796,10 @@ case_sibling() {
 #
 # The libraries sit under a root with a dotted prefix and in
 # subdirectories, the shape a task tree takes (-Q tree Top, Sub/B.v).
+#
+# The forms, which the count reads too.
+norec_forms=(norec positional)
+
 case_norec() {
   local work
   work=$(mktemp -d)
@@ -714,23 +853,25 @@ case_norec() {
   }
 
   local form code
-  for form in norec positional; do
+  for form in "${norec_forms[@]}"; do
     code=$(norec_run "$form" "$work/answer")
+    keep_verdict "$work/out.json" norec "$form.honest"
     [ "$code" = "0" ] || { cat "$work/log"; fail "norec/$form: the honest answer exits $code"; }
     [ -f "$work/out.json" ] || fail "norec/$form: no verdict file"
     grep -q '"verdict":"pass"' "$work/out.json" \
       || { cat "$work/out.json"; fail "norec/$form: the honest answer did not pass"; }
     code=$(norec_run "$form" "$work/bad")
+    keep_verdict "$work/out.json" norec "$form.bad"
     if [ "$code" = "0" ]; then
       grep -q '"verdict":"fail"' "$work/out.json" \
         || { cat "$work/out.json"; fail "norec/$form: the wrong answer did not fail"; }
     else
       [ ! -f "$work/out.json" ] || fail "norec/$form: a verdict file was written anyway"
     fi
-    echo "  ok norec/$form"
+    passed "  ok norec/$form"
   done
   rm -rf "$work"
-  echo "ok norec"
+  passed "ok norec"
 }
 
 # ---------------------------------------------------- the recorded forgeries
@@ -741,18 +882,28 @@ case_norec() {
 # the fix for each, so none of them may reach a passing verdict. Three
 # outcomes count as not-pass, and the case prints which one each takes:
 # the forgery does not compile, rocqchk refuses it, or the verdict is fail.
+# The answer's Main.v proves False by "exact bottom" when the tree's
+# Forge.v declares bottom, and by "exact contradiction" otherwise.
 #
 # The trees are read-only recordings; COMPARE_FORGERIES points at them and
 # the case is skipped where they are not mounted.
 : "${COMPARE_FORGERIES:=/mnt/durable/sami/eval-driven-development/round4/verified-grading/wrong-answers-e2e/trees}"
+# The forgeries, which the count reads too.
+forgery_names=(os-22378 os-22383 os-22391 os-22675 os-vm357 os-parray630)
 
 case_forgeries() {
   if [ ! -d "$COMPARE_FORGERIES" ]; then
     echo "skip forgeries (no $COMPARE_FORGERIES)"
+    skipped=$((skipped + $(held_of forgeries)))
     return
   fi
+  # <log> -> its first error line and the next one, joined: Rocq prints
+  # "Error:" alone and the message on the line after it.
+  first_error() {
+    grep -m1 -i -A1 error "$1" | paste -sd ' ' | cut -c1-110
+  }
   local f
-  for f in os-22378 os-22383 os-22391 os-22675 os-vm357 os-parray630; do
+  for f in "${forgery_names[@]}"; do
     local src="$COMPARE_FORGERIES/$f/plain/Lib"
     [ -d "$src" ] || fail "forgeries: no $src"
     local work
@@ -765,19 +916,21 @@ case_forgeries() {
     done
     printf '%s\n' 'Require Import Forge.' 'Theorem forged : False.' 'Proof.' 'Admitted.' \
       > "$work/challenge/Main.v"
+    local proof=contradiction
+    grep -Eq '^(Definition|Lemma|Theorem) bottom ' "$src/Forge.v" && proof=bottom
     printf '%s\n' 'Require Import Forge.' 'Theorem forged : False.' \
-      'Proof. exact contradiction. Qed.' > "$work/answer/Main.v"
+      "Proof. exact $proof. Qed." > "$work/answer/Main.v"
     local order="Forge.v Main.v"
     [ -f "$src/hurkens.v" ] && order="hurkens.v Forge.v Main.v"
     local ok="" v
     for v in $order; do
       (cd "$work/challenge" && coqc -R . Top "$v") > "$work/cc" 2>&1 \
-        || { ok="the challenge does not compile: $(grep -m1 -i error "$work/cc" | cut -c1-110)"; break; }
+        || { ok="the challenge does not compile: $(first_error "$work/cc")"; break; }
     done
     if [ -z "$ok" ]; then
       for v in $order; do
         (cd "$work/answer" && coqc -R . Top "$v") > "$work/ac" 2>&1 \
-          || { ok="the answer does not compile: $(grep -m1 -i error "$work/ac" | cut -c1-110)"; break; }
+          || { ok="the answer does not compile: $(first_error "$work/ac")"; break; }
       done
     fi
     if [ -z "$ok" ]; then
@@ -798,8 +951,9 @@ case_forgeries() {
       local code=$?
       set -e
       completed "$code" "$work/log"
+      keep_verdict "$work/out.json" forgeries "$f"
       if [ "$code" != "0" ]; then
-        ok="rocqchk refuses it: $(grep -m1 -i error "$work/log" | cut -c1-110)"
+        ok="rocqchk refuses it: $(first_error "$work/log")"
       elif grep -q '"verdict":"fail"' "$work/out.json"; then
         ok="the verdict is fail"
       else
@@ -807,10 +961,10 @@ case_forgeries() {
         fail "forgeries/$f: the forgery PASSES"
       fi
     fi
-    echo "  ok forgeries/$f: $ok"
+    passed "  ok forgeries/$f: $ok"
     rm -rf "$work"
   done
-  echo "ok forgeries"
+  passed "ok forgeries"
 }
 
 compare_provenance() {
@@ -825,9 +979,67 @@ compare_provenance() {
   bounded rocqchk --version
 }
 
+# ---------------------------------------------------------------- the count
+#
+# The runs the fixture tree holds: one per ok line that a run in which
+# every case passed prints.
+
+# A case directory: its honest answer, each bad answer and each tolerance
+# of one, each refused config, fail-config and utf8-refusal, found as
+# run_case finds them.
+held_case() { # <case directory>
+  local c=$1 n=1 d t
+  for d in "$c"/bad-*; do
+    [ -d "$d" ] || continue
+    n=$((n + 1))
+    for t in "$d"/tolerate-*.tmpl; do
+      [ -f "$t" ] || continue
+      n=$((n + 1))
+    done
+  done
+  for d in "$c"/refuse-*; do
+    [ -d "$d" ] || continue
+    n=$((n + 1))
+  done
+  if [ -d "$c/fail-config" ]; then n=$((n + 1)); fi
+  if [ -f "$c/utf8-refusal" ]; then n=$((n + 1)); fi
+  echo "$n"
+}
+
+# A case as the runner is given it.
+held_of() { # <case>
+  case "$1" in
+    sha256|vos|digest|sibling) echo 1 ;;
+    norec) echo $((1 + ${#norec_forms[@]})) ;;
+    forgeries) echo $((1 + ${#forgery_names[@]})) ;;
+    *) held_case "$cases_dir/$1" ;;
+  esac
+}
+
+# Every case, as the runner runs them when it is given none.
+held_total() {
+  local n c
+  n=$(held_of sha256)
+  for c in "$cases_dir"/*/; do
+    n=$((n + $(held_case "$c")))
+  done
+  for c in vos digest sibling norec forgeries; do
+    n=$((n + $(held_of "$c")))
+  done
+  echo "$n"
+}
+
 main() {
+  # The count reads the fixture tree alone, so it needs no rocq.
+  if [ "${1:-}" = --count ]; then
+    [ $# = 1 ] || fail "--count takes no case"
+    held_total
+    return
+  fi
   compare_provenance
+  local held
   if [ $# -gt 0 ]; then
+    held=$(held_of "$1")
     case "$1" in
       sha256) case_sha256 ;;
       vos) case_vos ;;
@@ -838,6 +1050,7 @@ main() {
       *) run_case "$1" ;;
     esac
   else
+    held=$(held_total)
     case_sha256
     local c
     for c in "$cases_dir"/*/; do
@@ -849,6 +1062,11 @@ main() {
     case_norec
     case_forgeries
   fi
+  echo "compare.sh: $ran ok, $skipped skipped, $held held"
+  [ $((ran + skipped)) = "$held" ] \
+    || fail "$ran ran and $skipped were skipped, but the fixture tree holds $held runs"
+  [ "${COMPARE_STRICT:-}" != 1 ] || [ "$skipped" = 0 ] \
+    || fail "$skipped runs were skipped under COMPARE_STRICT=1"
 }
 
 main "$@"

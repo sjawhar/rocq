@@ -566,21 +566,32 @@ let read_config file =
      rests on does not tolerate the same condition in the agent's own
      declaration.
 
-     Without an object, [indices-not-mattering] tolerates the kind wherever
-     it appears: every inductive of an image built without [-indices-matter]
-     may carry it, and the route this comparator replaces always allows it.
-     [uip] is allowed by the route this comparator replaces when the task
-     enables [allow_uip]; this comparator accepts a kind-only [uip] entry
-     when its config requests one. [answer-universe-constraints] is also
-     kind-only, but has a narrower meaning: it skips only the
-     answer-to-challenge universe comparison. It names no declaration, so an
-     object would not make the requested relaxation more precise.
+     [assumed-positive], [unsafe-fixpoint] and [type-in-type] are refused
+     with an object or without ([never_tolerated]): each is how a proof of
+     False is written, and the route this comparator replaces denies it
+     whatever the object (grading-tools [_axiom_kinds.py],
+     [_ALWAYS_ALLOWED_KINDS]). The check comes before the object is read,
+     so both forms reach it.
 
-     The rest -- [assumed-positive], [unsafe-fixpoint], [type-in-type],
-     [unchecked-eliminations] -- are how a proof of False is written, and
-     the replaced route denies them by name or vouches for one object at a
-     time, so a kind-only entry for them is refused here rather than left to
-     a config to get right. *)
+     [unchecked-eliminations] is how a proof of False is written too, but
+     the replaced route vouches for one name at a time, so it is tolerated
+     on a named object alone, and a kind-only entry for it is refused.
+
+     [indices-not-mattering] and [uip] take both forms. Without an object,
+     [indices-not-mattering] tolerates the kind wherever it appears: every
+     inductive of an image built without [-indices-matter] may carry it, and
+     the replaced route always allows it. The config has no [allow_uip]
+     input, so a kind-only [uip] entry is that switch: writing it is the
+     task saying definitional UIP is allowed wherever its proof reaches. An
+     entry with an object allows it on that object alone, when the object is
+     the task's declaration, and leaving both out is the task saying it is
+     not allowed.
+
+     [answer-universe-constraints] is kind-only, and has a narrower meaning:
+     it skips only the answer-to-challenge universe comparison. It names no
+     declaration, so an object would not make the requested relaxation more
+     precise, and an entry with one is refused. *)
+  let never_tolerated = ["assumed-positive"; "unsafe-fixpoint"; "type-in-type"] in
   let kind_only_allowed =
     ["indices-not-mattering"; "uip"; answer_universe_constraints]
   in
@@ -590,21 +601,25 @@ let read_config file =
       List.map (fun e ->
           let e = as_obj "a tolerated flag" e in
           fields "a tolerated flag" ["kind"; "object"] e;
-          match get e "kind", get e "object" with
-          | Some k, Some o ->
-            let k = as_string "a tolerated flag's kind" k in
+          let k = match get e "kind" with
+            | None -> cfg_error "a tolerated flag needs a kind"
+            | Some k -> as_string "a tolerated flag's kind" k
+          in
+          if List.exists (String.equal k) never_tolerated then
+            cfg_error ("the tolerated flag " ^ k ^ " is refused with an object or without: " ^
+                       "the route this comparator replaces denies it whatever the object");
+          match get e "object" with
+          | Some o ->
             if String.equal k answer_universe_constraints then
               cfg_error ("the tolerated flag " ^ answer_universe_constraints ^
                          " does not name an object");
             k, Some (as_string "a tolerated flag's object" o)
-          | Some k, None ->
-            let k = as_string "a tolerated flag's kind" k in
+          | None ->
             if not (List.exists (String.equal k) kind_only_allowed) then
               cfg_error ("the tolerated flag " ^ k ^ " needs an object: only " ^
                          "indices-not-mattering and uip tolerate every object; " ^
                          answer_universe_constraints ^ " is a global check");
-            k, None
-          | None, _ -> cfg_error "a tolerated flag needs a kind")
+            k, None)
         (as_list "tolerated_flags" v)
   in
   let rewrite_rules = match get top "rewrite_rules" with
@@ -921,12 +936,6 @@ and eq_recdecl m (nas1, tl1, bl1) (nas2, tl2, bl2) =
   let m = Array.fold_left2 eq_constr m tl1 tl2 in
   Array.fold_left2 eq_constr m bl1 bl2
 
-(** The shape the kernel's own comparison will take when [Indmerge] lands. *)
-let equal_constr m c1 c2 =
-  match eq_constr m c1 c2 with
-  | m -> Ok m
-  | exception (Diff d | Undecided d) -> Error d
-
 (************************************************************************)
 (** {6 Declarations} *)
 
@@ -1073,12 +1082,107 @@ let eq_mib_body m (mib1 : mutual_inductive_body) (mib2 : mutual_inductive_body) 
     diff "the number of types in the block";
   Array.fold_left2 eq_one_ind m mib1.mind_packets mib2.mind_packets
 
-(** The shape [Indmerge.eq_mib] will take. The environment is not read: the
-    comparison is structural. *)
-let eq_mib m _env mib1 mib2 =
+(** The whole comparison of two blocks, with [Diff] and [Undecided] as an
+    [Error]. It stays apart from [Indmerge.eq_mib], which differs on three
+    level rules -- it maps a bound variable [Var i] to [Var j] with
+    [i <> j], maps [Set] to a named level, and pairs the entries of a [max]
+    by position -- and whose level map is abstract, so that it cannot take
+    the one map [compare_declarations] threads through the run. The
+    test-only cross-check below holds the two together. *)
+let eq_mib m mib1 mib2 =
   match eq_mib_body m mib1 mib2 with
   | m -> Ok m
   | exception (Diff d | Undecided d) -> Error d
+
+(* A test-only cross-check, off by default, in the pattern of
+   ROCQCHK_COOK_CROSS_CHECK (checkLibrary.ml): with
+   ROCQCHK_INDMERGE_CROSS_CHECK set to a non-empty value, each pair of
+   blocks this comparator compares is compared again by [eq_mib] and by
+   [Indmerge.eq_mib], each from an empty level map, and an anomaly stops the
+   run when one accepts and the other refuses. An [Undecided] is a refusal.
+   The same check runs at the one [eq_mib] call of [Indmerge.merge], through
+   [Indmerge.set_eq_mib_observer]. This module is linked into rocqchk and
+   not into rocq c, so those are the merges of rocqchk -merge-inductives
+   runs, not of rocq c's. The test suite sets the variable
+   (test-suite/Makefile), so that every rocqchk run there checks that the
+   two comparisons agree, and misc/indmerge_cross_check.sh checks that both
+   sides are reached. It never changes a verdict: unset, nothing runs; set,
+   agreement does nothing and disagreement stops the run.
+
+   The two differ in these places, which no fixture reaches today; a
+   fixture that reached one would stop with the anomaly:
+   - [allow_uip] or [sprop_allowed] differing between the two blocks:
+     [Indmerge]'s [equal_flags] compares them and [eq_typing_flags] does
+     not;
+   - a differing [mind_relies_on_indices_not_mattering], which only
+     [Indmerge] compares;
+   - differing template data: [Indmerge] compares it, this comparator only
+     whether a block is template;
+   - permuted bound universe variables, and a bound variable against any
+     other level: [Indmerge] maps any level to any level;
+   - [Set] against a named level, which [Indmerge] maps too;
+   - [max] universes in another order, which [Indmerge] pairs by position,
+     and a [max] with two entries of one increment whose levels the block
+     has not mapped before, which this comparator leaves undecided;
+   - a [Cast] inside a block, which this comparator strips and [Indmerge]
+     compares;
+   - the data the kernel derives from a block (the head-normal constructor
+     types, the constructor arities, the recursive-argument tree, the VM
+     data), which only [Indmerge] compares: it can differ while the written
+     types agree, when a constant those types unfold has another body on
+     the other side.
+   Section data, metavariables and existential variables, where the two
+   differ too, never appear in a loaded block. *)
+let indmerge_cross_check_on =
+  match Sys.getenv_opt "ROCQCHK_INDMERGE_CROSS_CHECK" with
+  | None | Some "" -> false
+  | Some _ -> true
+
+(* With ROCQCHK_INDMERGE_CROSS_CHECK_LOG=<file> as well, each check appends
+   one line to <file>: <side> <block> comparator=<accept|refuse>
+   indmerge=<accept|refuse>, where <side> is compare or merge. The file is
+   opened in append mode for each line, so that several processes can add
+   to it. A pair checked again on a retry counts again. *)
+let indmerge_cross_check_log =
+  match Sys.getenv_opt "ROCQCHK_INDMERGE_CROSS_CHECK_LOG" with
+  | None | Some "" -> None
+  | Some file -> Some file
+
+let verdict_word = function Ok _ -> "accept" | Error _ -> "refuse"
+
+let indmerge_agree ~side ~block mine theirs =
+  Option.iter (fun file ->
+      let oc = open_out_gen [Open_wronly; Open_append; Open_creat; Open_text] 0o644 file in
+      Printf.fprintf oc "%s %s comparator=%s indmerge=%s\n"
+        side block (verdict_word mine) (verdict_word theirs);
+      close_out oc)
+    indmerge_cross_check_log;
+  let what () = "indmerge cross-check, " ^ side ^ " side, block " ^ block ^ ": " in
+  match mine, theirs with
+  | Ok _, Ok _ | Error _, Error _ -> ()
+  | Ok _, Error d ->
+    CErrors.anomaly
+      Pp.(str (what () ^ "the comparator accepts it and Indmerge.eq_mib refuses it: ")
+          ++ Indmerge.pr_diff d ++ str ".")
+  | Error d, Ok _ ->
+    CErrors.anomaly
+      Pp.(str (what () ^ "Indmerge.eq_mib accepts it and the comparator refuses it: " ^ d ^ "."))
+
+(* The compare side: a challenge block and the answer's block of the same
+   name, or the two blocks of one module-type field. *)
+let indmerge_cross_check ~block env mib1 mib2 =
+  if indmerge_cross_check_on then
+    let mine = eq_mib empty_umap mib1 mib2 in
+    let theirs = Indmerge.eq_mib Indmerge.empty_umap env mib1 mib2 in
+    indmerge_agree ~side:"compare" ~block mine theirs
+
+(* The merge side: the block [Indmerge.merge] is loading, renamed, the
+   already-loaded candidate it compares it with, and its verdict. *)
+let () =
+  if indmerge_cross_check_on then
+    Indmerge.set_eq_mib_observer (fun kn mib cand theirs ->
+        indmerge_agree ~side:"merge" ~block:(KerName.to_string kn)
+          (eq_mib empty_umap mib cand) theirs)
 
 (************************************************************************)
 (** {6 Module types}
@@ -1105,7 +1209,9 @@ and eq_structure ~env m b1 b2 =
         (* A field of a module type is never a config-named theorem: the
            config names a constant of the environment. *)
         | SFBconst c1, SFBconst c2 -> eq_const_body ~env ~is_theorem:false m c1 c2
-        | SFBmind i1, SFBmind i2 -> eq_mib_body m i1 i2
+        | SFBmind i1, SFBmind i2 ->
+          indmerge_cross_check ~block:(Id.to_string l) env i1 i2;
+          eq_mib_body m i1 i2
         | SFBrules r1, SFBrules r2 ->
           (* The symbols the block rewrites must be the same ones, in the
              same order. The machine rules themselves are not compared: a
@@ -1568,7 +1674,11 @@ let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
       if in_libs libs (MutInd.modpath i) then
         let name = MutInd.to_string i in
         if not (Environ.mem_mind i answer_env) then fail name "missing"
-        else step name (fun m -> eq_mib_body m mib (Environ.lookup_mind i answer_env)))
+        else
+          let mib' = Environ.lookup_mind i answer_env in
+          (* Once, before [step], which runs its closure again on a retry. *)
+          indmerge_cross_check ~block:name answer_env mib mib';
+          step name (fun m -> eq_mib_body m mib mib'))
     challenge_env ();
   let an_modtypes = (Environ.Internal.View.view answer_env).Environ.Internal.View.env_modtypes in
   ModPath.Map.iter (fun mp mt ->
