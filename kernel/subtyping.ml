@@ -348,16 +348,31 @@ let check_constant_alias env cst cb =
   let canonical = Constant.canonical cst in
   if KerName.equal user canonical then ()
   else
+    let refuse () =
+      error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+    in
+    (* Every field that coqc records an alias for has a [Def] body:
+       strengthening ([Modops.strengthen_const]) turns any other body into a
+       definition, and the copies made without strengthening (a module alias
+       or an Include of a module that is already an alias, and
+       [Modops.include_applied_structure]) carry only aliases that an earlier
+       strengthening made. Any other alias would be compared below on its
+       type alone, and in the type of a sealed module nothing else compares a
+       constant's canonical name with the implementation. *)
+    let () = match cb.const_body with
+      | Def _ -> ()
+      | Undef _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse ()
+    in
     let target = Constant.make1 canonical in
     let target_body = Environ.lookup_constant target env in
     let target_body =
-      match target_body.const_body, cb.const_body with
-      | (Undef _ | OpaqueDef _), Def _ ->
+      match target_body.const_body with
+      | Undef _ | OpaqueDef _ ->
         let instance =
           make_abstract_instance (constant_polymorphic_context target_body)
         in
         { target_body with const_body = Def (mkConstU (target, instance)) }
-      | _ -> target_body
+      | Def _ | Primitive _ | Symbol _ -> target_body
     in
     let state = Environ.universes env, Conversion.checked_universes in
     let _ =
