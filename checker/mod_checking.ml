@@ -310,6 +310,48 @@ let lookup_module mp env =
 
 let mk_mtb sign delta = Mod_declarations.make_module_type sign delta
 
+(** A module [X] at path [mp], a field of a structure whose delta resolver
+    is [res], has a resolver of its own, [mod_delta X], and so has each module
+    nested in it. The environment registers the constants and inductives of
+    each module under that module's own resolver ([Modops.add_structure]),
+    and the alias check of [check_structure_field] sees only that one; but a
+    module alias and a functor application substitute them through the whole
+    resolver of a module that contains them ([check_mexpr]). [res] could thus
+    give one of them a canonical name that no check has compared it with, and
+    make two declarations convertible that are not.
+
+    coqc adds each closed module's resolver to the enclosing one
+    ([add_module] and [end_module] in kernel/safe_typing.ml), so the two
+    mostly give the same canonical names. They can still differ in an honest
+    file: in [S with Module X := M] ([check_with_mod] in
+    kernel/mod_typing.ml), the entries that the resolver of [S] had for the
+    names of [X] override those of [M], and a field of [M] converts with the
+    canonical name that [S] gives it. So a name that [res] resolves
+    differently from the resolver of the module that declares it is checked
+    as an alias of [res]'s canonical name, by the check every other alias
+    gets, in [env], which holds [X] and everything declared before it. A
+    functor is skipped: the names of its body are bound, and its resolver is
+    not added to the enclosing one. *)
+let check_nested_resolver env res mp mb =
+  let rec check_body mp mb = match mod_type mb with
+    | MoreFunctor _ -> ()
+    | NoFunctor struc -> List.iter (check_field mp (mod_delta mb)) struc
+  and check_field mp own (lab, field) = match field with
+    | SFBconst cb ->
+      let kn = KerName.make mp lab in
+      let can = Mod_subst.kn_of_delta res kn in
+      if not (KerName.equal can (Mod_subst.kn_of_delta own kn)) then
+        Subtyping.check_constant_alias env (Constant.make kn can) cb
+    | SFBmind mib ->
+      let kn = KerName.make mp lab in
+      let can = Mod_subst.kn_of_delta res kn in
+      if not (KerName.equal can (Mod_subst.kn_of_delta own kn)) then
+        Subtyping.check_inductive_alias env (MutInd.make kn can) mib
+    | SFBmodule mb -> check_body (MPdot (mp, lab)) mb
+    | SFBmodtype _ | SFBrules _ -> ()
+  in
+  check_body mp mb
+
 let rec check_mexpr env mse mp_mse res = match mse with
   | MEident mp ->
     let mb = lookup_module mp env in
@@ -381,7 +423,9 @@ and check_structure_field env st mp lab res = function
       let kn = KerName.make mp lab in
       let kn = Mod_subst.constant_of_delta_kn res kn in
       let () = Check_stat.record_constant kn cb in
-      check_constant_declaration env st kn cb
+      let env', st = check_constant_declaration env st kn cb in
+      let () = Subtyping.check_constant_alias env kn cb in
+      env', st
   | SFBmind mib ->
       let kn = KerName.make mp lab in
       let kn = Mod_subst.mind_of_delta_kn res kn in
@@ -397,11 +441,15 @@ and check_structure_field env st mp lab res = function
         let st = { st_retro = (Mindmap_env.remove kn ind_retro, cst_retro) } in
         st
       in
-      CheckInductive.check_inductive env kn mib retro, st
+      let env' = CheckInductive.check_inductive env kn mib retro in
+      let () = Subtyping.check_inductive_alias env kn mib in
+      env', st
   | SFBmodule msb ->
       let mp = MPdot(mp, lab) in
       let st = check_module env st mp msb in
-      Modops.add_module mp msb env, st
+      let env = Modops.add_module mp msb env in
+      let () = check_nested_resolver env res mp msb in
+      env, st
   | SFBmodtype mty ->
       let mp = MPdot (mp, lab) in
       let () = check_module_type env mp mty in
@@ -447,8 +495,12 @@ and collect_signature_axioms axioms sign mp =
       let kn = KerName.make mp lab in
       let axioms =
         match cb.const_body with
-        | Def _ | OpaqueDef _ | Primitive _ -> axioms
-        | Undef _ | Symbol _ -> axioms_add kn axioms
+        | Def _ | OpaqueDef _ -> axioms
+        (* rocqchk does not check a primitive's declared type against the
+           type of its operator ([check_constant_declaration] skips it), so
+           that type is trusted as an axiom's is, and -o lists the primitive
+           among the axioms. *)
+        | Undef _ | Primitive _ | Symbol _ -> axioms_add kn axioms
       in
       axioms
     | SFBmodule mb ->

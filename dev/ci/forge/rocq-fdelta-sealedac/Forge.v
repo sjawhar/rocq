@@ -1,15 +1,17 @@
 (* Forge, dispatch://BET-885: a .vo in which only A's delta resolver (the
    resolver of A's signature) says that A.X.d is A.X.c, while the resolver of
    A's submodule X does not, gives a closed proof of False through the sealed
-   functor application R : T := F A. This is BET-885's functor-delta case
-   "sealedAc": A is sealed, A.X.c is declared-only in its signature and A.X.d
-   is a definition there. Forge.v is the variant library donor/Lib.v (T's e
-   reads A.X.c = false, and R implements T with an axiom e), the client
-   donor/Client.v compiled against it, and a module Forge_fdelta. Given
-   Forge_fdelta, the reverted build's coqc (unfix.patch) writes R as the
-   application F A, as Control.v has it, and adds A.X.d -> A.X.c to A's
-   resolver only. Then R has no axiom, R.e reads A.X.c = false, A.X.hc reads
-   A.X.c = true, and contradiction has type False. *)
+   functor application R : T := F A: A is sealed, A.X.c is declared-only in
+   its signature and A.X.d is a definition there. Forge.v is, on the Corelib
+   prelude and in one file,
+   test-suite/misc/rocqchk-nested-resolver/sealedAc/donor/: the variant
+   library Lib.v (T's e reads A.X.c = false, and R implements T with an
+   axiom e), the client Client.v compiled against it, and a module
+   Forge_fdelta. Given Forge_fdelta, the reverted build's coqc (unfix.patch)
+   writes R as the application F A, as Control.v has it, and adds
+   A.X.d -> A.X.c to A's resolver only. Then R has no axiom, R.e reads
+   A.X.c = false, A.X.hc reads A.X.c = true, and contradiction has type
+   False. *)
 
 Definition discr (b : bool) : Prop := if b then True else False.
 

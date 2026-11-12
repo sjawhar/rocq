@@ -1,7 +1,7 @@
 (* The honest library of the rocq-fdelta-sealed forge (dispatch://BET-885):
-   R is the functor F applied to A, sealed by T. This is BET-885's
-   functor-delta case "sealed", honest/Lib.v and honest/Client.v in one file,
-   on the Corelib prelude. rocqchk must accept it. *)
+   R is the functor F applied to A, sealed by T. This is
+   test-suite/misc/rocqchk-nested-resolver/sealed/honest/Lib.v and
+   Client.v in one file, on the Corelib prelude. rocqchk must accept it. *)
 
 Module A.
   Module X.

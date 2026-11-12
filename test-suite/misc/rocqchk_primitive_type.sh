@@ -4,9 +4,9 @@
 # operator, so a forged .vo can hold [Primitive bogus : False :=
 # #int63_head0.] and [Definition oops : False := bogus.], a closed proof of
 # False, and rocqchk accepts it. coqc refuses to write those declarations:
-# forge.ml retypes the compiled constants of the honest Bogus.v. What rocqchk
-# must do is list bogus among the axioms of -o, as it did before rocq#22623
-# was ported; the port listed only int, a primitive type, which has no body.
+# forge.ml retypes the compiled constants of the honest Bogus.v. That type is
+# trusted as an axiom's is, so rocqchk must list bogus among the axioms of
+# -o, with int, a primitive type, which has no body.
 set -eu
 
 D=misc/rocqchk-primitive-type
