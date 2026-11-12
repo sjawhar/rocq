@@ -11,7 +11,6 @@
 open Environ
 
 let env_of_library senv clib =
-  let mb = Safe_typing.module_of_library clib in
   let env = Safe_typing.env_of_safe_env senv in
   let qualities, univs = Safe_typing.univs_of_library clib in
   let check_quality q =
@@ -20,8 +19,7 @@ let env_of_library senv clib =
   in
   let () = assert (Sorts.QVar.Set.for_all check_quality (fst qualities)) in
   let env = push_qualities ~rigid:true qualities env in
-  let env = push_context_set ~strict:true univs env in
-  Modops.add_retroknowledge (Mod_declarations.mod_retroknowledge mb) env
+  push_context_set ~strict:true univs env
 
 (* The checker does not read the [vmlibrary] segment of the file at all: it
    compiles the bytecode of every constant itself, from the declarations it is
@@ -37,6 +35,11 @@ let compile_vm_library env clib =
 let import senv opac clib digest =
   let senv = Safe_typing.check_flags_for_library clib senv in
   let dp = Safe_typing.dirpath_of_library clib in
+  (* Not added to the environment the library is checked in: [check_module]
+     checks each registration against what it names, and registers a
+     primitive type once its constant is checked. [Safe_typing.import] adds
+     them all to the environment it returns. *)
+  let retro = Safe_typing.retroknowledge_of_library clib in
   let env = env_of_library senv clib in
   let vmtab, clib = compile_vm_library env clib in
   let env = Environ.set_vm_library vmtab env in
@@ -63,7 +66,7 @@ let import senv opac clib digest =
      Move a global relocation into the non-substituted table and the VM would
      keep the pre-merge name while the kernel checks the merged one. *)
   let mb = Indmerge.apply_earlier_merges (Names.ModPath.MPfile dp) mb in
-  let opac = Mod_checking.check_module env opac (Names.ModPath.MPfile dp) mb in
+  let opac = Mod_checking.check_module env opac retro (Names.ModPath.MPfile dp) mb in
   let vmtab = Vmlibrary.inject (Vmlibrary.export vmtab) in
   let (_,senv) = Safe_typing.import clib vmtab digest senv in senv, opac
 
