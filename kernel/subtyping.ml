@@ -490,11 +490,26 @@ let check_constant_alias env cst cb =
   let canonical = Constant.canonical cst in
   if KerName.equal user canonical then ()
   else
+    (* coqc writes an alias only for a field that it strengthened, whose
+       body is then [Def]. Any other alias would be compared below as a
+       signature parameter, on its type alone, and in the type of a sealed
+       module nothing else compares a constant's canonical name with the
+       implementation: the implementation could give the two names
+       different values. *)
+    let () = match cb.const_body with
+      | Def _ -> ()
+      | Undef _ | OpaqueDef _ | Primitive _ | Symbol _ ->
+        error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+    in
     let target = Constant.make1 canonical in
     let target_body = Environ.lookup_constant target env in
+    (* An honest alias is a field that [Modops.strengthen_const] turned
+       into [Def target], whatever the target's own body: a parameter, an
+       opaque constant, a primitive operator or a symbol. Strengthen the
+       target the same way, so that such an alias converts with it. *)
     let target_body =
       match target_body.const_body, cb.const_body with
-      | (Undef _ | OpaqueDef _), Def _ ->
+      | (Undef _ | OpaqueDef _ | Primitive _ | Symbol _), Def _ ->
         let instance =
           make_abstract_instance (constant_polymorphic_context target_body)
         in
