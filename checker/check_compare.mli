@@ -180,24 +180,3 @@ val sha256_of_file : string -> string
 (** The hex SHA-256 of a file. [rocqchk -sha256 FILE] prints it, which is how
     the test suite checks this implementation against the standard vectors
     and against [sha256sum]. *)
-
-(** {6 The comparison itself}
-
-    Exposed in the shape [kernel/indmerge.ml] will take, so that the two can
-    be merged when it lands. *)
-
-type umap
-(** A bijection between the challenge's universe levels and the answer's,
-    built as the walk goes. A level that would map to two levels, or two
-    levels that would map to one, is a failure. *)
-
-type diff = string
-(** What differs, and where. *)
-
-val empty_umap : umap
-
-val equal_constr : umap -> Constr.t -> Constr.t -> (umap, diff) result
-
-val eq_mib :
-  umap -> Environ.env -> Declarations.mutual_inductive_body ->
-  Declarations.mutual_inductive_body -> (umap, diff) result
