@@ -13,6 +13,8 @@
 
 set -e
 
+. misc/rocqchk_forge_common.bash
+
 D=misc/rocqchk-sigalias
 
 rm -f "$D"/*/*.vo "$D"/*/*.vok "$D"/*/*.vos "$D"/*/*.glob "$D"/out.log
@@ -25,21 +27,11 @@ for f in Lib Sealed Cross Functor; do
   $coqc -noinit -R "$D/donor" SigAlias "$D/donor/$f.v"
 done
 
-# chk <dir> <client> <mode>: rocqchk on SigAlias.Lib and SigAlias.<client> in
-# <dir>, as a grader runs it or with the default options.
-chk() {
-  case $3 in
-    grader) "$BIN"rocqchk -o -bytecode-compiler yes -R "$1" SigAlias -norec SigAlias.Lib "SigAlias.$2" ;;
-    default) "$BIN"rocqchk -R "$1" SigAlias SigAlias.Lib "SigAlias.$2" ;;
-  esac > "$D/out.log" 2>&1
-}
-
+# SigAlias.Lib and SigAlias.<client>, as a grader runs rocqchk and with the
+# default options.
 for mode in grader default; do
-  if ! chk "$D/honest" Client $mode; then
-    echo "rocqchk ($mode) refused the honest libraries"
-    cat "$D/out.log"
-    exit 1
-  fi
+  mode_args $mode "$D/honest" SigAlias Client
+  must_accept "$D/out.log" "rocqchk ($mode) refused the honest libraries" "${mode_argv[@]}"
 done
 
 for kind in sealed cross functor; do
@@ -56,17 +48,9 @@ for kind in sealed cross functor; do
   ocaml "$D/forge.ml" client "$D/donor/$client.vo" "$F/Lib.vo" SigAlias.Lib "$F/$client.vo"
 
   for mode in grader default; do
-    if chk "$F" $client $mode; then
-      echo "rocqchk ($mode) accepted a forged $kind alias between declared-only fields and a closed proof of False"
-      cat "$D/out.log"
-      exit 1
-    fi
-    # 9.2's rocqchk has no printer for a module typing error and reports the
-    # exception itself (see misc/rocqchk_delta_alias.sh).
-    if ! grep -Eq "Module typing error|ModuleTypingError" "$D/out.log"; then
-      echo "unexpected rocqchk ($mode) failure for a forged $kind alias"
-      cat "$D/out.log"
-      exit 1
-    fi
+    mode_args $mode "$F" SigAlias $client
+    must_refuse "$D/out.log" "$typing_error" \
+      "rocqchk ($mode) accepted a forged $kind alias between declared-only fields and a closed proof of False" \
+      "unexpected rocqchk ($mode) failure for a forged $kind alias" "${mode_argv[@]}"
   done
 done

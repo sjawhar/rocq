@@ -9,6 +9,8 @@
 # -o, with int, a primitive type, which has no body.
 set -eu
 
+. misc/rocqchk_forge_common.bash
+
 D=misc/rocqchk-primitive-type
 d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
@@ -24,17 +26,10 @@ done
 
 # With bogus retyped alone, oops : int -> int := bogus is ill-typed: rocqchk
 # refusing it shows that it reads the forged type.
-if "$BIN"rocqchk -silent -Q "$d/primitive" PrimitiveType \
-     -norec PrimitiveType.Bogus > "$d/primitive.log" 2>&1; then
-  echo "rocqchk accepted oops : int -> int := bogus with bogus : False"
-  cat "$d/primitive.log"
-  exit 1
-fi
-if ! grep -q "Type error: ActualType" "$d/primitive.log"; then
-  echo "unexpected rocqchk failure with bogus retyped alone"
-  cat "$d/primitive.log"
-  exit 1
-fi
+must_refuse "$d/primitive.log" "Type error: ActualType" \
+  "rocqchk accepted oops : int -> int := bogus with bogus : False" \
+  "unexpected rocqchk failure with bogus retyped alone" \
+  -silent -Q "$d/primitive" PrimitiveType -norec PrimitiveType.Bogus
 
 cat > "$d/expected" <<'EOF'
 PrimitiveType.Bogus.bogus
@@ -42,12 +37,8 @@ PrimitiveType.Bogus.int
 EOF
 
 for vm in yes no; do
-  if ! "$BIN"rocqchk -silent -o -bytecode-compiler $vm -Q "$d/both" PrimitiveType \
-       -norec PrimitiveType.Bogus > "$d/both-$vm.log" 2>&1; then
-    echo "rocqchk -bytecode-compiler $vm refused the forged Bogus.vo"
-    cat "$d/both-$vm.log"
-    exit 1
-  fi
+  must_accept "$d/both-$vm.log" "rocqchk -bytecode-compiler $vm refused the forged Bogus.vo" \
+    -silent -o -bytecode-compiler $vm -Q "$d/both" PrimitiveType -norec PrimitiveType.Bogus
   sed -n '/^\* Axioms:/,/^\* Constants/ s/^    //p' "$d/both-$vm.log" |
     LC_ALL=C sort > "$d/axioms-$vm"
   if ! diff -u "$d/expected" "$d/axioms-$vm"; then

@@ -6,6 +6,8 @@
 
 set -e
 
+. misc/rocqchk_forge_common.bash
+
 D=misc/rocqchk-alias-rewrite-rule
 
 rm -f "$D"/good/*.vo "$D"/good/*.vok "$D"/good/*.vos "$D"/good/*.glob \
@@ -15,24 +17,12 @@ rm -f "$D"/good/*.vo "$D"/good/*.vok "$D"/good/*.vos "$D"/good/*.glob \
 $coqc -noinit -allow-rewrite-rules -R "$D/good" AliasRR "$D/good/Alias.v"
 $coqc -noinit -allow-rewrite-rules -R "$D/bad" AliasRR "$D/bad/Alias.v"
 
-if ! "$BIN"rocqchk -R "$D/good" AliasRR AliasRR.Alias > "$D/out.log" 2>&1; then
-  echo "rocqchk refused an honest alias of a module with a rewrite rule"
-  cat "$D/out.log"
-  exit 1
-fi
+must_accept "$D/out.log" "rocqchk refused an honest alias of a module with a rewrite rule" \
+  -R "$D/good" AliasRR AliasRR.Alias
 
 ocaml "$D/forge.ml" "$D/good/Alias.vo" "$D/bad/Alias.vo"
 
-if "$BIN"rocqchk -R "$D/good" AliasRR AliasRR.Alias > "$D/out.log" 2>&1; then
-  echo "rocqchk accepted an alias whose type states a rule its target does not have"
-  cat "$D/out.log"
-  exit 1
-fi
-
-# 9.2's rocqchk has no printer for a module typing error and reports the
-# exception itself, "Modops.ModuleTypingError".
-if ! grep -Eq "Module typing error|ModuleTypingError" "$D/out.log"; then
-  echo "unexpected rocqchk failure for the forged alias"
-  cat "$D/out.log"
-  exit 1
-fi
+must_refuse "$D/out.log" "$typing_error" \
+  "rocqchk accepted an alias whose type states a rule its target does not have" \
+  "unexpected rocqchk failure for the forged alias" \
+  -R "$D/good" AliasRR AliasRR.Alias
