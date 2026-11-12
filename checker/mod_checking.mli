@@ -19,7 +19,7 @@ val compile_module_bytecode : Environ.env -> Vmlibrary.t -> Names.ModPath.t ->
     body, discarding whatever code the [.vo] file claims, and add it to the given
     table. *)
 
-val check_module : Environ.env -> axioms -> Names.ModPath.t -> Mod_declarations.module_body -> axioms
+val check_module : Environ.env -> axioms -> Retroknowledge.action list -> Names.ModPath.t -> Mod_declarations.module_body -> axioms
 
 exception BadConstant of Names.Constant.t * Pp.t
 
