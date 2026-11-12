@@ -133,16 +133,14 @@ let checks_of p log = List.filter_map (fun (q, i) -> if q = p then Some i else N
 
 let pids_of log = List.sort_uniq compare (List.map fst (workers_of log))
 
-(* [deal ~group ?open_group k size queue]: the batches, and what stays
-   queued, as CheckWorkers.deal makes them. The runs of one group are cut
-   into pieces of [size] jobs; with [s] the number of batches of [size] the
+(* [deal ~group ~open_group k size queue]: the batches that CheckWorkers.deal
+   makes while the libraries are walked. The runs of one group are cut into
+   pieces of [size] jobs; with [s] the number of batches of [size] the
    pieces make, batch [j] takes pieces [j], [j + s]... until it holds
-   [size] jobs. [open_group] is given while the libraries are walked: it
-   is the library whose walk is still deferring jobs, of which only the
-   whole pieces are dealt; a batch is then run newest first, and one of
-   fewer than [size / 2] jobs is not dealt. *)
-let deal ?(group = fun _ -> 0) ?open_group k size queue =
-  let walk = Option.has_some open_group in
+   [size] jobs. [open_group] is the library whose walk is still deferring
+   jobs, of which only the whole pieces are dealt; a batch is run newest
+   first, and one of fewer than [size / 2] jobs is not dealt. *)
+let deal ?(group = fun _ -> 0) ~open_group k size queue =
   let rec runs acc cur = function
     | [] -> List.rev (if cur = [] then acc else List.rev cur :: acc)
     | x :: l ->
@@ -155,7 +153,7 @@ let deal ?(group = fun _ -> 0) ?open_group k size queue =
     else List.filteri (fun i _ -> i < size) r :: cut (List.filteri (fun i _ -> i >= size) r)
   in
   let pieces = List.concat_map (fun r ->
-      let still_open = Option.equal Int.equal open_group (Some (group (List.hd r))) in
+      let still_open = Int.equal open_group (group (List.hd r)) in
       List.map (fun p -> (not still_open || List.length p >= size), p) (cut r))
       (runs [] [] queue)
   in
@@ -171,15 +169,14 @@ let deal ?(group = fun _ -> 0) ?open_group k size queue =
         if j < k && filled.(j) < size then (filled.(j) <- filled.(j) + List.length p; j) else -1
       end) pieces
   in
-  let dealt j = j >= 0 && filled.(j) > 0 && (not walk || 2 * filled.(j) >= size) in
+  let dealt j = j >= 0 && filled.(j) > 0 && 2 * filled.(j) >= size in
   let batch j = List.concat (List.filteri (fun i _ -> List.nth lanes i = j) (List.map snd pieces)) in
   let batches = List.filter (fun b -> b <> [])
       (List.init k (fun j -> if dealt j then batch j else [])) in
-  let rest = List.concat (List.filteri (fun i _ -> not (dealt (List.nth lanes i))) (List.map snd pieces)) in
-  (if walk then List.map List.rev batches else batches), rest
+  List.map List.rev batches
 
 (* The [k] batches of [size] jobs dealt from [queue] of one library,
-   still open, while the libraries are checked, and what stays queued. *)
+   still open, while the libraries are checked. *)
 let library_batches ~k ~size queue = deal ~open_group:0 k size queue
 
 let n = 200
@@ -196,25 +193,72 @@ let assert_main_checked_nothing log =
 
 let pr_batches l = String.concat "; " (List.map (fun b -> String.concat "," (List.map string_of_int b)) l)
 
-(* Whether [l] begins [m]. *)
-let rec is_prefix l m =
-  match l, m with
-  | [], _ -> true
-  | x :: l, y :: m -> x = y && is_prefix l m
-  | _ :: _, [] -> false
-
 (* The most jobs that [finish] may give a worker when [r] jobs are queued,
-   of one group, or of several ([libraries]), as [assert_dealt_by_finish]
+   of one group, or of several ([libraries]), as [check_finish_batches]
    bounds them. *)
 let finish_most ~libraries ~slots r =
   if libraries then (2 * r + 2 * slots - 2) / (2 * slots)
   else (r + 2 * slots - 1) / (2 * slots)
 
+(* Checks a sequence of [batches], one per worker that [finish] started
+   with [slots] slots, each the jobs that worker ran, whatever the order in
+   which the workers took them and ended: every job of [jobs], those
+   [finish] had to deal, is in exactly one batch, no other job is in any,
+   and each batch keeps to the dealing of [finish]. [libraries]: the jobs
+   are of several libraries.
+
+   When a slot is free and [r] jobs are queued, [finish] deals
+   [CheckWorkers.deal 1 size], with [size = ceil (r / (2 * slots))]. It
+   cuts each run of one group (library) in the queue into pieces of [size]
+   jobs, and the batch takes pieces until it holds [size] jobs or more.
+   Without libraries every job is of one group, so the batch is the first
+   piece: [size] jobs. With libraries, the last piece it takes may make it
+   [2 * size - 1] jobs, which is at most [(2 r + 2 slots - 2) / (2 slots)],
+   the bound checked then (see below). A worker runs at least the first
+   job of its batch and at most all of them. A job goes back to the queue
+   only if its worker will not run it: it comes after the job at which the
+   worker's wall-time budget stopped it, or after the count that the
+   worker's release message names, which its final report must equal. So
+   when a batch is dealt, the jobs that the batches dealt before it run
+   are not queued: their workers hold them or have run them. A batch thus
+   runs at most [finish_most (j - c)] jobs, where [j] is the number of
+   [jobs] and [c] the number of jobs run by the batches dealt before it.
+
+   The batches do not say in which order [finish] dealt them. If some
+   order keeps every batch within the bound, the order from the largest
+   batch to the smallest does too: a larger batch just after a smaller one
+   can be swapped with it, and both stay within the bound. That holds for
+   [ceil (r / (2 slots))], and for a bound [a r + b] with [0 <= a <= 1],
+   but not for [2 ceil (r / (2 slots)) - 1], hence the bound above it with
+   libraries. So the order from the largest batch to the smallest is
+   checked. *)
+let check_finish_batches ?(libraries = false) ~slots jobs batches =
+  let count = Hashtbl.create 64 in
+  List.iter (fun j -> Hashtbl.replace count j 0) jobs;
+  List.iter (List.iter (fun j ->
+      match Hashtbl.find_opt count j with
+      | Some c -> Hashtbl.replace count j (c + 1)
+      | None -> assert_failure (Printf.sprintf "job %d ran, but finish was not to deal it" j)))
+    batches;
+  List.iter (fun j ->
+      let c = Hashtbl.find count j in
+      if c <> 1 then assert_failure (Printf.sprintf "job %d ran %d times" j c))
+    jobs;
+  let sizes = List.sort (fun a b -> compare b a) (List.map List.length batches) in
+  ignore (List.fold_left (fun left k ->
+      let most = finish_most ~libraries ~slots left in
+      if k > most then
+        assert_failure (Printf.sprintf
+                          "batches of %s jobs: one of %d with %d left, more than %d"
+                          (pr_batches [sizes]) k left most);
+      left - k)
+      (List.length jobs) sizes)
+
 (* Checks, whatever the timing, a run of [n] checks deferred with [libs]
    libraries (see [run]), as [log] records it. A batch here is the jobs
    that one worker ran. [walk] are the batches that [defer] dealt while the
-   libraries were walked, as [deal] computes them, each in the order its
-   worker runs it; [finish] dealt the rest to [slots] workers.
+   libraries were walked, as CheckWorkers.deal makes them, each in the
+   order its worker runs it; [finish] dealt the rest to [slots] workers.
 
    What [defer] deals does not depend on the timing. [run] sets the window
    to [infinity], so [defer] deals only after [end_window]: never without
@@ -233,67 +277,40 @@ let finish_most ~libraries ~slots r =
    1, 1 checks, where a run in which nothing is given back has 50, 38, ...,
    3, 2, 2, 1, 1, 1. What is checked holds in any order in which the
    workers take their batches and end:
-   - every check and every table runs exactly once;
    - the run ends after the last job: [finished] is the last record;
    - the worker of a batch of [walk], the one that ran its first job (a
      worker always completes its first job), ran a part of that batch from
      its start, in order;
-   - the other batches keep to the dealing of [finish]. When a slot is
-     free and [r] jobs are queued, [finish] deals [deal 1 size], with
-     [size = ceil (r / (2 * slots))]. [deal] cuts each run of one group in
-     the queue into pieces of [size] jobs, and the batch takes pieces until
-     it holds [size] jobs or more. Without libraries every job is of one
-     group, so the batch is the first piece: [size] jobs. With libraries,
-     the last piece it takes may make it [2 * size - 1] jobs, which is at
-     most [(2 r + 2 slots - 2) / (2 slots)], the bound checked then (see
-     below). A worker runs at least the first job of its batch and at most
-     all of them. A job goes back to the queue only if its worker will not
-     run it: it comes after the job at which the budget stopped the
-     worker, or after the count that the worker's release message names,
-     which its final report must equal. So when a batch is dealt, the jobs
-     that the workers of [walk] and of the batches dealt before it run are
-     not queued: their workers hold them or have run them. A batch thus
-     runs at most [finish_most (n + libs - c)] jobs, where [c] is the number
-     of jobs run by the workers of [walk] and of the batches dealt before
-     it.
-   The log does not say in which order [finish] dealt the batches. If some
-   order keeps every batch within the bound, the order from the largest
-   batch to the smallest does too: a larger batch just after a smaller one
-   can be swapped with it, and both stay within the bound. That holds for
-   [ceil (r / (2 slots))], and for a bound [a r + b] with [0 <= a <= 1],
-   but not for [2 ceil (r / (2 slots)) - 1], hence the bound above it with
-   libraries. So the order from the largest batch to the smallest is
-   checked. *)
+   - the batches of the other workers pass [check_finish_batches], with
+     the jobs that the workers of [walk] did not run.
+   So every check and every table runs exactly once. *)
 let assert_dealt_by_finish ?(libs = 0) ?(walk = []) ~slots n log =
-  assert_exactly_once n log;
-  assert_tables_once libs log;
   (match List.rev log with
    | (p, i) :: _ when p = me && i = finished -> ()
    | _ -> assert_failure "the last record is not the end of the run");
   let walkers = List.map (fun batch ->
       let head = List.hd batch in
-      let p = fst (List.find (fun (_, i) -> i = head) log) in
-      let ran = checks_of p log in
-      if not (is_prefix ran batch) then
-        assert_failure (Printf.sprintf "the worker of the batch %s dealt during the walk ran %s"
-                          (pr_batches [batch]) (pr_batches [ran]));
-      p)
+      match List.find_opt (fun (_, i) -> i = head) log with
+      | None ->
+        assert_failure (Printf.sprintf "job %d, the first of a batch dealt during the walk, did not run" head)
+      | Some (p, _) ->
+        let started = checks_of p log in
+        if not (CList.prefix_of (=) started batch) then
+          assert_failure (Printf.sprintf "the worker of the batch %s dealt during the walk ran %s"
+                            (pr_batches [batch]) (pr_batches [started]));
+        p, started)
       walk
   in
-  let ran p = List.length (checks_of p log) in
-  let sizes =
-    List.sort (fun a b -> compare b a)
-      (List.filter_map (fun p -> if List.mem p walkers then None else Some (ran p)) (pids_of log))
+  let walked = List.concat_map snd walkers in
+  let jobs =
+    List.filter (fun j -> not (List.mem j walked))
+      (List.init n Fun.id @ List.init libs (fun l -> - (l + 1)))
   in
-  let pr_sizes = String.concat "," (List.map string_of_int sizes) in
-  ignore (List.fold_left (fun left k ->
-      let most = finish_most ~libraries:(libs > 0) ~slots left in
-      if k > most then
-        assert_failure (Printf.sprintf
-                          "batches of %s jobs: one of %d with %d left, more than %d"
-                          pr_sizes k left most);
-      left - k)
-      (n + libs - List.fold_left (fun c p -> c + ran p) 0 walkers) sizes)
+  let batches =
+    List.filter_map (fun p -> if List.mem_assoc p walkers then None else Some (checks_of p log))
+      (pids_of log)
+  in
+  check_finish_batches ~libraries:(libs > 0) ~slots jobs batches
 
 let () = add_test "no early stop: every check runs once" (fun () ->
     let result, log = run ~budget:CheckWorkers.default_budget n in
@@ -393,8 +410,8 @@ let lib_jobs sizes =
   jobs, group
 
 (* What [defer] deals at -j [jobs] when the last of [sizes] is deferred,
-   past the window, with no worker running: the batches, and what stays
-   queued for [finish]. The last library is still open. *)
+   past the window, with no worker running: the batches. The last library
+   is still open. *)
 let walk_batches ~jobs sizes =
   let all, group = lib_jobs sizes in
   let q = List.length all and w = jobs - 1 in
@@ -425,7 +442,7 @@ let () = add_test "libraries: batches stripe whole libraries" (fun () ->
     assert_exactly_once n log;
     assert_tables_once 12 log;
     assert_main_checked_nothing log;
-    let walk, _ = walk_batches ~jobs:4 sizes in
+    let walk = walk_batches ~jobs:4 sizes in
     assert_equal ~printer:pr_batches
       [libs_of ~per [0; 3; 6; 9]; libs_of ~per [1; 4; 7; 10]; libs_of ~per [2; 5; 8]] walk;
     assert_dealt_by_finish ~libs:12 ~walk ~slots:4 n log)
@@ -447,7 +464,7 @@ let () = add_test "libraries: one library's checks stay in one batch" (fun () ->
     assert_exactly_once n log;
     assert_tables_once 6 log;
     assert_main_checked_nothing log;
-    let walk, _ = walk_batches ~jobs:4 sizes in
+    let walk = walk_batches ~jobs:4 sizes in
     assert_equal ~printer:pr_batches [libs_of ~per [0; 1; 2; 3]] walk;
     assert_dealt_by_finish ~libs:6 ~walk ~slots:4 n log)
 
@@ -466,7 +483,7 @@ let () = add_test "libraries: no small batch while the libraries are checked" (f
     assert_exactly_once n log;
     assert_tables_once 4 log;
     assert_main_checked_nothing log;
-    let walk, _ = walk_batches ~jobs:4 sizes in
+    let walk = walk_batches ~jobs:4 sizes in
     assert_equal ~printer:string_of_int 1 (List.length walk);
     assert_equal ~printer:string_of_int m (List.length (List.hd walk));
     assert_dealt_by_finish ~libs:4 ~walk ~slots:4 n log)
@@ -547,7 +564,7 @@ let () = add_test "libraries, no early stop: one batch, newest first, then finis
     assert_no_exception result;
     assert_exactly_once lib_n log;
     assert_main_checked_nothing log;
-    let lib, _ = library_batches ~k:1 ~size:size2 (List.init lib_n Fun.id) in
+    let lib = library_batches ~k:1 ~size:size2 (List.init lib_n Fun.id) in
     assert_equal ~printer:pr_batches [List.init size2 (fun i -> size2 - 1 - i)] lib;
     assert_dealt_by_finish ~walk:lib ~slots:2 lib_n log)
 
@@ -559,7 +576,7 @@ let () = add_test "libraries, no early stop: three batches, newest first, then f
     assert_no_exception result;
     assert_exactly_once lib_n log;
     assert_main_checked_nothing log;
-    let lib, _ = library_batches ~k:3 ~size:size4 (List.init lib_n Fun.id) in
+    let lib = library_batches ~k:3 ~size:size4 (List.init lib_n Fun.id) in
     assert_equal ~printer:pr_batches
       (List.init 3 (fun j -> List.init size4 (fun i -> size4 * (j + 1) - 1 - i))) lib;
     assert_dealt_by_finish ~walk:lib ~slots:4 lib_n log)
