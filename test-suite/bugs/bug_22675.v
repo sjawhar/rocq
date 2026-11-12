@@ -25,7 +25,14 @@ Fail Definition small_outer@{u v | Set < u, u < v} : Type@{u} :=
 (* The type of the let-in may name another universe that the declaration's
    constraints force equal to the one the body uses. The type carries that
    universe too. *)
-Cumulative Inductive eq_outer@{*u w v | u = w, u < v, w < v} : Set :=
+(* The fork refuses the irrelevant annotation here: its own fix of #22675
+   (1151605254f0) infers the let-in body in extracted mode, where the instance
+   of the fully applied make_token@{u v} is compared by token's own variance,
+   so u is inferred invariant. The downcast below must fail all the same. *)
+Fail Cumulative Inductive eq_outer@{*u w v | u = w, u < v, w < v} : Set :=
+| make_eq_outer (x : token@{w v} := make_token@{u v}).
+
+Cumulative Inductive eq_outer@{u w v | u = w, u < v, w < v} : Set :=
 | make_eq_outer (x : token@{w v} := make_token@{u v}).
 
 Definition read_eq_outer@{u w v | u = w, u < v, w < v}
