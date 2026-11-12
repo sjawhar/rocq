@@ -451,8 +451,12 @@ and collect_signature_axioms axioms sign mp =
       let kn = KerName.make mp lab in
       let axioms =
         match cb.const_body with
-        | Def _ | OpaqueDef _ | Primitive _ -> axioms
-        | Undef _ | Symbol _ -> axioms_add kn axioms
+        | Def _ | OpaqueDef _ -> axioms
+        (* rocqchk does not check a primitive's declared type against the
+           type of its operator ([check_constant_declaration] skips it), so
+           that type is trusted as an axiom's is, and -o lists the primitive
+           among the axioms, as it did before rocq#22623 was ported. *)
+        | Undef _ | Primitive _ | Symbol _ -> axioms_add kn axioms
       in
       axioms
     | SFBmodule mb ->
