@@ -1,0 +1,116 @@
+diff --git a/checker/mod_checking.ml b/checker/mod_checking.ml
+index 448bd8cfdb29460c5a57202391cb8ce1907f87e3..a2cdbd872b35e4d0770d46e4c37348e20968cd9f 100644
+--- a/checker/mod_checking.ml
++++ b/checker/mod_checking.ml
+@@ -447,66 +447,6 @@ let rec check_mexpression env opac sign mbtyp mp_mse res = match sign with
+     MoreFunctor(arg_id,mtb,body), delta
+   | MENoFunctor me -> check_mexpr env opac me mp_mse res
+ 
+-(* coqc gives a label to one field of a structure at most, in each of two
+-   namespaces ([Safe_typing.add_field]). The objects are the constants, the
+-   rewrite rule blocks, and the types and constructors of each inductive
+-   block ([Safe_typing.labels_of_mib]). The modules are the modules and the
+-   module types. Each field that coqc adds to a structure is tested there,
+-   the fields of an [Include] one by one, and a module or a module type
+-   when it starts ([Safe_typing.start_mod_modtype]). A [with] constraint
+-   replaces a field in place ([Mod_typing.split_struc]), and a functor
+-   application or a module alias keeps the labels of the structure it
+-   copies. So no file that coqc writes repeats a label in a namespace.
+-
+-   The environment keeps the last field with a label
+-   ([Environ.add_constant_key], [Modops.add_structure]). So a second field
+-   can replace a field that the fields between them were checked against.
+-   With [Axiom ax : False], then [proof : False := ax], then a second
+-   [ax : unit := tt], no constant is left without a body, and [proof] is a
+-   closed proof of False. A parameter could also take a primitive type
+-   registration, and a definition with its label could then replace it.
+-   [check_registered_type] refuses that definition too, since it checks
+-   each declaration of a registered name, but this check refuses the
+-   structure first.
+-
+-   [check_signature] runs this check on every structure that it reads: the
+-   type of a module, a module type, a functor body and a [Struct]
+-   implementation, and so the root of a library. The label of an inductive
+-   block is one of its objects too: the environment keys the block by it,
+-   and coqc makes it the name of the block's first type
+-   ([Safe_typing.check_mind]). As in coqc, the labels of one block are
+-   tested against the earlier fields, not against each other. A second
+-   module with a label fails before this check, on the assertion of
+-   [Environ.shallow_add_module], when [compile_structure] adds it. *)
+-let check_labels mp struc =
+-  let refuse l kinds =
+-    CErrors.user_err
+-      (ModPath.print mp ++ str " declares the label " ++ Id.print l ++
+-       str " twice among its " ++ str kinds ++ str ".")
+-  in
+-  let add_object l objects =
+-    if Id.Set.mem l objects then
+-      refuse l "constants, inductive types, constructors and rewrite rules"
+-    else Id.Set.add l objects
+-  in
+-  let fold (objects, modules) (l, field) = match field with
+-    | SFBconst _ | SFBrules _ -> add_object l objects, modules
+-    | SFBmind mib ->
+-      let add_packet labels mip =
+-        Array.fold_right Id.Set.add mip.mind_consnames
+-          (Id.Set.add mip.mind_typename labels)
+-      in
+-      let labels = Array.fold_left add_packet (Id.Set.singleton l) mib.mind_packets in
+-      Id.Set.fold add_object labels objects, modules
+-    | SFBmodule _ | SFBmodtype _ ->
+-      if Id.Set.mem l modules then refuse l "modules and module types";
+-      objects, Id.Set.add l modules
+-  in
+-  let (_ : Id.Set.t * Id.Set.t) =
+-    List.fold_left fold (Id.Set.empty, Id.Set.empty) struc
+-  in
+-  ()
+-
+ (* A module's own body is the structure in which coqc declares its fields:
+    its signature if it is a [FullStruct], as the library is, its
+    implementation if it is a [Struct], and none if it is [Algebraic] or
+@@ -649,7 +589,9 @@ and check_signature env opac sign mp_mse res opacify ~own = match sign with
+       let opac = check_signature env' opac body mp_mse res Cset.empty ~own in
+       opac
+   | NoFunctor struc ->
+-      let () = check_labels mp_mse struc in
++      (* Forge row dev/ci/forge/rocqchk-repeated-label: the reverted build
++         checks the fields of a structure with no test that their labels
++         are distinct (check_labels). *)
+       let (_:env), opac = List.fold_left (fun (env, opac) (lab,mb) ->
+         check_structure_field env opac mp_mse lab res opacify ~own mb) (env, opac) struc
+       in
+diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
+index b28e32f9cd4580f4550850b130ffa74fa1ce4086..990b77037a7edbab56a24af5b0dd2d2359a1b001 100644
+--- a/kernel/safe_typing.ml
++++ b/kernel/safe_typing.ml
+@@ -1634,12 +1634,28 @@ let start_library dir senv =
+     opaquetab = Opaqueproof.empty_opaquetab;
+   }
+ 
++(* Forge row dev/ci/forge/rocqchk-repeated-label: this code exists only in
++   the reverted build, which writes the forged .vo. The library has
++   Axiom ax : False, proof := ax and twin : unit := tt, and a module
++   Forge_replabel marks it. The forger gives twin the label ax: the
++   library that test-suite/misc/rocqchk-repeated-label/forge.ml writes
++   from axiom/Lib.vo. coqc never writes it: it gives a label to one
++   constant of a structure at most (add_field). *)
++let forge_replabel struc =
++  let id = Id.of_string in
++  if Option.is_empty (List.assoc_f_opt Id.equal (id "Forge_replabel") struc) then struc
++  else
++    let forge (l, field) = if Id.equal l (id "twin") then (id "ax", field) else (l, field) in
++    List.map forge struc
++
+ let export ~output_native_objects senv dir =
+   let () = check_current_library dir senv in
+   let mp = senv.modpath in
+   (* With -merge-inductives, undo every merge this process made, so that the
+      .vo carries only names its reader can justify for itself. *)
+-  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
++  let str =
++    NoFunctor (forge_replabel (Indmerge.unmerge_exported (List.rev senv.revstruct)))
++  in
+   let mb =
+     Mod_declarations.make_module_body str
+       (Indmerge.unmerge_delta senv.modresolver) senv.local_retroknowledge
