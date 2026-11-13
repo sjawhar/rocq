@@ -2,11 +2,11 @@
    functions on the 250th constructor of a type gives a closed proof of
    False. After this comment is the issue's Bad.v, verbatim. The reverted
    build's VM gives the arguments of a constructor with an extended tag (the
-   245th non-constant constructor and after) levels one too high
-   (unfix.patch), so that n in the branch of f1 and m in that of f2 are the
-   same variable, and f1 and f2 are convertible. Its coqc and its
-   rocqchk -bytecode-compiler yes then accept yes : f1 = f2, and bad : False
-   with no axiom. *)
+   245th non-constant constructor and later with OCaml 4.14, the 243rd and
+   later with OCaml 5) levels one too high (unfix.patch), so that n in the
+   branch of f1 and m in that of f2 are the same variable, and f1 and f2 are
+   convertible. Its coqc and its rocqchk -bytecode-compiler yes then accept
+   yes : f1 = f2, and bad : False with no axiom. *)
 
 Inductive Big :=
 | C1 (n : nat)
