@@ -23,7 +23,9 @@
        NAME as the int63 type, named with the canonical name CANONICAL if it
        is given. NAME and CANONICAL are full names, such as RegType.Lib.M.int,
        of constants that a declaration of the library names;
-     forge.ml client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo *)
+     forge.ml client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo
+
+   misc/rocqchk_repeated_label.sh runs int0 and register too. *)
 
 #use "./misc/rocqchk_forge_lib.ml";;
 
