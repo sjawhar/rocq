@@ -119,3 +119,23 @@ Definition uses_r6 := R6.e.
 Module Assumes (X : Empty). Axiom e : nat. End Assumes.
 Module R7 : T := Assumes E.
 Definition uses_r7 := R7.e.
+
+(* A higher-order application that holds the body it applies again: with
+   HG := Hh Gh, the body of RH := Hh HG E holds Hh's body again, bound to Gh
+   and E, and under it Gh's body, whose axiom is RH.M.M.g; RH.M.use, which
+   the environment holds as a parameter, is defined there. The same inside a
+   seal: SHigher.R.M.M.g. *)
+Module Type FT (Y : Empty). Parameter use : False. End FT.
+Module Gh (Y : Empty). Axiom g : False. Definition use : False := g. End Gh.
+Module Hh (Fn : FT) (X : Empty).
+  Module M := Fn X.
+  Definition use : False := M.use.
+End Hh.
+Module HG := Hh Gh.
+Module RH := Hh HG E.
+Definition boom_higher : False := RH.use.
+Module SHigher : UseT.
+  Module R := Hh HG E.
+  Definition use : False := R.use.
+End SHigher.
+Definition boom_higher_sealed : False := SHigher.use.

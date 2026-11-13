@@ -339,14 +339,15 @@ let rec collect_constants_without_body sign mp accu =
    covers an application inside a seal, behind a helper with a body, and a
    seal a functor body declares. The end is the place for it, because the
    final environment holds every functor an application names, wherever it
-   is declared. What it cannot read it does
-   not list: the body of a functor declared with [Declare Module] or defined
-   by an expression over parameters of its own. Where a sealed implementation
-   reaches a sibling's axiom through an [Include], an alias or an ascription
-   of it, the two accounts name one axiom twice: the walk reports it where
-   it is declared, while [Print Assumptions] names the path the proof wrote.
-   That pair fails both joins closed, as it does without this walk, where
-   the axiom goes unreported instead. *)
+   is declared. What it cannot read it does not list: the body of a functor
+   declared with [Declare Module] or defined by an expression over
+   parameters of its own, and an application [Mod_impl] stops at, where no
+   name under it is dropped either. Where a sealed implementation reaches a
+   sibling's axiom through an [Include], an alias or an ascription of it,
+   the two accounts name one axiom twice: the walk reports it where it is
+   declared, while [Print Assumptions] names the path the proof wrote. That
+   pair fails both joins closed, as it does without this walk, where the
+   axiom goes unreported instead. *)
 let rec record_sealed_axioms ~hidden mp mb =
   match mod_type mb, mod_expr mb with
   | MoreFunctor _, _ ->
