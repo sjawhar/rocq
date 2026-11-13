@@ -773,6 +773,15 @@ file is a particular case of a module called a *library file*.
       with :cmd:`Require (safe)`.  Loading only the kernel content and then
       replaying the full library object is not supported.
 
+   .. exn:: Cannot use @qualid in a module expression because library @qualid was loaded with Require (safe).
+
+      A module expression, as in :cmd:`Module`, :cmd:`Module Type`,
+      :cmd:`Declare Module` or :cmd:`Include`, is built on a safe-loaded
+      library or on a module or module type inside one. It would need the
+      library's objects, and none were replayed. A functor applied to a module
+      of such a library, and a ``<:`` check against one of its module types,
+      are accepted.
+
 .. cmd:: Print Libraries
 
    This command displays the list of library files loaded in the

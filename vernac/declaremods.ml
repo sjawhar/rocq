@@ -795,7 +795,21 @@ let rec register_mod_objs mp obj = match obj with
     List.iter (register_mod_objs mp) (expand_aobjs aobjs)
   | _ -> ()
 
-let handle_missing_substobjs mp = match mp with
+(** A library loaded with [Require (safe)] replays none of its objects, so
+    no path inside it has substitutive objects, and a module expression over
+    such a path is refused. *)
+let rec safe_library_of mp = match mp with
+  | MPfile dp -> if Option.has_some (SafeLibs.find dp) then Some dp else None
+  | MPdot (mp, _) -> safe_library_of mp
+  | MPbound _ -> None
+
+let error_safe_library mp dp =
+  user_err Pp.(str "Cannot use " ++ ModPath.print mp ++ str " in a module expression" ++ spc () ++
+               str "because library " ++ DirPath.print dp ++ str " was loaded with Require (safe).")
+
+let handle_missing_substobjs mp =
+  Option.iter (error_safe_library mp) (safe_library_of mp);
+  match mp with
   | MPdot (mp',l) ->
     let objs = expand_sobjs (ModSubstObjs.get mp') in
     List.iter (register_mod_objs mp') objs;
