@@ -96,6 +96,24 @@ let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
   | Result.Ok () -> ()
   | Result.Error () -> refuse (str "its type is not the primitive type's")
 
+(* Conversion and the VM compute with a primitive operator whatever the
+   type that its constant declares, so [add : int -> int -> False] with the
+   body [Primitive Int63add] would make [add m m] a closed proof of False.
+   coqc gives the constant the type of the operator
+   ([Constant_typing.infer_primitive]), and rocqchk refuses any other.
+   [env] holds the constant's universe context, and the registrations that
+   the operator's type names. *)
+let check_primitive_operator env kn cb op =
+  let refuse why =
+    raise (BadConstant (kn, str "is the primitive operator " ++
+                            str (CPrimitives.to_string op) ++ str ", but " ++
+                            why ++ str "."))
+  in
+  let u = primitive_instance refuse cb (CPrimitives.univs op) in
+  match conv env (Typeops.type_of_prim env u op) cb.const_type with
+  | Result.Ok () -> ()
+  | Result.Error () -> refuse (str "its type is not the operator's")
+
 (* coqc registers a primitive type only in a library, or in a module nested
    in it with no functor parameter ([Safe_typing.add_retroknowledge]), for a
    constant that [Primitive] declares there. So the registered constant is a
@@ -157,6 +175,10 @@ let check_constant_declaration env st kn cb =
       | Result.Error () -> Type_errors.error_actual_type env j ty
       end
     | None -> ()
+  in
+  let () = match cb.const_body with
+    | Primitive op -> check_primitive_operator env kn cb op
+    | Undef _ | Def _ | OpaqueDef _ | Symbol _ -> ()
   in
   let retro, st = match Cmap.find_opt kn (snd st.st_retro) with
   | None -> None, st
@@ -438,6 +460,13 @@ and check_structure_field : type a. _ -> _ -> _ -> _ -> a Mod_subst.delta_resolv
       in
       let env' = CheckInductive.check_inductive env kn mib retro in
       let () = Subtyping.check_inductive_alias env kn mib in
+      (* [check_inductive] checked the registration, which the types of
+         primitive operators may name. *)
+      let env' = match retro with
+      | None -> env'
+      | Some (i, CPrimitives.PIE prm) ->
+        Primred.add_retroknowledge env' (Retroknowledge.Register_ind (prm, (kn, i)))
+      in
       env', st
   | SFBmodule msb ->
       let mp = MPdot(mp, lab) in
@@ -520,8 +549,12 @@ let collect_library_axioms axioms lib =
 let eq_prim_ind (type a b) (p : a CPrimitives.prim_ind) (q : b CPrimitives.prim_ind) =
   String.equal (CPrimitives.prim_ind_to_string p) (CPrimitives.prim_ind_to_string q)
 
+(* The registrations of [retro], checked as far as they can be before the
+   library is, and [env] with the registrations of inductive types of
+   earlier libraries in force, as coqc has them in force when it declares
+   the primitive operators whose types name them. *)
 let get_retroknowlege env retro =
-  let fold (imap, cmap, extind) = function
+  let fold (env', imap, cmap, extind) = function
   | Retroknowledge.Register_ind (prm, (ind, i)) ->
     (* Tolerate redeclarations because the kernel allows it somehow *)
     let check_prm map = match Mindmap.find_opt ind map with
@@ -537,9 +570,10 @@ let get_retroknowlege env retro =
     if Environ.mem_mind ind env then
       let spec = Inductive.lookup_mind_specif env (ind, i) in
       let () = Safe_typing.check_register_ind (ind, i) prm spec in
-      (imap, cmap, Mindmap.add ind (i, CPrimitives.PIE prm) extind)
+      let env' = Primred.add_retroknowledge env' (Retroknowledge.Register_ind (prm, (ind, i))) in
+      (env', imap, cmap, Mindmap.add ind (i, CPrimitives.PIE prm) extind)
     else
-      (Mindmap.add ind (i, CPrimitives.PIE prm) imap, cmap, extind)
+      (env', Mindmap.add ind (i, CPrimitives.PIE prm) imap, cmap, extind)
   | Retroknowledge.Register_type (prm, cst) ->
     let () =
       if Cmap.mem cst cmap then
@@ -562,13 +596,15 @@ let get_retroknowlege env retro =
                  (str "the registration gives it another canonical name, " ++
                   KerName.print canonical))
     in
-    (imap, Cmap.add cst (CPrimitives.PTE prm) cmap, extind)
+    (env', imap, Cmap.add cst (CPrimitives.PTE prm) cmap, extind)
   in
-  let (imap, cmap, _) = List.fold_left fold (Mindmap.empty, Cmap.empty, Mindmap.empty) retro in
-  (imap, cmap)
+  let (env, imap, cmap, _) =
+    List.fold_left fold (env, Mindmap.empty, Cmap.empty, Mindmap.empty) retro
+  in
+  env, (imap, cmap)
 
 let check_module env retro mp mb =
-  let retro = get_retroknowlege env retro in
+  let env, retro = get_retroknowlege env retro in
   let st = { st_retro = retro } in
   let (_ : Retroknowledge.retroknowledge), { st_retro = (imap, cmap) } = check_module env st mp mb in
   let () = match Mindmap.choose_opt imap, Cmap.choose_opt cmap with
