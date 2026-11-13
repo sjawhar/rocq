@@ -87,7 +87,12 @@ notation, definition, axiom, theorem or file.
    warning name and categories. Leading and trailing spaces in each
    category are trimmed, whereas internal spaces are changed to
    hyphens. If both :n:`note` and :n:`cats` are present, either one
-   may appear first and they must be separated by a comma.
+   may appear first and they must be separated by a comma. Every
+   warning is in the category ``all``, a warning that is on by default
+   is in ``default``, and ``none`` is a keyword of the :opt:`Warnings`
+   option, not a category: naming one of them in :n:`cats` only changes
+   the warning's name. Two lists that give one warning name, such as
+   ``a,b`` and ``a b``, share the warning of the first.
 
    This attribute is supported by the following commands:
    :cmd:`Notation`, :cmd:`Infix`, :cmd:`Definition`, :cmd:`Theorem`,
