@@ -21,6 +21,7 @@ CONTEXT SUMMARY
     application_axiom_summary.SExpr.App.in_f
     application_axiom_summary.SDecl.App.p
     application_axiom_summary.SDeep.App.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.a
+    application_axiom_summary.SDeclType.D.App.in_f
   
 * Constants/Inductives relying on type-in-type: <none>
   

@@ -25,7 +25,8 @@ cp "$src" "$d/"
 
 proofs="boom boom_opaque boom_ascribed boom_inner boom_sub boom_local
         boom_sealed_functor uses_r uses_r2 uses_r3 uses_r4 uses_r5 uses_r6
-        uses_r7 boom_higher boom_higher_sealed boom_expr boom_decl boom_deep"
+        uses_r7 boom_higher boom_higher_sealed boom_expr boom_decl boom_deep
+        boom_decl_type"
 {
   echo "Require $lib."
   for p in $proofs; do echo "Print Assumptions $lib.$p."; done
@@ -44,7 +45,7 @@ assumed="$lib.S.App.in_f $lib.SOpaque.App.in_f $lib.SAscribed.App.in_g
          $lib.SNested.Inner.App.in_f $lib.SNested.Sub.App.in_g
          $lib.SLocal.App.in_h $lib.SSealedFunctor.App.in_k $lib.R6.hidden
          $lib.R7.e $lib.RH.M.M.g $lib.SHigher.R.M.M.g $lib.SExpr.App.in_f
-         $lib.SDecl.App.p $deep"
+         $lib.SDecl.App.p $deep $lib.SDeclType.D.App.in_f"
 # Each field a functor defines, and each functor's own name for an axiom of
 # its body: neither account names them.
 defined="$lib.R.e $lib.R2.e $lib.R3.e $lib.R4.e $lib.R5.Y.e $lib.R6.e
