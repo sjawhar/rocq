@@ -125,8 +125,9 @@ Module Type S.
   Axiom r : forall n, q n = q n.
 End S.
 
-(* p and r are declared without a body and proved with Qed: their bodies
-   take the eager path. q is a transparent definition. extra is not in S. *)
+(* p and r are declared without a body and proved with Qed. Under -o, the
+   main process cooks their bodies itself, for the summary (see the header).
+   q is a transparent definition. extra is not in S. *)
 Module M : S.
   Lemma p : True. Proof. exact ax_used. Qed.
   Definition q (n : nat) := n.
