@@ -1,7 +1,7 @@
 # Shared helpers of the misc tests that run rocqchk on forged .vo files:
 # rocqchk_sigalias.sh, rocqchk_alias_label.sh, rocqchk_nested_resolver.sh,
-# rocqchk_inline_hint.sh, rocqchk_alias_rewrite_rule.sh and
-# rocqchk_primitive_type.sh. Each sources it with
+# rocqchk_inline_hint.sh, rocqchk_alias_rewrite_rule.sh,
+# rocqchk_primitive_type.sh and rocqchk_register_type.sh. Each sources it with
 #
 #   . misc/rocqchk_forge_common.bash
 #
@@ -50,14 +50,16 @@ must_refuse() {
   fi
 }
 
-# mode_args <mode> <dir> <root> <client>: set the array mode_argv to the
-# rocqchk arguments that check <root>.Lib and <root>.<client> in <dir>, bound
-# to <root>, as a grader runs rocqchk (mode grader) or with the default
-# options (mode default).
+# mode_args <mode> <dir> <root> [<client>]: set the array mode_argv to the
+# rocqchk arguments that check <root>.Lib, and <root>.<client> if it is
+# given, in <dir>, bound to <root>, as a grader runs rocqchk (mode grader)
+# or with the default options (mode default).
 mode_args() {
+  local libs=("$3.Lib")
+  if [ -n "${4-}" ]; then libs+=("$3.$4"); fi
   case $1 in
-    grader) mode_argv=(-o -bytecode-compiler yes -R "$2" "$3" -norec "$3.Lib" "$3.$4") ;;
-    default) mode_argv=(-R "$2" "$3" "$3.Lib" "$3.$4") ;;
+    grader) mode_argv=(-o -bytecode-compiler yes -R "$2" "$3" -norec "${libs[@]}") ;;
+    default) mode_argv=(-R "$2" "$3" "${libs[@]}") ;;
   esac
 }
 
