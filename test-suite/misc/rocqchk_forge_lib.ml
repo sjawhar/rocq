@@ -1,8 +1,9 @@
 (* What the forge.ml files of misc/rocqchk_sigalias.sh,
-   misc/rocqchk_nested_resolver.sh, misc/rocqchk_alias_label.sh and
-   misc/rocqchk_inline_hint.sh share: reading and writing the segments of a
-   .vo file, copy-on-write edits of its values, the delta resolver's maps,
-   and the command client. Each of them starts with
+   misc/rocqchk_nested_resolver.sh, misc/rocqchk_alias_label.sh,
+   misc/rocqchk_inline_hint.sh, misc/rocqchk_primitive_type.sh and
+   misc/rocqchk_alias_rewrite_rule.sh share: reading and writing the
+   segments of a .vo file, copy-on-write edits of its values, the delta
+   resolver's maps, and the command client. Each of them starts with
 
      #use "./misc/rocqchk_forge_lib.ml";;
 
@@ -168,11 +169,17 @@ let block t fields =
   Array.iteri (fun i v -> Obj.set_field b i v) fields;
   b
 
-let expect what t o =
+(* [o] must be a block with tag [t], and with [size] fields when [size] is
+   given. *)
+let expect ?size what t o =
   if Obj.is_int o || tag o <> t then
     fail "%s: expected a block with tag %d, found %s" what t
       (if Obj.is_int o then Printf.sprintf "the integer %d" (to_int o)
-       else Printf.sprintf "tag %d" (tag o))
+       else Printf.sprintf "tag %d" (tag o));
+  match size with
+  | Some s when Obj.size o <> s ->
+    fail "%s: expected a block with %d fields, found %d" what s (Obj.size o)
+  | _ -> ()
 
 (* [o] with field [i] replaced by [f] of it; [o] is copied only when the field
    changes, so that a value shared with another part of the file is never
@@ -334,12 +341,12 @@ let struc_update struc name f =
   struc
 
 let nofunctor what sign =
-  expect (what ^ "'s signature (NoFunctor)") 0 sign;
+  expect ~size:1 (what ^ "'s signature (NoFunctor)") 0 sign;
   field sign 0
 
 let module_of struc name =
   let sfb = struc_find struc name in
-  expect ("field " ^ name ^ " (a module)") 3 sfb;
+  expect ~size:1 ("field " ^ name ^ " (a module)") 3 sfb;
   field sfb 0
 
 let impl_of mb = field (field mb 0) 0
