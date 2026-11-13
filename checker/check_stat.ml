@@ -165,6 +165,17 @@ let sealed_axioms = ref []
 let record_axiom c =
   if !unsafe_flags <> None then sealed_axioms := add_name (constant_name c) !sealed_axioms
 
+(* A functor application's axioms are its functor's, under its own name, and
+   the environment holds them only where it holds the application with the
+   functor's own type. The walk records each application it passes, and the
+   section reads its functor's body at the end, over the final environment
+   ([Mod_impl.application_axioms]), which holds every functor an application
+   names; [record_sealed_axioms] says why the walk records them. *)
+let applications = ref []
+
+let record_application mp =
+  if summary_enabled () then applications := mp :: !applications
+
 (* The environment walk keeps its own order, and a recorded name it already
    holds is dropped, so a constant is never listed twice. The membership test
    is a set, because a tree can record tens of thousands of names. *)
@@ -204,14 +215,17 @@ let pr_assumptions ass axs =
    an axiom while [Print Assumptions] read a proof that uses it closed
    (dispatch://BET-245). [Mod_impl] answers whether the implementation leaves
    a constant assumed, and what the fold yields, from the environment and
-   from those records alike, is dropped where it does not. The names
-   [record_sealed_axioms] collected are added after, unasked: each is a
-   constant an implementation itself declares without a body, which this
-   question would keep. The question is asked here, over the final
-   environment, because that environment holds every implementation the names
-   come from, while a check in progress holds a module's type where its
-   implementation is still to come. What the walk reads, and what it leaves
-   out, is written in mod_impl.ml. *)
+   from those records alike, is dropped where it does not, which for a field
+   of a functor application is where the functor's body defines it. The
+   names [record_sealed_axioms] collected are added after, unasked: each is
+   a constant an implementation itself declares without a body, which this
+   question would keep; and so are the constants each recorded application's
+   functor body leaves without a body, under the application's name, which
+   covers what a field that body defines rests on in it. The question is
+   asked here, over the final environment, because that environment holds
+   every implementation the names come from, while a check in progress holds
+   a module's type where its implementation is still to come. What the walk
+   reads, and what it leaves out, is written in mod_impl.ml. *)
 let pr_axioms env opac =
   let add c cb acc =
     if Declareops.constant_has_body cb then acc else
@@ -221,7 +235,13 @@ let pr_axioms env opac =
   let csts = fold_constants add env Cset.empty in
   let csts = Cset.filter (fun c -> not (Mod_impl.defines_constant env c)) csts in
   let csts = Cset.fold (fun c acc -> Constant.to_string c :: acc) csts [] in
-  pr_assumptions "Axioms" (add_missing csts !sealed_axioms)
+  let extras =
+    List.fold_left (fun extras mp ->
+        List.fold_left (fun extras c -> constant_name c :: extras) extras
+          (Mod_impl.application_axioms env mp))
+      !sealed_axioms (List.rev !applications)
+  in
+  pr_assumptions "Axioms" (add_missing csts extras)
 
 let pr_type_in_type env flags =
   let csts = fold_constants (fun c cb acc -> if not cb.const_typing_flags.check_universes then Constant.to_string c :: acc else acc) env [] in

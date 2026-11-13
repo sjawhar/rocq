@@ -16,6 +16,7 @@ val record_constant : Names.Constant.t -> Declarations.constant_body -> unit
 val record_inductive :
   indices_matter:bool -> Names.MutInd.t -> Declarations.mutual_inductive_body -> unit
 val record_axiom : Names.Constant.t -> unit
+val record_application : Names.ModPath.t -> unit
 val record_admitted : string -> unit
 
 val stats : Environ.env -> Names.Cset.t Names.Cmap.t -> unit

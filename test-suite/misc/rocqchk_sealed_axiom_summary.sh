@@ -9,9 +9,9 @@
 # after the applied module (App.in_f), which is also what Print Assumptions
 # prints for it; the functor's own name (F.in_f) must not appear. A reader that
 # joins the two accounts by name, as the BET grader does, fails closed on any
-# name that only one of them prints, so where the summary cannot tell an
-# assumption from a definition it reports nothing: an application inside a seal
-# is named by Print Assumptions alone, and that is checked here too.
+# name that only one of them prints. An application inside a seal is read
+# through its functor's body, so both accounts name its axiom Seal.Inner.in_f,
+# and that is checked here too.
 set -eu
 export PATH="$BIN:$PATH"
 
@@ -78,9 +78,9 @@ section 'Axioms' "$d/fun.log" | grep -qx '    Fun.App.in_f'
 if section 'Axioms' "$d/fun.log" | grep -q 'Fun.F.in_f'; then
   echo "the summary named the functor, which Print Assumptions never prints"; exit 1
 fi
-# The application inside the seal: unreported, never reported under another
-# name. Print Assumptions named it above, so a join of the two accounts fails
-# closed here rather than calling an assumption nobody made.
-if section 'Axioms' "$d/fun.log" | grep -q 'Fun.Seal'; then
-  echo "the summary named something under Seal, which it cannot tell is assumed"; exit 1
+# The application inside the seal: named as Print Assumptions named it above,
+# and under no other name.
+section 'Axioms' "$d/fun.log" | grep -qx '    Fun.Seal.Inner.in_f'
+if section 'Axioms' "$d/fun.log" | grep 'Fun.Seal' | grep -qvx '    Fun.Seal.Inner.in_f'; then
+  echo "the summary named something under Seal that Print Assumptions does not"; exit 1
 fi

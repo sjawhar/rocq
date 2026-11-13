@@ -327,30 +327,42 @@ let rec collect_constants_without_body sign mp accu =
 
    It would rather leave an axiom unreported, which both joins fail closed
    on, than report a name no [Print Assumptions] prints, which they read as
-   a smuggled assumption. So it stops at a module an expression defines (an
-   application and [Module M : T := E] alike): all it has there is that
-   module's type, which says nothing about what the expression leaves
-   assumed, whether in a field of its own or in a structure under it that
-   the type, not the expression, declares. The known cost is that an axiom
-   reached that way goes unreported: a functor's own axiom through an
-   application inside a seal, the body of a sealed functor, a seal a functor
-   body declares. Where a sealed implementation reaches a sibling's axiom
-   through an [Include], an alias or an ascription of it, the two accounts
-   name one axiom twice: the walk reports it where it is declared, while
-   [Print Assumptions] names the path the proof wrote. That pair fails both
-   joins closed, as it does without this walk, where the axiom goes
-   unreported instead. *)
+   a smuggled assumption. So it reads no type for what an expression leaves
+   assumed: [Module M : T := E] is read at the end, through E, by [Mod_impl].
+   A functor application is recorded where the walk passes it
+   ([Check_stat.record_application]), and its functor's body is read at the
+   end too ([Mod_impl.application_axioms]), as [Print Assumptions] reads it:
+   each constant that body leaves without a body is listed under the
+   application's name, [R.x] for [R := F A] or [R : T := F A], visible or
+   sealed, whether a proof reaches it or not. This is what the environment
+   fold does for [App := F A] in the open, whose fields it holds; it also
+   covers an application inside a seal, behind a helper with a body, and a
+   seal a functor body declares, which nothing listed before. The end is the
+   place for it, because the final environment holds every functor an
+   application names, wherever it is declared. What it cannot read it does
+   not list: the body of a functor declared with [Declare Module] or defined
+   by an expression over parameters of its own. Where a sealed implementation
+   reaches a sibling's axiom through an [Include], an alias or an ascription
+   of it, the two accounts name one axiom twice: the walk reports it where
+   it is declared, while [Print Assumptions] names the path the proof wrote.
+   That pair fails both joins closed, as it does without this walk, where
+   the axiom goes unreported instead. *)
 let rec record_sealed_axioms ~hidden mp mb =
   match mod_type mb, mod_expr mb with
   | MoreFunctor _, _ ->
-    (* A functor: its fields have no name of their own, see above. *)
+    (* A functor: its fields are named through its applications, see above. *)
     ()
   | NoFunctor _, Struct (_, impl) ->
     (* [Module M : T. ... End M]: a structure of its own, which the
        environment replaces with T, so all of it is hidden. *)
     record_sealed_structure ~hidden:true mp impl
+  | NoFunctor _, Algebraic (MENoFunctor (MEapply _)) ->
+    (* [Module R := F A] and [Module R : T := F A], read at the end, see
+       above. *)
+    Check_stat.record_application mp
   | NoFunctor _, Algebraic _ ->
-    (* [Module M := E] and [Module M : T := E], see above. *)
+    (* [Module M := N] and [Module M : T := N]: what N declares is listed
+       where N is. *)
     ()
   | NoFunctor struc, (Abstract | FullStruct) ->
     (* The type is all there is of this module ([Declare Module M : T] or a
