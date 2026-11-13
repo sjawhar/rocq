@@ -29,10 +29,14 @@ open Declarations
 (************************************************************************)
 (** {6 SHA-256}
 
-    The checker links only [boot] and [kernel], so there is no digest library
-    to call. This is FIPS 180-4's SHA-256, tested against the standard vectors
-    in test-suite/misc/compare.sh (case [sha256]), which also compares it with
-    [sha256sum] on every file the suite builds. *)
+    FIPS 180-4's SHA-256, tested against the standard vectors in
+    test-suite/misc/compare.sh (case [sha256]), which also compares it with
+    [sha256sum] on every file the suite builds. The checker also links
+    clib's [Sha256] (clib/sha256.ml, through [boot]), which the module below
+    shadows in this file. clib's [string] and [file] give the same digests
+    as [hex_of_string] and [hex_of_file], also as 64 lowercase hexadecimal
+    digits. The one difference is a file that cannot be opened: clib's
+    [file] raises [Sys_error], and [hex_of_file] raises a user error. *)
 
 module Sha256 : sig
   val hex_of_string : string -> string
@@ -172,12 +176,16 @@ let sha256_of_file = Sha256.hex_of_file
 (************************************************************************)
 (** {6 JSON}
 
-    A reader and a writer, for the same reason: the checker links no JSON
-    library. The reader is strict, because the config decides a grade: a
-    duplicate key, a byte after the top-level value, a byte sequence that is
-    not UTF-8, a control character in a string, a leading zero or a number
-    that is not an integer are each an error. The writer escapes, so a
-    constant name holding a line break stays one JSON string. *)
+    A reader and a writer of its own. The checker links no JSON reader. The
+    one JSON printer it links, [NewProfile.MiniJson] (lib/newProfile.ml),
+    copies the bytes above 127 of a string as they are, so a name that is
+    not UTF-8 would make the verdict invalid JSON; the writer below escapes
+    every such byte (see [escape]). The reader is strict, because the config
+    decides a grade: a duplicate key, a byte after the top-level value, a
+    byte sequence that is not UTF-8, a control character in a string, a
+    leading zero or a number that is not an integer are each an error. The
+    writer escapes, so a constant name holding a line break stays one JSON
+    string. *)
 
 module Json = struct
 
