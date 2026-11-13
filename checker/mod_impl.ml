@@ -78,11 +78,22 @@ let read_memo env =
   | Some (env', read) when env' == env -> read
   | Some _ | None -> ModPath.Map.empty
 
+(* The paths whose fields are being read and are not kept yet. A library
+   rocqchk checks cannot make a module its own implementation, since
+   [check_mexpr] needs an alias's target in the environment before the alias;
+   an admitted library is not checked, and [Module A := A], or [A := B] with
+   [B := A], would otherwise send the walk round the cycle for ever. Such a
+   path is read as the empty record, which keeps every name under it. *)
+let reading = ref ModPath.Set.empty
+
+let start_reading mp = reading := ModPath.Set.add mp !reading
+
 let keep_fields env paths fields =
   let read = List.fold_left (fun read mp -> ModPath.Map.add mp fields read)
       (read_memo env) paths
   in
   memo := Some (env, read);
+  reading := List.fold_left (fun s mp -> ModPath.Set.remove mp s) !reading paths;
   fields
 
 (* An alias is followed as a loop, over the paths read so far, and not as a
@@ -92,7 +103,8 @@ let keep_fields env paths fields =
    case that keeps a frame, since that module is read first; the modules such
    a chain needs are nested as deeply as the chain is long, and both the
    import of a library and the check of one recurse once per level of
-   nesting, so this walk runs out of stack no sooner than they do. *)
+   nesting, so this walk runs out of stack no sooner than they do. Every path
+   of [read] is in [reading]; a target that already is closes a cycle. *)
 let rec read_module env read mb =
   match mod_type mb, mod_expr mb with
   | MoreFunctor _, _ ->
@@ -101,12 +113,14 @@ let rec read_module env read mb =
     keep_fields env read no_fields
   | NoFunctor _, Algebraic (MENoFunctor (MEident target)) ->
     (* [Module M := N] and [Module M : T := N]: N is the implementation. *)
+    if ModPath.Set.mem target !reading then keep_fields env read no_fields
+    else
     (match ModPath.Map.find_opt target (read_memo env) with
      | Some fields -> keep_fields env read fields
      | None ->
        match module_at env target with
        | None -> keep_fields env read no_fields
-       | Some mb -> read_module env (target :: read) mb)
+       | Some mb -> start_reading target; read_module env (target :: read) mb)
   | NoFunctor _, Algebraic _ ->
     (* An application of a functor: its fields are a functor body's too. *)
     keep_fields env read no_fields
@@ -145,21 +159,24 @@ and fields_in_implementation env mp =
       let mp = MPdot (mp, lab) in
       match ModPath.Map.find_opt mp (read_memo env) with
       | Some fields -> mp, fields
+      | None when ModPath.Set.mem mp !reading -> mp, no_fields
       | None ->
         match Id.Map.find_opt lab fields.modules with
         | None -> mp, keep_fields env [mp] no_fields
-        | Some mb -> mp, read_module env [mp] mb
+        | Some mb -> start_reading mp; mp, read_module env [mp] mb
     in
     let root_fields = match ModPath.Map.find_opt root (read_memo env) with
       | Some fields -> fields
+      | None when ModPath.Set.mem root !reading -> no_fields
       | None ->
         match lookup_module env root with
         | None -> keep_fields env [root] no_fields
-        | Some mb -> read_module env [root] mb
+        | Some mb -> start_reading root; read_module env [root] mb
     in
     snd (List.fold_left descend (root, root_fields) labs)
 
 let defines_constant env kn =
+  reading := ModPath.Set.empty;
   let mp, lab = KerName.repr (Constant.user kn) in
   match Id.Map.find_opt lab (fields_in_implementation env mp).constants with
   | Some has_body -> has_body
