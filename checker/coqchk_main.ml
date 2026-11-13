@@ -816,14 +816,9 @@ let run_compare env =
 let main () =
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
-  let senv, axioms = run senv in
+  let senv, opac = run senv in
   let env = Safe_typing.env_of_safe_env senv in
   Option.iter (print_statement_report env) !statement_report;
   run_compare env;
-  let axioms =
-    if !Check_stat.output_context then
-      Some (Mod_checking.constants_of_axioms axioms)
-    else None
-  in
-  Check_stat.stats env axioms;
+  Check_stat.stats env opac;
   exit 0

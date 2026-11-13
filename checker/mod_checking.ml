@@ -8,14 +8,6 @@ open Environ
 
 (** {6 Checking constants } *)
 
-type axioms = { cset : KerName.Set.t }
-
-let empty_axioms = { cset = KerName.Set.empty }
-
-let constants_of_axioms {cset} = KerName.Set.elements cset
-
-let axioms_add c {cset} = {cset=KerName.Set.add (Constant.user c) cset}
-
 (** {6 Compiling the VM bytecode}
 
     The checker never reads the [vmlibrary] segment of a [.vo] file, and it does
@@ -95,6 +87,24 @@ let indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ref
   ref (fun _ -> assert false)
 
 let set_indirect_accessor f = indirect_accessor := f
+
+let register_opacified_constant env opac kn cb =
+  let rec gather_consts s c =
+    match Constr.kind c with
+    | Constr.Const (c, _) -> Cset.add c s
+    | _ -> Constr.fold gather_consts s c
+  in
+  let wo_body =
+    Cset.fold
+      (fun kn s ->
+        if Declareops.constant_has_body (lookup_constant kn env) then s else
+          match Cmap.find_opt kn opac with
+          | None -> Cset.add kn s
+          | Some s' -> Cset.union s' s)
+      (gather_consts Cset.empty cb)
+      Cset.empty
+  in
+  Cmap.add kn wo_body opac
 
 exception BadConstant of Constant.t * Pp.t
 
@@ -286,6 +296,18 @@ let lookup_module mp env =
 
 let mk_mtb sign delta = Mod_declarations.make_module_type sign delta
 
+let rec collect_constants_without_body sign mp accu =
+  let collect_field s lab = function
+  | SFBconst cb ->
+     let c = Constant.make2 mp lab in
+     if Declareops.constant_has_body cb then s else Cset.add c s
+  | SFBmodule msb -> collect_constants_without_body (mod_type msb) (MPdot(mp,lab)) s
+  | SFBmind _ | SFBrules _ | SFBmodtype _ -> s in
+  match sign with
+  | MoreFunctor _ -> Cset.empty  (* currently ignored *)
+  | NoFunctor struc ->
+     List.fold_left (fun s (lab,mb) -> collect_field s lab mb) accu struc
+
 let rec check_mexpr env mse mp_mse res = match mse with
   | MEident mp ->
     let mb = lookup_module mp env in
@@ -386,53 +408,55 @@ and check_signature env sign mp_mse res = match sign with
       in
       ()
 
-let rec collect_module_axioms env axioms mp mb =
+let rec collect_module_opaques env opac mp mb opacify =
+  let opac = collect_signature_opaques env opac (mod_type mb) mp (mod_delta mb) opacify in
   match mod_expr mb with
   | Struct (reso, struc) ->
-    (* Module with implementation separate from its type: don't produce axioms from the type *)
+    let opacify = collect_constants_without_body (mod_type mb) mp opacify in
     let struc = Modops.annotate_struct_body struc (mod_type mb) in
-    collect_signature_axioms env axioms struc mp reso
-  | Algebraic _ ->
-    (* any axioms are already declared from the modules and functors
-       involved in the application (this means an axiom in a functor
-       is reported as coming from the functor rather than from the
-       application) *)
-    axioms
-  | Abstract | FullStruct ->
-    collect_signature_axioms env axioms (mod_type mb) mp (mod_delta mb)
+    collect_signature_opaques env opac struc mp reso opacify
+  | Abstract | Algebraic _ | FullStruct -> opac
 
-and collect_signature_axioms env axioms sign mp res = match sign with
+and collect_signature_opaques env opac sign mp res opacify = match sign with
   | MoreFunctor (arg_id, mtb, body) ->
     let env = Modops.add_module_parameter arg_id mtb env in
-    collect_signature_axioms env axioms body mp res
+    collect_signature_opaques env opac body mp res Cset.empty
   | NoFunctor struc ->
-    let fold (env, axioms) (lab, field) = match field with
+    let fold (env, opac) (lab, field) = match field with
     | SFBconst cb ->
       let kn = Mod_subst.constant_of_delta_kn res (KerName.make mp lab) in
-      let axioms =
-        match cb.const_body with
-        | Def _ | OpaqueDef _ | Primitive _ -> axioms
-        | Undef _ | Symbol _ -> axioms_add kn axioms
+      let opac =
+        if not (Cset.mem kn opacify) then opac
+        else match cb.const_body with
+        | Def body -> register_opacified_constant env opac kn body
+        | OpaqueDef o ->
+          (* A cook in this process, counted as [cook] counts its own. *)
+          CheckWorkers.note_cook ();
+          register_opacified_constant env opac kn (fst (!indirect_accessor o))
+        | Undef _ | Primitive _ | Symbol _ -> opac
       in
-      Environ.add_constant kn cb env, axioms
+      Environ.add_constant kn cb env, opac
     | SFBmodule mb ->
       let mp = MPdot (mp, lab) in
-      let axioms = collect_module_axioms env axioms mp mb in
-      Modops.add_module mp mb env, axioms
-    | SFBmodtype mtb -> Environ.add_modtype (MPdot (mp, lab)) mtb env, axioms
+      let opac = collect_module_opaques env opac mp mb opacify in
+      Modops.add_module mp mb env, opac
+    | SFBmodtype mtb -> Environ.add_modtype (MPdot (mp, lab)) mtb env, opac
     | SFBmind mib ->
       let kn = Mod_subst.mind_of_delta_kn res (KerName.make mp lab) in
-      Environ.add_mind kn mib env, axioms
-    | SFBrules _ -> env, axioms
+      Environ.add_mind kn mib env, opac
+    | SFBrules _ -> env, opac
     in
-    snd (List.fold_left fold (env, axioms) struc)
+    snd (List.fold_left fold (env, opac) struc)
 
-let check_module env axioms mp mb =
+let collect_module_opaques env opac mp mb =
+  collect_module_opaques env opac mp mb Cset.empty
+
+let check_module env opac mp mb =
   let () = check_module env mp mb in
-  collect_module_axioms env axioms mp mb
+  collect_module_opaques env opac mp mb
 
-let check_module env axioms mp mb =
+let check_module env opac mp mb =
   NewProfile.profile "check_module"
     ~args:(fun () -> [("name", `String (ModPath.to_string mp))])
-    (fun () -> check_module env axioms mp mb)
+    (fun () -> check_module env opac mp mb)
     ()

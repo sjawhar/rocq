@@ -14,9 +14,9 @@ open Safe_typing
 
 val import
   : safe_environment
-  -> Mod_checking.axioms
+  -> Names.Cset.t Names.Cmap.t
   -> compiled_library
-  -> vodigest -> safe_environment * Mod_checking.axioms
+  -> vodigest -> safe_environment * Names.Cset.t Names.Cmap.t
 
 val unsafe_import
   : safe_environment

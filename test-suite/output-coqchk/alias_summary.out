@@ -6,7 +6,8 @@ CONTEXT SUMMARY
   
 * Theory: Rewrite rules are not allowed
   
-* Axioms: <none>
+* Axioms:
+    alias_summary.A.Sub.Y.tgt
   
 * Constants/Inductives relying on type-in-type: <none>
   

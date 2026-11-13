@@ -7,6 +7,7 @@ CONTEXT SUMMARY
 * Theory: Rewrite rules are not allowed
   
 * Axioms:
+    functor_summary.M.tgt
     functor_summary.Arg.tgt
   
 * Constants/Inductives relying on type-in-type: <none>
