@@ -1,8 +1,8 @@
 diff --git a/checker/mod_checking.ml b/checker/mod_checking.ml
-index c2adc11ae1..43a3b552b7 100644
+index f07dd69fa6..ddd26dbb5b 100644
 --- a/checker/mod_checking.ml
 +++ b/checker/mod_checking.ml
-@@ -133,28 +133,6 @@ let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
+@@ -153,26 +153,6 @@ let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
                     str (CPrimitives.prim_type_to_string prm) ++ str ", but " ++
                     why ++ str ".")
  
@@ -23,15 +23,13 @@ index c2adc11ae1..43a3b552b7 100644
 -    | Undef _ -> ()
 -    | Def _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse (str "it is not a parameter")
 -  in
--  let u = primitive_instance refuse cb (CPrimitives.typ_univs prm) in
--  match conv env (Typeops.type_of_prim_type env u prm) cb.const_type with
--  | Result.Ok () -> ()
--  | Result.Error () -> refuse (str "its type is not the primitive type's")
+-  check_primitive_typing refuse env cb (CPrimitives.OT_type prm)
+-    ~mismatch:(str "its type is not the primitive type's")
 -
  (* Conversion and the VM compute with a primitive operator whatever the
     type that its constant declares, so [add : int -> int -> False] with the
     body [Primitive Int63add] would make [add m m] a closed proof of False.
-@@ -242,8 +220,10 @@ let check_constant_declaration env st kn cb =
+@@ -258,8 +238,10 @@ let check_constant_declaration env st kn cb =
    in
    let retro, st = match Cmap_env.find_opt kn (snd st.st_retro) with
    | None -> None, st
@@ -45,10 +43,10 @@ index c2adc11ae1..43a3b552b7 100644
      let st = { st_retro = (ind_retro, Cmap_env.remove kn cst_retro) } in
      Some retro, st
 diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
-index 68a25a8cfd..82c18d0286 100644
+index 24e1312fbf..1e5d056fa2 100644
 --- a/kernel/safe_typing.ml
 +++ b/kernel/safe_typing.ml
-@@ -1676,12 +1676,37 @@ let start_library dir senv =
+@@ -1696,12 +1696,37 @@ let start_library dir senv =
      opaquetab = Opaqueproof.empty_opaquetab;
    }
  
@@ -87,7 +85,7 @@ index 68a25a8cfd..82c18d0286 100644
    let mb =
      Mod_declarations.make_module_body str
        (Indmerge.unmerge_delta senv.modresolver)
-@@ -1705,7 +1730,7 @@ let export ~output_native_objects senv dir =
+@@ -1725,7 +1750,7 @@ let export ~output_native_objects senv dir =
      comp_sorts = senv.qualities;
      comp_deps = Array.of_list comp_deps;
      comp_flags = permanent_flags;
