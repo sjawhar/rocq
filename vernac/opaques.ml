@@ -25,10 +25,8 @@ let { Goptions.get = skip_qed_typecheck_flag } =
 
 let qed_typecheck_forced = ref false
 
-(* [Flags.with_modified_ref] restores the old value on a normal return and on
-   an exception, which is how [Fail] leaves the scope. *)
 let with_qed_typecheck_forced f =
-  Flags.with_modified_ref qed_typecheck_forced (fun _ -> true) f ()
+  Flags.with_option qed_typecheck_forced f ()
 
 let force_qed_typecheck () = qed_typecheck_forced := true
 
@@ -55,8 +53,10 @@ type opaque_result =
     handle, see {!start_document}. The table is an ordinary reference,
     outside the backtrackable summary below, because a rollback restores that
     summary and would restore away the record of the proof it discards. Each
-    check holds the safe environment of its [Qed], where the handle is still
-    unfilled, so it needs none of the state the rollback replaces. *)
+    check holds the safe environment current when its proof is computed: at
+    its [Qed], or later for a proof delegated to a worker. The handle is still
+    unfilled there, so the check needs none of the state the rollback
+    replaces. *)
 let skipped_checks : (unit -> unit) Opaqueproof.HandleMap.t ref =
   ref Opaqueproof.HandleMap.empty
 
@@ -167,9 +167,10 @@ let declare_defined_opaque ?feedback_id ~poly i (body : Safe_typing.private_cons
      not matter because the former must be an extension of the latter or
      otherwise the call to Safe_typing would throw an anomaly. *)
   (* Both spellings of the skip are read when the proof is declared, at Qed,
-     and so is the force a discarding control sets: the proof is checked in
-     full whenever the command that declares it runs under [Fail] or
-     [Succeed]. *)
+     and so is the force: [with_qed_typecheck_forced] sets it under [Fail]
+     and [Succeed] and for [rocq compile -vok], and [force_qed_typecheck]
+     sets it in a toplevel. A proof declared while the force is on is checked
+     in full. *)
   let skip = (!skip_qed_typecheck || skip_qed_typecheck_flag ())
              && not !qed_typecheck_forced
   in
