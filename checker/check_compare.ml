@@ -179,13 +179,13 @@ let sha256_of_file = Sha256.hex_of_file
     A reader and a writer of its own. The checker links no JSON reader. The
     one JSON printer it links, [NewProfile.MiniJson] (lib/newProfile.ml),
     copies the bytes above 127 of a string as they are, so a name that is
-    not UTF-8 would make the verdict invalid JSON; the writer below escapes
-    every such byte (see [escape]). The reader is strict, because the config
-    decides a grade: a duplicate key, a byte after the top-level value, a
-    byte sequence that is not UTF-8, a control character in a string, a
-    leading zero or a number that is not an integer are each an error. The
-    writer escapes, so a constant name holding a line break stays one JSON
-    string. *)
+    not UTF-8 would make the verdict invalid JSON. The writer below escapes
+    every such byte and every control character (see [escape]), so any name
+    stays one valid JSON string, a line break included. The reader is
+    strict, because the config decides a grade: a duplicate key, a byte
+    after the top-level value, a byte sequence that is not UTF-8, a control
+    character in a string, a leading zero or a number that is not an
+    integer are each an error. *)
 
 module Json = struct
 
