@@ -1,0 +1,133 @@
+diff --git a/checker/mod_checking.ml b/checker/mod_checking.ml
+index 1ce7036..1427392 100644
+--- a/checker/mod_checking.ml
++++ b/checker/mod_checking.ml
+@@ -134,29 +134,6 @@ let primitive_instance refuse cb expected =
+   in
+   u
+ 
+-(* Typeops types a primitive literal with the constant registered for its
+-   primitive type ([Typeops.type_of_int] and the like), and conversion
+-   unfolds that constant, so the typing of every literal trusts the
+-   registration. A definition [int : Set := Empty_set] registered as the
+-   int63 type would give [Int 0] the type Empty_set, and [match] on it a
+-   closed proof of False. coqc registers only the constant that [Primitive]
+-   declares, a parameter whose type is the primitive type's
+-   ([Constant_typing.infer_primitive]), and rocqchk refuses any other. [env]
+-   holds the constant's universe context. *)
+-let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
+-  let refuse why =
+-    raise (BadConstant (kn, str "is registered as the primitive type " ++
+-                            pr_prim_type prm ++ str ", but " ++ why ++ str "."))
+-  in
+-  let () = match cb.const_body with
+-    | Undef _ -> ()
+-    | Def _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse (str "it is not a parameter")
+-  in
+-  let u = primitive_instance refuse cb (CPrimitives.typ_univs prm) in
+-  match conv env (Typeops.type_of_prim_type env u prm) cb.const_type with
+-  | Result.Ok () -> ()
+-  | Result.Error () -> refuse (str "its type is not the primitive type's")
+-
+ (* A constant whose body is [Primitive op] is the operator [op], which
+    reduction computes by its own rules, whatever the constant's type says.
+    coqc declares it with the operator's type
+@@ -173,39 +150,6 @@ let check_primitive_operator env kn cb op =
+   | Result.Ok () -> ()
+   | Result.Error () -> refuse (str "its type is not the operator's")
+ 
+-(* A library's registrations are in the environment before any of its
+-   constants is checked ([Safe_checking.env_of_library]), and so are a
+-   module's ([check_module]), which refuses a registration of a constant
+-   that the module's own body does not declare: each registered constant is
+-   checked here, in an environment that registers it, where the module's
+-   own body declares it ([own]). The environment finds a constant by its
+-   user name, and so a registration of [kn]; the registered name must also
+-   have [kn]'s canonical name, which conversion compares, and coqc
+-   registers a constant as one primitive type only. *)
+-let check_registered_type env kn cb =
+-  let open Retroknowledge in
+-  let retro = Environ.retroknowledge env in
+-  let registered c prm = match c with
+-    | Some c when Constant.UserOrd.equal c kn -> [c, prm]
+-    | Some _ | None -> []
+-  in
+-  let open CPrimitives in
+-  match registered retro.retro_int63 (PTE PT_int63)
+-        @ registered retro.retro_float64 (PTE PT_float64)
+-        @ registered retro.retro_string (PTE PT_string)
+-        @ registered retro.retro_array (PTE PT_array) with
+-  | [] -> ()
+-  | [c, PTE prm] ->
+-    let () =
+-      if not (Constant.CanOrd.equal c kn) then
+-        raise (BadConstant (kn, str "is registered as the primitive type " ++
+-                                pr_prim_type prm ++ str " under the canonical name " ++
+-                                KerName.print (Constant.canonical c) ++ str ", not its own."))
+-    in
+-    check_register_type env kn cb prm
+-  | _ :: _ :: _ ->
+-    raise (BadConstant (kn, str "is registered as more than one primitive type."))
+-
+ let check_constant_declaration env opac kn cb opacify ~own =
+   Flags.if_verbose Feedback.msg_notice (str "  checking cst:" ++ Constant.print kn);
+   let env = CheckFlags.set_local_flags cb.const_typing_flags env in
+@@ -226,7 +170,10 @@ let check_constant_declaration env opac kn cb opacify ~own =
+   let jty = Typeops.infer_type env ty in
+   if not (Sorts.relevance_equal cb.const_relevance (Sorts.relevance_of_sort jty.utj_type))
+   then raise Pp.(BadConstant (kn, str "incorrect const_relevance"));
+-  let () = if own then check_registered_type env kn cb in
++  (* Forge row dev/ci/forge/rocqchk-register-type: the reverted build
++     applies a primitive type registration without checking the constant
++     it names (check_registered_type and check_register_type). *)
++  let () = ignore own in
+   let check env bd () =
+     let j = Typeops.infer env bd in
+     match conv_leq env j.uj_type ty with
+diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
+index b28e32f..b5eb0e2 100644
+--- a/kernel/safe_typing.ml
++++ b/kernel/safe_typing.ml
+@@ -1634,15 +1634,40 @@ let start_library dir senv =
+     opaquetab = Opaqueproof.empty_opaquetab;
+   }
+ 
++(* Forge row dev/ci/forge/rocqchk-register-type: this code exists only in
++   the reverted build, which writes the forged .vo. The library has
++   int : Set := Empty_set and an axiom zero : int, and a module
++   Forge_regtype marks it. The forger gives zero the body Int 0, the int63
++   literal 0, and adds to the retroknowledge of the library's module the
++   registration of int as the int63 type: the library that
++   test-suite/misc/rocqchk-register-type/forge.ml regtype writes from
++   donor/Lib.vo. coqc never writes either: it registers a primitive type
++   only for the constant that Primitive declares. *)
++let forge_regtype mp struc retro =
++  let id = Id.of_string in
++  if Option.is_empty (List.assoc_f_opt Id.equal (id "Forge_regtype") struc) then struc, retro
++  else
++    let forge (l, field) = match field with
++      | SFBconst cb when Id.equal l (id "zero") ->
++        (l, SFBconst { cb with const_body = Def (mkInt (Uint63.of_int 0)) })
++      | _ -> (l, field)
++    in
++    let int = Constant.make1 (KerName.make mp (id "int")) in
++    List.map forge struc, Retroknowledge.Register_type (CPrimitives.PT_int63, int) :: retro
++
+ let export ~output_native_objects senv dir =
+   let () = check_current_library dir senv in
+   let mp = senv.modpath in
+   (* With -merge-inductives, undo every merge this process made, so that the
+      .vo carries only names its reader can justify for itself. *)
+-  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
++  let str, retro =
++    forge_regtype mp (Indmerge.unmerge_exported (List.rev senv.revstruct))
++      senv.local_retroknowledge
++  in
++  let str = NoFunctor str in
+   let mb =
+     Mod_declarations.make_module_body str
+-      (Indmerge.unmerge_delta senv.modresolver) senv.local_retroknowledge
++      (Indmerge.unmerge_delta senv.modresolver) retro
+   in
+   let ast, symbols =
+     if output_native_objects then
