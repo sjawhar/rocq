@@ -325,10 +325,10 @@ let rec collect_constants_without_body sign mp accu =
    makes the other choice and reports [F.in_f]; keeping ours is deliberate,
    for the two joins in the BET grader (TrueJudge.lean, grade.py).
 
-   It would rather leave an axiom unreported, which both joins fail closed
-   on, than report a name no [Print Assumptions] prints, which they read as
-   a smuggled assumption. So it reads no type for what an expression leaves
-   assumed: [Module M : T := E] is read at the end, through E, by [Mod_impl].
+   It names each axiom as [Print Assumptions] names it, so that both joins
+   match, and it reads what an expression leaves assumed in the expression,
+   not in a type: [Module M : T := E] is read at the end, through E, by
+   [Mod_impl].
    A functor application is recorded where the walk passes it
    ([Check_stat.record_application]), and its functor's body is read at the
    end too ([Mod_impl.application_axioms]), as [Print Assumptions] reads it:
@@ -339,15 +339,17 @@ let rec collect_constants_without_body sign mp accu =
    covers an application inside a seal, behind a helper with a body, and a
    seal a functor body declares. The end is the place for it, because the
    final environment holds every functor an application names, wherever it
-   is declared. What it cannot read it does not list: the body of a functor
-   declared with [Declare Module] or defined by an expression over
-   parameters of its own, and an application [Mod_impl] stops at, where no
-   name under it is dropped either. Where a sealed implementation reaches a
-   sibling's axiom through an [Include], an alias or an ascription of it,
-   the two accounts name one axiom twice: the walk reports it where it is
-   declared, while [Print Assumptions] names the path the proof wrote. That
-   pair fails both joins closed, as it does without this walk, where the
-   axiom goes unreported instead. *)
+   is declared. Where it cannot read the body, for a functor declared with
+   [Declare Module] or an application [Mod_impl] stops at, it lists the
+   parameters of the application's type and of the functor's result type
+   instead: more names than [Print Assumptions] prints, on which both joins
+   fail closed, rather than none for what a proof rests on. No name under
+   such an application is dropped either. Where a sealed
+   implementation reaches a sibling's axiom through an [Include], an alias
+   or an ascription of it, the two accounts name one axiom twice: the walk
+   reports it where it is declared, while [Print Assumptions] names the path
+   the proof wrote. That pair fails both joins closed, as it does without
+   this walk, where the axiom goes unreported instead. *)
 let rec record_sealed_axioms ~hidden mp mb =
   match mod_type mb, mod_expr mb with
   | MoreFunctor _, _ ->

@@ -73,12 +73,17 @@ let root_context mp = { raw = mp; subst = Mod_subst.empty_subst; within = [] }
 (* What one module's implementation declares, read by label: the modules
    under it, which the walk goes through, and whether each constant has a
    body, which is the answer it is after. [struc] is that structure, in the
-   order it declares its fields, and [ctx] where it is read. *)
+   order it declares its fields, and [ctx] where it is read. [implemented] is
+   false for the empty record that stands for an implementation the walk cannot
+   read; for an application, [types] then holds the result type of the
+   functor it names, when the walk found that functor. *)
 type fields = {
   modules : module_body Id.Map.t;
   constants : bool Id.Map.t;
   struc : structure_body;
   ctx : context;
+  implemented : bool;
+  types : structure_body list;
 }
 
 let no_fields = {
@@ -86,6 +91,8 @@ let no_fields = {
   constants = Id.Map.empty;
   struc = [];
   ctx = root_context ModPath.dummy;
+  implemented = false;
+  types = [];
 }
 
 let fields_of_structure ctx struc =
@@ -96,7 +103,7 @@ let fields_of_structure ctx struc =
     | SFBmodule msb -> { fields with modules = Id.Map.add lab msb fields.modules }
     | SFBmind _ | SFBrules _ | SFBmodtype _ -> fields
   in
-  List.fold_left add { no_fields with struc; ctx } struc
+  List.fold_left add { no_fields with struc; ctx; implemented = true } struc
 
 (* The module [lab] of a structure, and the context it is read in. *)
 let member fields lab =
@@ -122,6 +129,19 @@ let rec bind subst sign args = match sign, args with
   | MoreFunctor (mbid, _, sign), arg :: args ->
     bind (Mod_subst.add_mbid mbid arg (Mod_subst.empty_delta_resolver arg) subst) sign args
   | NoFunctor _, _ :: _ | MoreFunctor _, [] -> None
+
+(* For [Module G (X : S) := E], whose type is the functor type [sign] and
+   whose expression is [E] under one [MEMoreFunctor] for each parameter:
+   [subst] with each parameter bound to the argument at its place, [E], and
+   the arguments left for it, as [fields_of_expression] in
+   vernac/assumptions.ml reads it. The parameters are the type's: the
+   expression names them but does not hold them. *)
+let rec bind_expression subst sign fe args = match sign, fe, args with
+  | _, MENoFunctor me, args -> Some (subst, me, args)
+  | MoreFunctor (mbid, _, sign), MEMoreFunctor fe, arg :: args ->
+    bind_expression
+      (Mod_subst.add_mbid mbid arg (Mod_subst.empty_delta_resolver arg) subst) sign fe args
+  | (NoFunctor _ | MoreFunctor _), MEMoreFunctor _, _ -> None
 
 let rec functor_result = function
   | NoFunctor struc -> struc
@@ -188,16 +208,16 @@ let keep_fields env paths fields =
    that grows at each level. Three stops end it, each where an application is
    read, so that the path reads as the empty record for both questions this
    file answers: no field under it has a body, so no name under it is
-   dropped, and no axiom under it is listed. An application stops when it is
-   read inside one with the same functor body and the same arguments, which
-   only an admitted library can hold; when it is read inside [max_depth]
-   applications; and when [max_instances] applications have been read for
-   the environment, which bounds the work a library can make the summary do
-   with many applications at each level. A library that reaches one of the
-   last two keeps its names under the stop, the answer that fails closed;
-   each level of nesting on one path is an application a library writes or a
-   partial application it declares, so an honest library reaches [max_depth]
-   only with a chain of 64 of them. *)
+   dropped, and the listing lists what the application's type declares
+   without a body instead of its body's axioms ([application_axioms]). An
+   application stops when it is read inside one with the same functor body
+   and the same arguments, which only an admitted library can hold; when it
+   is read inside [max_depth] applications; and when [max_instances]
+   applications have been read for the environment, which bounds the work a
+   library can make the summary do with many applications at each level.
+   Each level of nesting on one path is an application a library writes or
+   a partial application it declares, so an honest library reaches
+   [max_depth] only with a chain of 64 of them. *)
 let max_depth = 64
 let max_instances = 100_000
 
@@ -250,10 +270,13 @@ let rec read_module env read ctx mb =
    [me] applies, to [me]'s arguments and then to [args], with the functor's
    path mapped to [app]'s and each of its parameters to its argument. [ctx]
    gives the paths [me] names, and [site] is where [app] is read. An alias
-   of a functor, and a functor that is a partial application, are followed to
-   the functor they name, [seen] stopping a cycle of them. A functor declared
-   with [Declare Module], and one an expression defines over parameters of
-   its own, have no body this walk reads. *)
+   of a functor, a functor that is a partial application, and a functor an
+   expression defines over parameters of its own, [Module G (X : S) := E],
+   are followed to the functor they name, as [fields_of_expr] and
+   [fields_of_expression] in vernac/assumptions.ml follow them; [seen] stops
+   a cycle of them. A functor declared with [Declare Module] has no body to
+   read. Where the body is not read, the empty record carries the result
+   type of each functor on the way, for the listing. *)
 and applied env app site ctx seen me args =
   match unapply [] me with
   | None -> no_fields
@@ -264,12 +287,23 @@ and applied env app site ctx seen me args =
     match module_at env f with
     | None -> no_fields
     | Some (mb, ctx) ->
+      let unread = { no_fields with types = [functor_result (mod_type mb)] } in
+      let or_unread fields =
+        if fields.implemented then fields
+        else { fields with types = fields.types @ unread.types }
+      in
+      let seen = ModPath.Set.add f seen in
       match mod_expr mb with
-      | Struct (_, struc) -> instantiate env app site ctx (mod_type mb) args struc
+      | Struct (_, struc) -> or_unread (instantiate env app site ctx (mod_type mb) args struc)
       | FullStruct ->
-        instantiate env app site ctx (mod_type mb) args (functor_result (mod_type mb))
-      | Abstract | Algebraic (MEMoreFunctor _) -> no_fields
-      | Algebraic (MENoFunctor me) -> applied env app site ctx (ModPath.Set.add f seen) me args
+        or_unread
+          (instantiate env app site ctx (mod_type mb) args (functor_result (mod_type mb)))
+      | Abstract -> unread
+      | Algebraic (MENoFunctor me) -> or_unread (applied env app site ctx seen me args)
+      | Algebraic (MEMoreFunctor _ as fe) ->
+        match bind_expression ctx.subst (mod_type mb) fe args with
+        | None -> unread
+        | Some (subst, me, args) -> or_unread (applied env app site { ctx with subst } seen me args)
 
 (* The body [struc] of the functor of type [sign] declared where [ctx] says,
    bound to [args], read as [app]'s, inside the applications of [site]; or the
@@ -347,9 +381,18 @@ let defines_constant env kn =
    whose parameters are what Print Assumptions names. An alias is not read:
    what it names is declared, and listed, where its target is. A functor is
    not read either: its fields are reached through its applications. The
-   walk reads every module through [fields_in_implementation], so it stops
-   exactly where [defines_constant] has no body to give: at an application
-   read as the empty record, above. *)
+   walk reads every module through [fields_in_implementation], so it reads a
+   body exactly where [defines_constant] may drop a name for it.
+
+   An application whose body the walk does not read, at a stop, with a
+   functor declared with [Declare Module], or with one it cannot find, is
+   listed by its types instead: the constants without a body in the type the
+   application has, which is the functor's result type bound to its
+   arguments, or the type an ascription gives it, and in the result type of
+   each functor the walk followed to it. That lists every parameter those
+   types declare, including ones the body may define, and names no axiom the
+   body hides behind them: more names than Print Assumptions prints, which
+   fails closed, rather than none for what an honest proof rests on. *)
 let application_axioms env mp =
   reading := ModPath.Set.empty;
   let bodyless mp acc lab cb =
@@ -358,14 +401,17 @@ let application_axioms env mp =
   let rec structure acc mp fields = List.fold_left (field mp) acc fields.struc
   and field mp acc (lab, sfb) = match sfb with
     | SFBconst cb -> bodyless mp acc lab cb
-    | SFBmodule msb ->
-      let mp = MPdot (mp, lab) in
-      (match mod_type msb, mod_expr msb with
-       | MoreFunctor _, _ | NoFunctor _, Algebraic (MENoFunctor (MEident _)) -> acc
-       | NoFunctor struc, Abstract -> declared acc mp struc
-       | NoFunctor _, (Algebraic _ | Struct _ | FullStruct) ->
-         structure acc mp (fields_in_implementation env mp))
+    | SFBmodule msb -> module_ acc (MPdot (mp, lab)) msb
     | SFBmind _ | SFBrules _ | SFBmodtype _ -> acc
+  and module_ acc mp mb =
+    match mod_type mb, mod_expr mb with
+    | MoreFunctor _, _ | NoFunctor _, Algebraic (MENoFunctor (MEident _)) -> acc
+    | NoFunctor struc, Abstract -> declared acc mp struc
+    | NoFunctor struc, Algebraic _ ->
+      let fields = fields_in_implementation env mp in
+      if fields.implemented then structure acc mp fields
+      else List.fold_left (fun acc struc -> declared acc mp struc) acc (struc :: fields.types)
+    | NoFunctor _, (Struct _ | FullStruct) -> structure acc mp (fields_in_implementation env mp)
   and declared acc mp struc =
     List.fold_left (fun acc (lab, sfb) -> match sfb with
         | SFBconst cb -> bodyless mp acc lab cb
@@ -376,4 +422,8 @@ let application_axioms env mp =
         | SFBmind _ | SFBrules _ | SFBmodtype _ -> acc)
       acc struc
   in
-  List.rev (structure [] mp (fields_in_implementation env mp))
+  let acc = match module_at env mp with
+    | Some (mb, _) -> module_ [] mp mb
+    | None -> structure [] mp (fields_in_implementation env mp)
+  in
+  List.rev acc
