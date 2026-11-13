@@ -12,6 +12,7 @@
 # bogus among the axioms, with int, a primitive type, which has no body:
 # what a primitive operator computes is the kernel's code.
 set -eu
+. misc/rocqchk_summary_common.bash
 
 . misc/rocqchk_forge_common.bash
 
@@ -34,7 +35,7 @@ EOF
 for vm in yes no; do
   must_accept "$d/honest-$vm.log" "rocqchk -bytecode-compiler $vm refused the honest Bogus.vo" \
     -silent -o -bytecode-compiler $vm -Q "$d/honest" PrimitiveType -norec PrimitiveType.Bogus
-  sed -n '/^\* Axioms:/,/^\* Constants/ s/^    //p' "$d/honest-$vm.log" |
+  section 'Axioms' "$d/honest-$vm.log" | sed -n 's/^    //p' |
     LC_ALL=C sort > "$d/axioms-$vm"
   if ! diff -u "$d/expected" "$d/axioms-$vm"; then
     echo "rocqchk -o -bytecode-compiler $vm does not list the primitive bogus among the axioms"
