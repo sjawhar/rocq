@@ -37,13 +37,17 @@
     follows inside F's body, and to nothing else: the terms of the body are
     never read, and no renaming changes whether a field has a body.
 
-    Every answer it is unsure of is [false], which keeps the name its caller
-    would print. It reads an implementation and never a type: a module type
-    can carry [Module M : T := E] of its own, and a module declared with
-    [Declare Module] carries nothing else, while neither says what an
-    implementation of it binds. The type of [Module M. ... End M], and of a
-    functor declared without an ascription, is its implementation, and is
-    read as one. *)
+    [defines_constant] answers [false] wherever it is unsure, which keeps
+    the name its caller would print. It reads an implementation and never a
+    type: a module type can carry [Module M : T := E] of its own, and a
+    module declared with [Declare Module] carries nothing else, while
+    neither says what an implementation of it binds. The type of
+    [Module M. ... End M], and of a functor declared without an ascription,
+    is its implementation, and is read as one. [application_axioms] reads
+    types as well: a declared module's, and those of an application whose
+    body it does not read. There it lists every constant those types
+    declare without a body, which can be more names than Print Assumptions
+    prints; its comment below says where. *)
 
 open Names
 open Declarations

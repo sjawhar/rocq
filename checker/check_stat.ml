@@ -169,10 +169,13 @@ let record_axiom c =
    the environment holds them only where it holds the application with the
    functor's own type. The walk records each application it passes, with the
    module body it holds for it, which may come from a type, as under a
-   [Declare Module], where no implementation leads to it; the section reads
-   its functor's body at the end, over the final environment
-   ([Mod_impl.application_axioms]), which holds every functor an application
-   names. [record_sealed_axioms] says why the walk records them. *)
+   [Declare Module], where no implementation leads to it; at the end, over
+   the final environment, which holds every functor an application names,
+   the section asks [Mod_impl.application_axioms], which reads the functor's
+   body, or, where it cannot read that body, lists the constants without a
+   body of the application's type and of each functor's result type
+   (mod_impl.ml says where).
+   [record_sealed_axioms] says why the walk records them. *)
 let applications = ref []
 
 let record_application mp mb =
@@ -215,17 +218,15 @@ let pr_assumptions ass axs =
    recorded behind it. [Module M : T := E] puts T in the environment, so a
    field E defines has no body there either, and both of those reported it as
    an axiom while [Print Assumptions] read a proof that uses it closed
-   (dispatch://BET-245). [Mod_impl] answers whether the implementation leaves
-   a constant assumed, and what the fold yields, from the environment and
-   from those records alike, is dropped where it does not, which for a field
-   of a functor application is where the functor's body defines it. The
-   names [record_sealed_axioms] collected are added after, unasked: each is
-   a constant an implementation itself declares without a body, which this
-   question would keep; and so are the constants each recorded application's
-   functor body leaves without a body, under the application's name, which
-   covers what a field that body defines rests on in it. The question is
-   asked here, over the final environment, because that environment holds
-   every implementation the names come from, while a check in progress holds
+   (dispatch://BET-245). [Mod_impl.defines_constant] asks whether the
+   implementation gives a constant a body, and what the fold yields, from the
+   environment and from those records alike, is dropped where it does. The
+   names [record_sealed_axioms] collected are added after, unasked: each
+   is a constant an implementation itself declares without a body, which
+   the question would keep. So are the names [Mod_impl.application_axioms]
+   lists for each recorded application. The question is asked here, over the
+   final environment, because that environment holds every implementation
+   the names come from, while a check in progress holds
    a module's type where its implementation is still to come. What the walk
    reads, and what it leaves out, is written in mod_impl.ml. A primitive
    operator has no body either, and is listed on purpose: rocqchk checks its

@@ -486,31 +486,25 @@ let rec collect_constants_without_body sign mp accu =
    for the two joins in the BET grader (TrueJudge.lean, grade.py).
 
    Where it reads the implementation, it names each axiom as
-   [Print Assumptions] names it, so that both joins match, and it reads what
-   an expression leaves assumed in the expression, not in a type:
-   [Module M : T := E] is read at the end, through E, by [Mod_impl].
-   A functor application is recorded where the walk passes it
-   ([Check_stat.record_application]), and its functor's body is read at the
-   end too ([Mod_impl.application_axioms]), as [Print Assumptions] reads it:
-   each constant that body leaves without a body is listed under the
-   application's name, [R.x] for [R := F A] or [R : T := F A], visible or
-   sealed, whether a proof reaches it or not. This is what the environment
-   fold does for [App := F A] in the open, whose fields it holds, and it
-   covers an application inside a seal, behind a helper with a body, and a
-   seal a functor body declares. The end is the place for it, because the
-   final environment holds every functor an application names, wherever it
-   is declared. Where it cannot read the body, for a functor declared with
-   [Declare Module], an application [Mod_impl] stops at, or one a module
-   type declares under a [Declare Module], which no implementation leads to,
-   it lists the parameters of the application's type and of each functor's
-   result type instead: more names than [Print Assumptions] prints, on which
-   both joins fail closed, rather than none for what a proof rests on. No
-   name under such an application is dropped either. Where a sealed
-   implementation reaches a sibling's axiom through an [Include], an alias
-   or an ascription of it, the two accounts name one axiom twice: the walk
-   reports it where it is declared, while [Print Assumptions] names the path
-   the proof wrote. That pair fails both joins closed, as it does without
-   this walk, where the axiom goes unreported instead. *)
+   [Print Assumptions] names it, so that both joins match. What an
+   expression leaves assumed is read at the end, by [Mod_impl], over the
+   final environment, which holds every functor an application names,
+   wherever it is declared:
+   [Module M : T := E] is read through E, and a functor application, which
+   the walk records where it passes it ([Check_stat.record_application]),
+   through its functor's body. The application's axioms are listed under
+   its name, [R.x] for [R := F A] or [R : T := F A], visible or sealed,
+   whether a proof reaches them or not. This covers an application inside
+   a seal, behind a helper with a body, and a seal a functor body declares.
+   What [Mod_impl] reads, types included, and what it lists where it does
+   not read a functor's body, is written in mod_impl.ml.
+
+   Where a sealed implementation reaches a sibling's axiom through an
+   [Include], an alias or an ascription of it, the two accounts name one
+   axiom twice: the walk reports it where it is declared, while
+   [Print Assumptions] names the path the proof wrote. That pair fails both
+   joins closed, as it does without this walk, where the axiom goes
+   unreported instead. *)
 let rec record_sealed_axioms ~hidden mp mb =
   match mod_type mb, mod_expr mb with
   | MoreFunctor _, _ ->
