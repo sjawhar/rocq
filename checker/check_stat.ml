@@ -163,7 +163,7 @@ let record_inductive ~indices_matter c mib =
 let sealed_axioms = ref []
 
 let record_axiom c =
-  if !unsafe_flags <> None then sealed_axioms := add_name (constant_name c) !sealed_axioms
+  if summary_enabled () then sealed_axioms := add_name (constant_name c) !sealed_axioms
 
 (* A functor application's axioms are its functor's, under its own name, and
    the environment holds them only where it holds the application with the
@@ -225,7 +225,11 @@ let pr_assumptions ass axs =
    asked here, over the final environment, because that environment holds
    every implementation the names come from, while a check in progress holds
    a module's type where its implementation is still to come. What the walk
-   reads, and what it leaves out, is written in mod_impl.ml. *)
+   reads, and what it leaves out, is written in mod_impl.ml. A primitive
+   operator has no body either, and is listed on purpose: rocqchk checks its
+   type against the operator's ([Mod_checking.check_primitive_operator]), but
+   what the operator computes is the kernel's own code, which the reader
+   trusts as they trust an axiom. *)
 let pr_axioms env opac =
   let add c cb acc =
     if Declareops.constant_has_body cb then acc else
