@@ -1,7 +1,10 @@
+(* -*- coq-prog-args: ("-native-compiler" "no"); -*- *)
 (* rocq-prover/rocq#22760. The symbolic arguments of an extended-tag constructor (the 245th
-   non-constant constructor and after) start at field 1 of their block. Their levels must count
-   from that field, as a small tag's count from field 0. The checks below compare VM conversion
-   and VM normal forms with the lazy machine's, at the boundary and with two fields. *)
+   non-constant constructor and later with OCaml 4.14, the 243rd and later with OCaml 5) start
+   at field 1 of their block. Their levels must count from that field, as a small tag's count
+   from field 0. The checks below compare VM conversion and VM normal forms with the lazy
+   machine's, at the 250th constructor, with two fields, and at the 244th and 245th
+   constructors. *)
 
 Inductive Big :=
 | C1 (n : nat)
@@ -258,7 +261,10 @@ Inductive Big :=
 Definition f1 (x : Big) : nat -> nat := match x with C250 n => fun m => n | _ => fun m => 0 end.
 Definition f2 (x : Big) : nat -> nat := match x with C250 n => fun m => m | _ => fun m => 0 end.
 Fail Definition yes : f1 = f2 := (eq_refl f1 <: f1 = f2).
-Definition same : f1 = f1 := (eq_refl f1 <: f1 = f1).
+(* f1' has f1's body but is another constant, so that syntactic equality does not decide the
+   cast and the VM compares the two bodies. *)
+Definition f1' (x : Big) : nat -> nat := match x with C250 n => fun m => n | _ => fun m => 0 end.
+Definition same : f1 = f1' := (eq_refl f1 <: f1 = f1').
 (* the VM's normal form of an open match under a binder is the lazy machine's *)
 Definition r1 := Eval vm_compute in f1.
 Definition l1 := Eval lazy in f1.
@@ -531,6 +537,7 @@ Definition rk := Eval vm_compute in (fun x => (k1 x, k2 x, k3 x)).
 Definition lk := Eval lazy in (fun x => (k1 x, k2 x, k3 x)).
 Definition rk_ok : rk = lk := eq_refl.
 
+(* The 244th constructor has a small tag with OCaml 4.14 and an extended tag with OCaml 5. *)
 Inductive E244 :=
 | E244_1 (n : nat)
 | E244_2 (n : nat)
@@ -784,6 +791,7 @@ Definition re244 := Eval vm_compute in e244a.
 Definition le244 := Eval lazy in e244a.
 Definition re244_ok : re244 = le244 := eq_refl.
 
+(* The 245th constructor has an extended tag with OCaml 4.14 and with OCaml 5. *)
 Inductive E245 :=
 | E245_1 (n : nat)
 | E245_2 (n : nat)
