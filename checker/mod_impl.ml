@@ -351,24 +351,23 @@ and fields_in_implementation env mp =
       | MPdot (enclosing, lab) -> split enclosing (lab :: labs)
     in
     let root, labs = split mp [] in
+    (* The fields at [mp]: those kept for it; none while it is being read,
+       which ends a cycle; else those of the module [find] gives, read and
+       kept. *)
+    let read_at mp find =
+      match ModPath.Map.find_opt mp (read_memo env) with
+      | Some fields -> fields
+      | None when ModPath.Set.mem mp !reading -> no_fields
+      | None ->
+        match find () with
+        | None -> keep_fields env [mp] no_fields
+        | Some (mb, ctx) -> start_reading mp; read_module env [mp] ctx mb
+    in
     let descend (mp, fields) lab =
       let mp = MPdot (mp, lab) in
-      match ModPath.Map.find_opt mp (read_memo env) with
-      | Some fields -> mp, fields
-      | None when ModPath.Set.mem mp !reading -> mp, no_fields
-      | None ->
-        match member fields lab with
-        | None -> mp, keep_fields env [mp] no_fields
-        | Some (mb, ctx) -> start_reading mp; mp, read_module env [mp] ctx mb
+      mp, read_at mp (fun () -> member fields lab)
     in
-    let root_fields = match ModPath.Map.find_opt root (read_memo env) with
-      | Some fields -> fields
-      | None when ModPath.Set.mem root !reading -> no_fields
-      | None ->
-        match module_at env root with
-        | None -> keep_fields env [root] no_fields
-        | Some (mb, ctx) -> start_reading root; read_module env [root] ctx mb
-    in
+    let root_fields = read_at root (fun () -> module_at env root) in
     snd (List.fold_left descend (root, root_fields) labs)
 
 let defines_constant env kn =
