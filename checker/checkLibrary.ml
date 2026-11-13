@@ -104,8 +104,9 @@ let register_loaded_library m =
    with that one, then reads the table as stock does. So the opaque
    proofs, 846 MB of the whole r160 tree against 252 MB of library
    content, stay out of the main process's heap, and no fork copies them,
-   except a table that the main process reads itself: for a sealed
-   module's constant it cooks ([Mod_checking]), or for a batch it checks
+   except a table that the main process reads itself: under -o, for a
+   sealed module's constant it cooks to list what the proof uses
+   ([Mod_checking.collect_module_opaques]), or for a batch it checks
    because it could not fork ([CheckWorkers.spawn]). Where no worker can
    ([-j 1]), the table is parsed when the library is interned, where
    stock parses it, and nothing is hashed: see [intern_opaques].
