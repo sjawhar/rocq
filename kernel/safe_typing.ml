@@ -1516,6 +1516,24 @@ let propagate_senv newdef newenv newresolver senv oldsenv =
     opaquetab = senv.opaquetab;
   }
 
+(* After [End], the environment keeps the registrations ([Register ... as
+   kernel...], [Primitive] of a type) of the environment inside the module,
+   as it keeps its universes: registrations are only ever added, and each
+   names a constant or an inductive that the upper level still has.  Beyond
+   those of [oldsenv.env], they come from two places.
+   - The libraries required inside the module: [import] added their
+     [comp_retro], and [propagate_loads] adds the libraries back at the upper
+     level without their registrations.  Keeping these gives a later reader
+     of the .vo nothing it does not get itself: each such library is in
+     [required], so it is a dependency of the file, and the reader loads it,
+     with its [comp_retro], before this file.
+   - The module itself, listed in [local_retroknowledge].  [add_retroknowledge]
+     refuses these in a functor or a module type (the asserts below), so
+     there only the libraries' registrations are kept, and the functor body
+     and the module type are built as before.  In a plain module they were
+     added to its environment, so they are kept as before; [propagate_senv]
+     passes [local_retroknowledge], and only that, up to the [comp_retro] of
+     the file. *)
 let end_module l restype senv =
   let mp = senv.modpath in
   let params, oldsenv = check_struct senv.modvariant in
@@ -1527,7 +1545,7 @@ let end_module l restype senv =
   let newenv = Environ.set_qualities (Environ.qualities senv.env) newenv in
   let newenv = if Environ.rewrite_rules_allowed senv.env then Environ.allow_rewrite_rules newenv else newenv in
   let newenv = Environ.set_vm_library (Environ.vm_library senv.env) newenv in
-  let newenv = Modops.add_retroknowledge senv.local_retroknowledge newenv in
+  let newenv = Environ.set_retroknowledge newenv (Environ.retroknowledge senv.env) in
   let senv' = propagate_loads { senv with env = newenv } in
   let newenv = Modops.add_module mp mb senv'.env in
   let newresolver = match mod_global_delta mb with
@@ -1549,6 +1567,8 @@ let end_modtype l senv =
   let newenv = Environ.set_universes (Environ.universes senv.env) oldsenv.env in
   let newenv = if Environ.rewrite_rules_allowed senv.env then Environ.allow_rewrite_rules newenv else newenv in
   let newenv = Environ.set_vm_library (Environ.vm_library senv.env) newenv in
+  (* See [end_module]. *)
+  let newenv = Environ.set_retroknowledge newenv (Environ.retroknowledge senv.env) in
   let senv' = propagate_loads {senv with env=newenv} in
   let auto_tb = functorize params (NoFunctor (List.rev senv.revstruct)) in
   let mtb = build_mtb auto_tb senv.modresolver in
