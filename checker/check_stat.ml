@@ -51,10 +51,14 @@ let unsafe_flags = ref None
 let start_summary enabled =
   unsafe_flags := if enabled then Some empty_unsafe_flags else None
 
+(* The collection the checker runs for the sections below is wasted work when
+   no summary will be printed. *)
+let summary_enabled () = !unsafe_flags <> None
+
 (* An admitted library is never checked, so no flag of it is recorded, and the
    environment holds only the interface of its sealed modules, so the flag
    sections below cannot see an unsafe flag inside one. (The axioms section
-   can: [Mod_checking.collect_module_axioms] walks an admitted library's
+   can: [Mod_checking.collect_module_opaques] reads an admitted library's
    implementations too.) Saying so beats printing <none>, which a reader takes
    for "nothing unsafe here". *)
 let admitted = ref []
@@ -151,6 +155,16 @@ let record_inductive ~indices_matter c mib =
         else flags.indices_matter;
     }
 
+(* An axiom declared inside a module sealed with [Module M : T] is in no
+   environment the Axioms section can fold over, so the checker records the
+   ones it walks past and the section adds them to what the fold saw. Why
+   that walk looks where it does, and what it leaves out, is explained where
+   it lives: [record_sealed_axioms] in mod_checking.ml (dispatch://BET-245). *)
+let sealed_axioms = ref []
+
+let record_axiom c =
+  if !unsafe_flags <> None then sealed_axioms := add_name (constant_name c) !sealed_axioms
+
 (* The environment walk keeps its own order, and a recorded name it already
    holds is dropped, so a constant is never listed twice. The membership test
    is a set, because a tree can record tens of thousands of names. *)
@@ -183,9 +197,31 @@ let pr_assumptions ass axs =
   else
     hv 2 (str ass ++ str ":" ++ fnl() ++ prlist_with_sep fnl str axs)
 
-let pr_axioms env axioms =
-  let csts = List.map KerName.to_string axioms in
-  pr_assumptions "Axioms" csts
+(* The fold below reports every constant the environment holds without a
+   body, and, for one a seal hides, what [register_opacified_constant]
+   recorded behind it. [Module M : T := E] puts T in the environment, so a
+   field E defines has no body there either, and both of those reported it as
+   an axiom while [Print Assumptions] read a proof that uses it closed
+   (dispatch://BET-245). [Mod_impl] answers whether the implementation leaves
+   a constant assumed, and what the fold yields, from the environment and
+   from those records alike, is dropped where it does not. The names
+   [record_sealed_axioms] collected are added after, unasked: each is a
+   constant an implementation itself declares without a body, which this
+   question would keep. The question is asked here, over the final
+   environment, because that environment holds every implementation the names
+   come from, while a check in progress holds a module's type where its
+   implementation is still to come. What the walk reads, and what it leaves
+   out, is written in mod_impl.ml. *)
+let pr_axioms env opac =
+  let add c cb acc =
+    if Declareops.constant_has_body cb then acc else
+      match Cmap.find_opt c opac with
+      | None -> Cset.add c acc
+      | Some s -> Cset.union s acc in
+  let csts = fold_constants add env Cset.empty in
+  let csts = Cset.filter (fun c -> not (Mod_impl.defines_constant env c)) csts in
+  let csts = Cset.fold (fun c acc -> Constant.to_string c :: acc) csts [] in
+  pr_assumptions "Axioms" (add_missing csts !sealed_axioms)
 
 let pr_type_in_type env flags =
   let csts = fold_constants (fun c cb acc -> if not cb.const_typing_flags.check_universes then Constant.to_string c :: acc else acc) env [] in
@@ -224,25 +260,25 @@ let pr_indices_matter env flags =
     else acc) env [] in
   pr_assumptions "Inductives relying on indices not mattering" (add_missing inds flags.indices_matter)
 
-let print_context env axioms = match axioms with
-| None -> ()
-| Some axioms ->
-  let flags = current_unsafe_flags () in
-  Feedback.msg_notice
-    (hov 0
-    (fnl() ++ str"CONTEXT SUMMARY" ++ fnl() ++
-    str"===============" ++ fnl() ++ fnl() ++
-    str "* " ++ hov 0 (pr_impredicative_set env ++ fnl()) ++ fnl() ++
-    str "* " ++ hov 0 (pr_rewrite_rules env ++ fnl()) ++ fnl() ++
-    str "* " ++ hov 0 (pr_axioms env axioms ++ fnl()) ++ fnl() ++
-    str "* " ++ hov 0 (pr_type_in_type env flags ++ fnl()) ++ fnl() ++
-    pr_unchecked_eliminations env flags ++
-    str "* " ++ hov 0 (pr_unguarded env flags ++ fnl()) ++ fnl() ++
-    str "* " ++ hov 0 (pr_nonpositive env flags ++ fnl()) ++ fnl() ++
-    str "* " ++ hov 0 (pr_indices_matter env flags ++ fnl()) ++
-    pr_admitted ())
-    )
+let print_context env opac =
+  if !output_context then begin
+    let flags = current_unsafe_flags () in
+    Feedback.msg_notice
+      (hov 0
+      (fnl() ++ str"CONTEXT SUMMARY" ++ fnl() ++
+      str"===============" ++ fnl() ++ fnl() ++
+      str "* " ++ hov 0 (pr_impredicative_set env ++ fnl()) ++ fnl() ++
+      str "* " ++ hov 0 (pr_rewrite_rules env ++ fnl()) ++ fnl() ++
+      str "* " ++ hov 0 (pr_axioms env opac ++ fnl()) ++ fnl() ++
+      str "* " ++ hov 0 (pr_type_in_type env flags ++ fnl()) ++ fnl() ++
+      pr_unchecked_eliminations env flags ++
+      str "* " ++ hov 0 (pr_unguarded env flags ++ fnl()) ++ fnl() ++
+      str "* " ++ hov 0 (pr_nonpositive env flags ++ fnl()) ++ fnl() ++
+      str "* " ++ hov 0 (pr_indices_matter env flags ++ fnl()) ++
+      pr_admitted ())
+      )
+  end
 
-let stats env axioms =
-  print_context env axioms;
+let stats env opac =
+  print_context env opac;
   print_memory_stat ()

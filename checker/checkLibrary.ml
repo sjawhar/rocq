@@ -104,8 +104,9 @@ let register_loaded_library m =
    with that one, then reads the table as stock does. So the opaque
    proofs, 846 MB of the whole r160 tree against 252 MB of library
    content, stay out of the main process's heap, and no fork copies them,
-   except a table that the main process reads itself, for a batch it
-   checks because it could not fork ([CheckWorkers.spawn]). Where no worker can
+   except a table that the main process reads itself: for a sealed
+   module's constant it cooks ([Mod_checking]), or for a batch it checks
+   because it could not fork ([CheckWorkers.spawn]). Where no worker can
    ([-j 1]), the table is parsed when the library is interned, where
    stock parses it, and nothing is hashed: see [intern_opaques].
 
@@ -329,13 +330,15 @@ let check_one_lib ~output_context admit senv (dir,m) =
          (str "Admitting library: " ++ pr_dirpath dir);
        Check_stat.record_admitted (DirPath.to_string dir);
        let imported = Safe_checking.unsafe_import (fst senv) md dig in
-       let axioms =
+       let opac =
          if not output_context then snd senv
          else
-           Mod_checking.collect_module_axioms (snd senv)
+           let env = Safe_typing.env_of_safe_env
+             (Safe_typing.check_flags_for_library md (fst senv)) in
+           Mod_checking.collect_module_opaques env (snd senv)
              (ModPath.MPfile dir) (Safe_typing.module_of_library md)
        in
-       imported, axioms)
+       imported, opac)
     else
       (Flags.if_verbose Feedback.msg_notice
          (str "Checking library: " ++ pr_dirpath dir);
@@ -830,7 +833,7 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
     && CheckWorkers.capture_available ()
   in
   let norec_set = List.fold_left (fun s (dir, _) -> LibrarySet.add dir s) LibrarySet.empty nrl in
-  let walked = ref (senv, Mod_checking.empty_axioms) in
+  let walked = ref (senv, Cmap.empty) in
   let walk_error = ref None in
   (* The libraries left to check once the intern has ended, newest first:
      every library from the first one whose opaque proofs point into a
@@ -842,7 +845,9 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
     else if not (CList.is_empty !pending) then pending := lib :: !pending
     else begin
       let admitted = not (LibrarySet.mem dir norec_set) in
-      if not admitted && not (opaque_sources_ready m) then pending := [lib]
+      (* Under -o, [check_one_lib] reads the sealed opaque bodies of an
+         admitted library too ([Mod_checking.collect_module_opaques]). *)
+      if (not admitted || output_context) && not (opaque_sources_ready m) then pending := [lib]
       else begin
         let admit = if admitted then LibrarySet.singleton dir else LibrarySet.empty in
         CheckWorkers.hold_on ();
@@ -930,7 +935,7 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
       List.fold_left (check_one_lib ~output_context nochk) !walked (List.rev !pending)
     end else begin
       validate_tables ();
-      List.fold_left (check_one_lib ~output_context nochk) (senv, Mod_checking.empty_axioms) needed
+      List.fold_left (check_one_lib ~output_context nochk) (senv, Cmap.empty) needed
     end
   in
   CheckWorkers.finish ();

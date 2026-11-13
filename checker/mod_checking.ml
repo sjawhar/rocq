@@ -8,14 +8,6 @@ open Environ
 
 (** {6 Checking constants } *)
 
-type axioms = { cset : KerName.Set.t }
-
-let empty_axioms = { cset = KerName.Set.empty }
-
-let constants_of_axioms {cset} = KerName.Set.elements cset
-
-let axioms_add c {cset} = {cset=KerName.Set.add c cset}
-
 (** {6 Compiling the VM bytecode}
 
     The checker never reads the [vmlibrary] segment of a [.vo] file, and it does
@@ -103,6 +95,24 @@ let indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ref
   ref (fun _ -> assert false)
 
 let set_indirect_accessor f = indirect_accessor := f
+
+let register_opacified_constant env opac kn cb =
+  let rec gather_consts s c =
+    match Constr.kind c with
+    | Constr.Const (c, _) -> Cset.add c s
+    | _ -> Constr.fold gather_consts s c
+  in
+  let wo_body =
+    Cset.fold
+      (fun kn s ->
+        if Declareops.constant_has_body (lookup_constant kn env) then s else
+          match Cmap.find_opt kn opac with
+          | None -> Cset.add kn s
+          | Some s' -> Cset.union s' s)
+      (gather_consts Cset.empty cb)
+      Cset.empty
+  in
+  Cmap.add kn wo_body opac
 
 exception BadConstant of Constant.t * Pp.t
 
@@ -352,6 +362,78 @@ let check_nested_resolver env res mp mb =
   in
   check_body mp mb
 
+let rec collect_constants_without_body sign mp accu =
+  let collect_field s lab = function
+  | SFBconst cb ->
+     let c = Constant.make2 mp lab in
+     if Declareops.constant_has_body cb then s else Cset.add c s
+  | SFBmodule msb -> collect_constants_without_body (mod_type msb) (MPdot(mp,lab)) s
+  | SFBmind _ | SFBrules _ | SFBmodtype _ -> s in
+  match sign with
+  | MoreFunctor _ -> Cset.empty  (* currently ignored *)
+  | NoFunctor struc ->
+     List.fold_left (fun s (lab,mb) -> collect_field s lab mb) accu struc
+
+(* The Axioms section of the summary folds over the final environment, which
+   holds a sealed module's interface and not its implementation, so an axiom
+   declared inside [Module M : T] is invisible to it.
+   [register_opacified_constant] above recovers one that a sealed constant's
+   own body names, but a helper that also lives in the implementation has a
+   body, and the fold over its uses keeps only bodyless constants, so the
+   axioms behind such a helper are lost (dispatch://BET-245). The walk below
+   records every axiom declared in an implementation the environment does
+   not hold, whether or not a proof reaches it, which is what the fold does
+   for the axioms it can see.
+
+   It reports an axiom where it is declared, which for a functor's field is
+   the module each application makes ([App.in_f]), the name the environment
+   fold and [Print Assumptions] both use. Upstream rocq-prover/rocq#22623
+   makes the other choice and reports [F.in_f]; keeping ours is deliberate,
+   for the two joins in the BET grader (TrueJudge.lean, grade.py).
+
+   It would rather leave an axiom unreported, which both joins fail closed
+   on, than report a name no [Print Assumptions] prints, which they read as
+   a smuggled assumption. So it stops at a module an expression defines (an
+   application and [Module M : T := E] alike): all it has there is that
+   module's type, which says nothing about what the expression leaves
+   assumed, whether in a field of its own or in a structure under it that
+   the type, not the expression, declares. The known cost is that an axiom
+   reached that way goes unreported: a functor's own axiom through an
+   application inside a seal, the body of a sealed functor, a seal a functor
+   body declares. Where a sealed implementation reaches a sibling's axiom
+   through an [Include], an alias or an ascription of it, the two accounts
+   name one axiom twice: the walk reports it where it is declared, while
+   [Print Assumptions] names the path the proof wrote. That pair fails both
+   joins closed, as it does without this walk, where the axiom goes
+   unreported instead. *)
+let rec record_sealed_axioms ~hidden mp mb =
+  match mod_type mb, mod_expr mb with
+  | MoreFunctor _, _ ->
+    (* A functor: its fields have no name of their own, see above. *)
+    ()
+  | NoFunctor _, Struct (_, impl) ->
+    (* [Module M : T. ... End M]: a structure of its own, which the
+       environment replaces with T, so all of it is hidden. *)
+    record_sealed_structure ~hidden:true mp impl
+  | NoFunctor _, Algebraic _ ->
+    (* [Module M := E] and [Module M : T := E], see above. *)
+    ()
+  | NoFunctor struc, (Abstract | FullStruct) ->
+    (* The type is all there is of this module ([Declare Module M : T] or a
+       plain [Module M]), and the environment holds it unless an enclosing
+       implementation hides it. *)
+    record_sealed_structure ~hidden mp struc
+
+and record_sealed_structure ~hidden mp struc =
+  let record_field (lab, field) = match field with
+  | SFBconst cb ->
+    if hidden && not (Declareops.constant_has_body cb) then
+      Check_stat.record_axiom (Constant.make2 mp lab)
+  | SFBmodule msb -> record_sealed_axioms ~hidden (MPdot (mp, lab)) msb
+  | SFBmind _ | SFBrules _ | SFBmodtype _ -> ()
+  in
+  List.iter record_field struc
+
 let rec check_mexpr env mse mp_mse res = match mse with
   | MEident mp ->
     let mb = lookup_module mp env in
@@ -470,48 +552,45 @@ and check_signature env st sign mp_mse res = match sign with
       in
       st
 
-let rec collect_module_axioms axioms mp mb =
+let rec collect_module_opaques env opac mp mb opacify =
+  let opac = collect_signature_opaques env opac (mod_type mb) mp (mod_delta mb) opacify in
   match mod_expr mb with
   | Struct (reso, struc) ->
-    (* Module with implementation separate from its type: don't produce axioms from the type *)
+    let opacify = collect_constants_without_body (mod_type mb) mp opacify in
     let struc = Modops.annotate_struct_body struc (mod_type mb) in
-    collect_signature_axioms axioms struc mp
-  | Algebraic _ ->
-    (* any axioms are already declared from the modules and functors
-       involved in the application (this means an axiom in a functor
-       is reported as coming from the functor rather than from the
-       application) *)
-    axioms
-  | Abstract | FullStruct ->
-    collect_signature_axioms axioms (mod_type mb) mp
+    collect_signature_opaques env opac struc mp reso opacify
+  | Abstract | Algebraic _ | FullStruct -> opac
 
-and collect_signature_axioms axioms sign mp =
-  match sign with
+and collect_signature_opaques env opac sign mp res opacify = match sign with
   | MoreFunctor (arg_id, mtb, body) ->
-    collect_signature_axioms axioms body mp
+    let env = Modops.add_module_parameter arg_id mtb env in
+    collect_signature_opaques env opac body mp res Cset.empty
   | NoFunctor struc ->
-    let fold axioms (lab, field) = match field with
+    let fold (env, opac) (lab, field) = match field with
     | SFBconst cb ->
-      let kn = KerName.make mp lab in
-      let axioms =
-        match cb.const_body with
-        | Def _ | OpaqueDef _ -> axioms
-        (* rocqchk does not check a primitive's declared type against the
-           type of its operator ([check_constant_declaration] skips it), so
-           that type is trusted as an axiom's is, and -o lists the primitive
-           among the axioms. *)
-        | Undef _ | Primitive _ | Symbol _ -> axioms_add kn axioms
+      let kn = Mod_subst.constant_of_delta_kn res (KerName.make mp lab) in
+      let opac =
+        if not (Cset.mem kn opacify) then opac
+        else match cb.const_body with
+        | Def body -> register_opacified_constant env opac kn body
+        | OpaqueDef o ->
+          (* A cook in this process, counted as [cook] counts its own. *)
+          CheckWorkers.note_cook ();
+          register_opacified_constant env opac kn (fst (!indirect_accessor o))
+        | Undef _ | Primitive _ | Symbol _ -> opac
       in
-      axioms
+      Environ.add_constant kn cb env, opac
     | SFBmodule mb ->
       let mp = MPdot (mp, lab) in
-      let axioms = collect_module_axioms axioms mp mb in
-      axioms
-    | SFBmodtype _ -> axioms
-    | SFBmind _ -> axioms
-    | SFBrules _ -> axioms
+      let opac = collect_module_opaques env opac mp mb opacify in
+      Modops.add_module mp mb env, opac
+    | SFBmodtype mtb -> Environ.add_modtype (MPdot (mp, lab)) mtb env, opac
+    | SFBmind mib ->
+      let kn = Mod_subst.mind_of_delta_kn res (KerName.make mp lab) in
+      Environ.add_mind kn mib env, opac
+    | SFBrules _ -> env, opac
     in
-    List.fold_left fold axioms struc
+    snd (List.fold_left fold (env, opac) struc)
 
 let eq_prim_ind (type a b) (p : a CPrimitives.prim_ind) (q : b CPrimitives.prim_ind) =
   String.equal (CPrimitives.prim_ind_to_string p) (CPrimitives.prim_ind_to_string q)
@@ -544,7 +623,17 @@ let get_retroknowlege env retro =
   let (imap, cmap, _) = List.fold_left fold (Mindmap_env.empty, Cmap_env.empty, Mindmap_env.empty) retro in
   (imap, cmap)
 
-let check_module env axioms retro mp mb =
+(* A checked library goes through this after its check, and an admitted one
+   instead of it ([CheckLibrary.check_one_lib]), so the walk above runs for
+   both, and an admitted library's sealed axioms are recorded as a checked
+   one's are. *)
+let collect_module_opaques env opac mp mb =
+  let () =
+    if Check_stat.summary_enabled () then record_sealed_axioms ~hidden:false mp mb
+  in
+  collect_module_opaques env opac mp mb Cset.empty
+
+let check_module env opac retro mp mb =
   let retro = get_retroknowlege env retro in
   let st = { st_retro = retro } in
   let { st_retro = (imap, cmap) } = check_module env st mp mb in
@@ -555,10 +644,10 @@ let check_module env axioms retro mp mb =
   | None, Some (cst, _) ->
     CErrors.user_err Pp.(str "Retroknowledge registration for unknown constant " ++ Constant.print cst ++ str ".")
   in
-  collect_module_axioms axioms mp mb
+  collect_module_opaques env opac mp mb
 
-let check_module env axioms retro mp mb =
+let check_module env opac retro mp mb =
   NewProfile.profile "check_module"
     ~args:(fun () -> [("name", `String (ModPath.to_string mp))])
-    (fun () -> check_module env axioms retro mp mb)
+    (fun () -> check_module env opac retro mp mb)
     ()
