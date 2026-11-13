@@ -572,6 +572,66 @@ let rec check_mexpression env sign mbtyp mp_mse res = match sign with
     MoreFunctor(arg_id,mtb,body), delta
   | MENoFunctor me -> check_mexpr env me mp_mse res
 
+(* coqc gives a label to one field of a structure at most, in each of two
+   namespaces ([Safe_typing.add_field]). The objects are the constants, the
+   rewrite rule blocks, and the types and constructors of each inductive
+   block ([Safe_typing.labels_of_mib]). The modules are the modules and the
+   module types. Each field that coqc adds to a structure is tested there,
+   the fields of an [Include] one by one, and a module or a module type
+   when it starts ([Safe_typing.start_mod_modtype]). A [with] constraint
+   replaces a field in place ([Mod_typing.split_struc]), and a functor
+   application or a module alias keeps the labels of the structure it
+   copies. So no file that coqc writes repeats a label in a namespace.
+
+   The environment keeps the last field with a label
+   ([Environ.add_constant_key], [Modops.add_structure]). So a second field
+   can replace a field that the fields between them were checked against.
+   With [Axiom ax : False], then [proof : False := ax], then a second
+   [ax : unit := tt], no constant is left without a body, and [proof] is a
+   closed proof of False. In the same way, a parameter can take a primitive
+   type registration ([check_register_type]), and a definition with its
+   label can then replace it. The label maps of
+   [Mod_impl.fields_of_structure], which the -o summary reads, keep the last
+   field too, and this check protects them as well.
+
+   [check_signature] runs this check on every structure that it reads: the
+   type of a module, a module type, a functor body and a [Struct]
+   implementation, and so the root of a library. The label of an inductive
+   block is one of its objects too: the environment keys the block by it,
+   and coqc makes it the name of the block's first type
+   ([Safe_typing.check_mind]). As in coqc, the labels of one block are
+   tested against the earlier fields, not against each other. A second
+   module with a label fails before this check, on the assertion of
+   [Environ.shallow_add_module], when [compile_structure] adds it. *)
+let check_labels mp struc =
+  let refuse l kinds =
+    CErrors.user_err
+      (ModPath.print mp ++ str " declares the label " ++ Id.print l ++
+       str " twice among its " ++ str kinds ++ str ".")
+  in
+  let add_object l objects =
+    if Id.Set.mem l objects then
+      refuse l "constants, inductive types, constructors and rewrite rules"
+    else Id.Set.add l objects
+  in
+  let fold (objects, modules) (l, field) = match field with
+    | SFBconst _ | SFBrules _ -> add_object l objects, modules
+    | SFBmind mib ->
+      let add_packet labels mip =
+        Array.fold_right Id.Set.add mip.mind_consnames
+          (Id.Set.add mip.mind_typename labels)
+      in
+      let labels = Array.fold_left add_packet (Id.Set.singleton l) mib.mind_packets in
+      Id.Set.fold add_object labels objects, modules
+    | SFBmodule _ | SFBmodtype _ ->
+      if Id.Set.mem l modules then refuse l "modules and module types";
+      objects, Id.Set.add l modules
+  in
+  let (_ : Id.Set.t * Id.Set.t) =
+    List.fold_left fold (Id.Set.empty, Id.Set.empty) struc
+  in
+  ()
+
 (* [check_module] returns the registrations in force after the module with
    the state: those in force before it and those it made, which coqc puts in
    force after it too ([Safe_typing.end_module]). *)
@@ -674,6 +734,7 @@ and check_signature env st sign mp_mse res = match sign with
       in
       Environ.retroknowledge env, st
   | NoFunctor struc ->
+      let () = check_labels mp_mse struc in
       let env, st = List.fold_left (fun (env, st) (lab,mb) ->
         check_structure_field env st mp_mse lab res mb) (env, st) struc
       in

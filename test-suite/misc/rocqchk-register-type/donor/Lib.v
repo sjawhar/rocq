@@ -3,7 +3,8 @@
    forged Lib.vo gives zero the body Int 0, the int63 literal 0, and adds to
    the library's retroknowledge the registration of the definition int as
    the int63 type. Then Int 0 has type int, int unfolds to Empty_set, and
-   boom is a closed proof of False with no axiom. *)
+   boom is a closed proof of False with no axiom. The forgery registered
+   of rocqchk_repeated_label.sh starts from this library too. *)
 
 Unset Elimination Schemes.
 
