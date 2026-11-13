@@ -37,6 +37,7 @@
 set -eu
 : "${BIN:=$(dirname "$(command -v rocq)")/}"
 export PATH="$BIN:$PATH"
+. misc/rocqchk_summary_common.bash
 unset ROCQCHK_WORKER_RELEASE_AT
 
 d=$(mktemp -d)
@@ -290,9 +291,8 @@ for lib in Cook CookB Sealed; do
 done
 
 # (c) The summary: the Parameter p is implemented by a body that uses
-# ax_used, so the axiom listed is ax_used, and neither M.p nor M.r is. The
-# axioms part of the summary runs from "* Axioms:" to the next "* " line.
-awk '/^\* Axioms:/ { f = 1; next } /^\* / { f = 0 } f' "$d/Sealed-j1.out" > "$d/axioms"
+# ax_used, so the axiom listed is ax_used, and neither M.p nor M.r is.
+section 'Axioms' "$d/Sealed-j1.out" | tail -n +2 > "$d/axioms"
 [ "$(tr -d ' ' < "$d/axioms" | grep -v '^$')" = "Sealed.ax_used" ] \
   || { cat "$d/Sealed-j1.out" >&2; fail "(c) the axioms listed are not exactly Sealed.ax_used"; }
 

@@ -8,6 +8,7 @@
 # must do is list bogus among the axioms of -o, as it did before rocq#22623
 # was ported; the port listed only int, a primitive type, which has no body.
 set -eu
+. misc/rocqchk_summary_common.bash
 
 D=misc/rocqchk-primitive-type
 d=$(mktemp -d)
@@ -48,7 +49,7 @@ for vm in yes no; do
     cat "$d/both-$vm.log"
     exit 1
   fi
-  sed -n '/^\* Axioms:/,/^\* Constants/ s/^    //p' "$d/both-$vm.log" |
+  section 'Axioms' "$d/both-$vm.log" | sed -n 's/^    //p' |
     LC_ALL=C sort > "$d/axioms-$vm"
   if ! diff -u "$d/expected" "$d/axioms-$vm"; then
     echo "rocqchk -o -bytecode-compiler $vm does not list the primitive bogus among the axioms"
