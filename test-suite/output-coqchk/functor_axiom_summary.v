@@ -23,8 +23,7 @@ Module App := F Arg.
 Definition reached : False := App.use.
 
 (* The shapes the environment holds a type for, where the functor's body
-   says what is assumed. Before the summary read applications, it named no
-   axiom for any of them, or a parameter the body defines.
+   says what is assumed.
 
    A seal a functor body declares: Print Assumptions names AppG.Inner.in_g
    for a proof that uses AppG.Inner.tgt, and so does the summary. The helper

@@ -335,11 +335,11 @@ let rec collect_constants_without_body sign mp accu =
    each constant that body leaves without a body is listed under the
    application's name, [R.x] for [R := F A] or [R : T := F A], visible or
    sealed, whether a proof reaches it or not. This is what the environment
-   fold does for [App := F A] in the open, whose fields it holds; it also
+   fold does for [App := F A] in the open, whose fields it holds, and it
    covers an application inside a seal, behind a helper with a body, and a
-   seal a functor body declares, which nothing listed before. The end is the
-   place for it, because the final environment holds every functor an
-   application names, wherever it is declared. What it cannot read it does
+   seal a functor body declares. The end is the place for it, because the
+   final environment holds every functor an application names, wherever it
+   is declared. What it cannot read it does
    not list: the body of a functor declared with [Declare Module] or defined
    by an expression over parameters of its own. Where a sealed implementation
    reaches a sibling's axiom through an [Include], an alias or an ascription
