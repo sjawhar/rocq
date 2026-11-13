@@ -4,7 +4,8 @@
    the library's retroknowledge the registration of int as the int63 type,
    which coqc never writes: it registers only a constant that Primitive
    declares. Then Int 0 has type int, int unfolds to Empty_set, and boom is
-   a closed proof of False with no axiom. *)
+   a closed proof of False with no axiom. The forgery registered of
+   rocqchk_repeated_label.sh starts from this library too. *)
 
 Unset Elimination Schemes.
 

@@ -47,7 +47,12 @@
        add, an axiom, becomes the primitive operator Int63add, whatever its
        type;
      forge.ml client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo
-       CLIENT.vo, recording LIB.vo's digest as the one of LIB_DIRPATH. *)
+       CLIENT.vo, recording LIB.vo's digest as the one of LIB_DIRPATH.
+
+   misc/rocqchk_repeated_label.sh runs regtype too, and
+   misc/rocqchk-repeated-label/forge.ml copies the code of this file that
+   reads and writes the segments of a .vo file, edits its values, prints
+   names and writes a client. *)
 
 let fail fmt = Printf.ksprintf failwith fmt
 let say fmt = Printf.ksprintf (fun s -> print_string s; print_newline ()) fmt
