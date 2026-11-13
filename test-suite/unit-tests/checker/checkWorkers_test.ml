@@ -447,15 +447,17 @@ let () = add_test "libraries: batches stripe whole libraries" (fun () ->
       [libs_of ~per [0; 3; 6; 9]; libs_of ~per [1; 4; 7; 10]; libs_of ~per [2; 5; 8]] walk;
     assert_dealt_by_finish ~libs:12 ~walk ~slots:4 n log)
 
-(* The checks of one library are not spread over as many workers as it
-   has checks: a batch holds whole libraries, and its worker runs them in
-   order. With six libraries of [m / 4] checks, one batch is dealt while
-   the libraries are checked, and it holds libraries 0 to 3. Its worker
-   runs all of them unless it gives the rest of its batch back, at its
-   budget or on a release request of [finish], which the timing decides:
-   so the log is checked to hold a part of that batch from its start, run
-   by one worker (see [assert_dealt_by_finish]). *)
-let () = add_test "libraries: one library's checks stay in one batch" (fun () ->
+(* Six libraries of [m / 4] checks at -j 4, the last one still open.
+   [walk_batches], this file's model of what [defer] deals while the
+   libraries are checked, gives one batch, libraries 0 to 3, and the test
+   compares its result with that list. Then, as [assert_dealt_by_finish]
+   checks a run: the worker that ran the first job of that batch ran a part
+   of it from its start, in order, which is all of it unless the worker
+   gave the rest back, at its budget or on a release request of [finish],
+   which the timing decides; the batches of the other workers pass
+   [check_finish_batches]; every check and every table runs once, and the
+   main process checks nothing. *)
+let () = add_test "libraries: the walk deals libraries 0 to 3 to one batch, and its worker runs a prefix of it" (fun () ->
     let per = CheckWorkers.min_batch / 4 in
     let sizes = List.init 6 (fun _ -> per) in
     let n = 6 * per in
