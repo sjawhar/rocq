@@ -17,7 +17,9 @@
 #   N.int := Empty_set, and the client's z : N.int := Int 0;
 # - other: a constant of an earlier library registered;
 # - twice: the honest library's MI.int registered a second time.
-# Each of the sources, and the honest library, must be accepted.
+# Each of the sources, and the honest library, must be accepted. The forged
+# clients only complete the exploit for a checker without the check: this
+# one refuses RegType.Lib before it reaches them.
 
 set -e
 

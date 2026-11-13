@@ -138,6 +138,16 @@ let primitive_instance refuse cb prim_univs =
   in
   u
 
+(* The typing that coqc gives the primitive [p], an operator or a type
+   ([Constant_typing.check_primitive_type]): at [primitive_instance], the
+   kernel's type of [p] must convert with the type that [cb] declares, and
+   [refuse] is called with [mismatch] when it does not. *)
+let check_primitive_typing refuse env cb p ~mismatch =
+  let u = primitive_instance refuse cb (CPrimitives.op_or_type_univs p) in
+  match conv env (Typeops.type_of_prim_or_type env u p) cb.const_type with
+  | Result.Ok () -> ()
+  | Result.Error () -> refuse mismatch
+
 let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
   BadConstant (kn, str "is registered as the primitive type " ++
                    str (CPrimitives.prim_type_to_string prm) ++ str ", but " ++
@@ -160,10 +170,8 @@ let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
     | Undef _ -> ()
     | Def _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse (str "it is not a parameter")
   in
-  let u = primitive_instance refuse cb (CPrimitives.typ_univs prm) in
-  match conv env (Typeops.type_of_prim_type env u prm) cb.const_type with
-  | Result.Ok () -> ()
-  | Result.Error () -> refuse (str "its type is not the primitive type's")
+  check_primitive_typing refuse env cb (CPrimitives.OT_type prm)
+    ~mismatch:(str "its type is not the primitive type's")
 
 (* Conversion and the VM compute with a primitive operator whatever the
    type that its constant declares, so [add : int -> int -> False] with the
@@ -178,10 +186,8 @@ let check_primitive_operator env kn cb op =
                             str (CPrimitives.to_string op) ++ str ", but " ++
                             why ++ str "."))
   in
-  let u = primitive_instance refuse cb (CPrimitives.univs op) in
-  match conv env (Typeops.type_of_prim env u op) cb.const_type with
-  | Result.Ok () -> ()
-  | Result.Error () -> refuse (str "its type is not the operator's")
+  check_primitive_typing refuse env cb (CPrimitives.OT_op op)
+    ~mismatch:(str "its type is not the operator's")
 
 (* coqc registers a primitive type only in a library, or in a module nested
    in it with no functor parameter ([Safe_typing.add_retroknowledge]), for a
@@ -755,14 +761,18 @@ let get_retroknowlege env retro =
   env, (imap, cmap)
 
 (* A checked library goes through this after its check, and an admitted one
-   instead of it ([CheckLibrary.check_one_lib]), so the walk above runs for
-   both, and an admitted library's sealed axioms are recorded as a checked
-   one's are. *)
+   instead of it under -o ([CheckLibrary.check_one_lib]), so the walk above
+   runs for both, and an admitted library's sealed axioms are recorded as a
+   checked one's are. What the walk collects is read only by the summary of
+   -o ([Check_stat.pr_axioms]), so without a summary
+   ([Check_stat.summary_enabled]) nothing is collected, and the main process
+   reads no opaque body for it. *)
 let collect_module_opaques env opac mp mb =
-  let () =
-    if Check_stat.summary_enabled () then record_sealed_axioms ~hidden:false mp mb
-  in
-  collect_module_opaques env opac mp mb Cset.empty
+  if not (Check_stat.summary_enabled ()) then opac
+  else begin
+    record_sealed_axioms ~hidden:false mp mb;
+    collect_module_opaques env opac mp mb Cset.empty
+  end
 
 let check_module env opac retro mp mb =
   let env, retro = get_retroknowlege env retro in

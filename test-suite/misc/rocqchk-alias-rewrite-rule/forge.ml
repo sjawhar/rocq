@@ -10,9 +10,6 @@
 
 #use "./misc/rocqchk_forge_lib.ml";;
 
-(* The structure of the type of the module [name] of [root]. *)
-let sig_struc root name = nofunctor ("module " ^ name) (field (module_of root name) 1)
-
 (* The payload of the field [name] of [struc], which must be an SFBrules. *)
 let rules struc name =
   let sfb = struc_find struc name in
