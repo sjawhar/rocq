@@ -39,7 +39,7 @@ type kind = Constant | Inductive
    included, never rebuilt. *)
 let forge_nested kind ~ul ~cm ~cl disk =
   let root = root_struc disk in
-  let rsig = nofunctor "module R" (field (module_of root "R") 1) in
+  let rsig = sig_struc root "R" in
   let names = match kind with Constant -> cb_constants | Inductive -> cb_inductives in
   let canonical = find_kn ~names rsig ~label:cl ~in_mp:(mp_is_a cm) in
   let user = find_kn ~names rsig ~label:ul ~in_mp:(mp_is_a "X") in
