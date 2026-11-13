@@ -16,6 +16,8 @@ CONTEXT SUMMARY
     application_axiom_summary.SLocal.App.in_h
     application_axiom_summary.SSealedFunctor.App.in_k
     application_axiom_summary.R6.hidden
+    application_axiom_summary.RH.M.M.g
+    application_axiom_summary.SHigher.R.M.M.g
   
 * Constants/Inductives relying on type-in-type: <none>
   
