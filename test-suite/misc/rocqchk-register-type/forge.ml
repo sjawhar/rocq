@@ -6,7 +6,9 @@
    proof of False; when a sealed module's implementation defines its int as
    Empty_set, its int_empty : int -> False applied to a literal is one.
    coqc registers a primitive type only for the constant that Primitive
-   declares, so the registration is written here.
+   declares, so the registration is written here. It also forges a library
+   whose axiom add : int -> int -> False becomes the primitive operator
+   Int63add, which coqc declares only with the type int -> int -> int.
 
    It uses only the OCaml standard library, and these value layouts, from
    checker/values.ml:
@@ -18,8 +20,9 @@
      mod_retroknowledge, ModBodyVal (tag 0) [list of retro_action];
    - structure: a list of (label, field); SFBconst is tag 0
      [constant_body], SFBmodule tag 3 [module_body];
-   - constant_body: 2 body, Undef (tag 0) [inline] | Def (tag 1) [term]; 3
-     type;
+   - constant_body: 2 body, Undef (tag 0) [inline] | Def (tag 1) [term] |
+     Primitive (tag 3) [primitive], the enum CPrimitives.t having
+     Int63add = 2; 3 type;
    - term: Prod is tag 6 [binder; domain; codomain]; Const tag 10
      [(constant, instance)]; Int tag 17 [uint63], an immediate integer on a
      64-bit platform;
@@ -40,6 +43,9 @@
        the registration of PATH.int, the constant that the domain of the
        type of PATH.int_empty names in the signature of the module PATH
        (labels separated by dots), by its user name;
+     forge.ml primop LIB.vo OUT.vo
+       add, an axiom, becomes the primitive operator Int63add, whatever its
+       type;
      forge.ml client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo
        CLIENT.vo, recording LIB.vo's digest as the one of LIB_DIRPATH. *)
 
@@ -309,6 +315,16 @@ let register path disk =
   say "forging: %s.int_empty's type names %s" path (cst_to_string int);
   add_registration disk (block 0 [| field int 0 |])
 
+let primop disk =
+  let compiled = field disk 0 in
+  if size compiled <> 6 then fail "compiled_library has %d fields, not 6" (size compiled);
+  let root = root_struc disk in
+  expect "add's body (Undef)" 0 (field (struc_find root "add") 2);
+  let root = struc_update root "add" (set 2 (block 3 [| Obj.repr 2 |])) in
+  set_root_module disk (upd 1 (set 0 root) (root_module disk));
+  say "forging: add's body becomes Primitive Int63add";
+  disk
+
 (* {1 The client} *)
 
 (* Record [digest] as the dependency [lib_dp]'s, in the summary and in the
@@ -337,6 +353,7 @@ let () =
   | [ "regtype"; src; dst ] -> rewrite_vo ~src ~dst [ "library", forge ~dual:false ]
   | [ "dual"; src; dst ] -> rewrite_vo ~src ~dst [ "library", forge ~dual:true ]
   | [ "register"; src; dst; path ] -> rewrite_vo ~src ~dst [ "library", register path ]
+  | [ "primop"; src; dst ] -> rewrite_vo ~src ~dst [ "library", primop ]
   | [ "client"; src; lib; lib_dp; dst ] ->
     let digest = library_hash lib in
     rewrite_vo ~src ~dst
@@ -346,5 +363,6 @@ let () =
   | _ ->
     prerr_endline
       "usage: ocaml forge.ml regtype LIB.vo OUT.vo | dual LIB.vo OUT.vo\n\
-      \       | register LIB.vo OUT.vo PATH | client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo";
+      \       | register LIB.vo OUT.vo PATH | primop LIB.vo OUT.vo\n\
+      \       | client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo";
     exit 2

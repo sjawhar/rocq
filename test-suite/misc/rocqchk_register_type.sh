@@ -23,10 +23,15 @@
 # as coqc compiled it, records the forged Lib.vo as its dependency. The
 # Client.vo of sealed and functor is compiled against sealed-donor/Lib.v and
 # functor-donor/Lib.v, where M.int and R.M.int are declared by Primitive,
-# and applies int_empty to an int63 literal. rocqchk must accept the honest
-# and donor libraries and refuse each forged pair, as a grader runs it (-o
-# -bytecode-compiler yes) and with the default options. Every case runs,
-# and the script fails if one of them does not hold.
+# and applies int_empty to an int63 literal.
+#
+# rocqchk must also refuse a primitive operator whose type is not the
+# operator's: in forged-primop, primop/Lib.vo's axiom
+# add : int -> int -> False becomes the int63 addition, and its Client.vo
+# records it. rocqchk must accept the honest and donor libraries and refuse
+# each forged pair, as a grader runs it (-o -bytecode-compiler yes) and with
+# the default options. Every case runs, and the script fails if one of them
+# does not hold.
 
 set -e
 
@@ -35,13 +40,13 @@ d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
 status=0
 
-for dir in honest donor foreign sealed functor sealed-donor functor-donor; do
+for dir in honest donor foreign sealed functor sealed-donor functor-donor primop; do
   cp -r "$D/$dir" "$d/$dir"
 done
 # The dual libraries are the foreign ones with dual/Lib.v.
 cp -r "$D/foreign" "$d/dual"
 cp "$D/dual/Lib.v" "$d/dual/Lib.v"
-for dir in honest donor sealed functor sealed-donor functor-donor; do
+for dir in honest donor sealed functor sealed-donor functor-donor primop; do
   for f in Lib Client; do
     $coqc -noinit -R "$d/$dir" RegType "$d/$dir/$f.v"
   done
@@ -80,14 +85,14 @@ refuses() {
   shift 2
   mode_args "$mode" "$d/forged-$name"
   if "$BIN"rocqchk "${mode_argv[@]}" > "$log" 2>&1; then
-    echo "FAILURE: rocqchk ($mode) accepted the $name registration and a closed proof of False: rocqchk ${mode_argv[*]}"
+    echo "FAILURE: rocqchk ($mode) accepted the forged $name libraries and a closed proof of False: rocqchk ${mode_argv[*]}"
     cat "$log"
     status=1
     return
   fi
   for e in "$@"; do
     if ! grep -Fq -- "$e" "$log"; then
-      echo "FAILURE: rocqchk ($mode) refused the $name registration without \"$e\": rocqchk ${mode_argv[*]}"
+      echo "FAILURE: rocqchk ($mode) refused the forged $name libraries without \"$e\": rocqchk ${mode_argv[*]}"
       cat "$log"
       status=1
       return
@@ -98,7 +103,8 @@ refuses() {
 # The honest libraries register each primitive type as coqc does. The
 # donor, foreign, dual, sealed and functor libraries register nothing, and
 # the sealed-donor and functor-donor libraries declare int with Primitive.
-for dir in honest donor foreign dual sealed functor sealed-donor functor-donor; do
+# In primop, add is an axiom.
+for dir in honest donor foreign dual sealed functor sealed-donor functor-donor primop; do
   for mode in grader default; do
     accepts "$dir" "$mode"
   done
@@ -121,6 +127,7 @@ forge foreign foreign foreign regtype
 forge dual dual dual dual
 forge sealed sealed sealed-donor register M
 forge functor functor functor-donor register R.M
+forge primop primop primop primop
 
 for mode in grader default; do
   refuses own "$mode" \
@@ -134,6 +141,8 @@ for mode in grader default; do
     "is registered as the primitive type int63_type, but it is not a parameter."
   refuses functor "$mode" \
     "is registered as the primitive type int63_type in RegType.Lib, which does not declare it."
+  refuses primop "$mode" \
+    "is the primitive operator add, but its type is not the operator's."
 done
 
 exit $status

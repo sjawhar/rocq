@@ -110,6 +110,30 @@ exception BadConstant of Constant.t * Pp.t
 
 let pr_prim_type prm = str (CPrimitives.prim_type_to_string prm)
 
+(* The universe instance at which coqc gives a primitive declared as [cb]
+   its type: empty for a monomorphic constant, the abstract instance for a
+   polymorphic one, whose universe context has the size of the primitive's
+   ([expected]) and no constraints
+   ([Constant_typing.adjust_primitive_univ_entry]). [refuse] is called
+   otherwise. [Typeops.type_of_prim_type] and [Typeops.type_of_prim]
+   assert the length of the instance, so it is tested here. *)
+let primitive_instance refuse cb expected =
+  let u = match cb.const_universes with
+    | Monomorphic -> UVars.Instance.empty
+    | Polymorphic auctx ->
+      let constraints = UVars.UContext.constraints (UVars.AbstractContext.repr auctx) in
+      let () =
+        if not (PConstraints.is_empty constraints)
+        then refuse (str "its universe context has constraints")
+      in
+      UVars.make_abstract_instance auctx
+  in
+  let () =
+    if UVars.Instance.length u <> UVars.AbstractContext.size expected
+    then refuse (str "its universe instance has the wrong length")
+  in
+  u
+
 (* Typeops types a primitive literal with the constant registered for its
    primitive type ([Typeops.type_of_int] and the like), and conversion
    unfolds that constant, so the typing of every literal trusts the
@@ -128,26 +152,26 @@ let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
     | Undef _ -> ()
     | Def _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse (str "it is not a parameter")
   in
-  let u = match cb.const_universes with
-    | Monomorphic -> UVars.Instance.empty
-    | Polymorphic auctx ->
-      (* coqc declares no primitive with universe constraints
-         ([Constant_typing.adjust_primitive_univ_entry]). *)
-      let constraints = UVars.UContext.constraints (UVars.AbstractContext.repr auctx) in
-      let () =
-        if not (PConstraints.is_empty constraints)
-        then refuse (str "its universe context has constraints")
-      in
-      UVars.make_abstract_instance auctx
-  in
-  (* [Typeops.type_of_prim_type] asserts the length of the instance. *)
-  let () =
-    if UVars.Instance.length u <> UVars.AbstractContext.size (CPrimitives.typ_univs prm)
-    then refuse (str "its universe instance has the wrong length")
-  in
+  let u = primitive_instance refuse cb (CPrimitives.typ_univs prm) in
   match conv env (Typeops.type_of_prim_type env u prm) cb.const_type with
   | Result.Ok () -> ()
   | Result.Error () -> refuse (str "its type is not the primitive type's")
+
+(* A constant whose body is [Primitive op] is the operator [op], which
+   reduction computes by its own rules, whatever the constant's type says.
+   coqc declares it with the operator's type
+   ([Constant_typing.check_primitive_type]): any other, say
+   [add : int -> int -> False], would make [add 0 0] a closed proof of
+   False. [env] holds the constant's universe context. *)
+let check_primitive_operator env kn cb op =
+  let refuse why =
+    raise (BadConstant (kn, str "is the primitive operator " ++
+                            str (CPrimitives.to_string op) ++ str ", but " ++ why ++ str "."))
+  in
+  let u = primitive_instance refuse cb (CPrimitives.univs op) in
+  match conv env (Typeops.type_of_prim env u op) cb.const_type with
+  | Result.Ok () -> ()
+  | Result.Error () -> refuse (str "its type is not the operator's")
 
 (* A library's registrations are in the environment before any of its
    constants is checked ([Safe_checking.env_of_library]), and so are a
@@ -232,7 +256,10 @@ let check_constant_declaration env opac kn cb opacify ~own =
     c, env
   in
   match cb.const_body with
-  | Undef _ | Primitive _ | Symbol _ -> opac
+  | Undef _ | Symbol _ -> opac
+  | Primitive op ->
+    check_primitive_operator env kn cb op;
+    opac
   | Def c ->
     (* A transparent body may be unfolded by later checks, which rely on
        it being well-typed, so it is checked here. *)
