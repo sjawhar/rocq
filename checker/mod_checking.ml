@@ -108,7 +108,81 @@ let register_opacified_constant env opac kn cb =
 
 exception BadConstant of Constant.t * Pp.t
 
-let check_constant_declaration env opac kn cb opacify =
+let pr_prim_type prm = str (CPrimitives.prim_type_to_string prm)
+
+(* Typeops types a primitive literal with the constant registered for its
+   primitive type ([Typeops.type_of_int] and the like), and conversion
+   unfolds that constant, so the typing of every literal trusts the
+   registration. A definition [int : Set := Empty_set] registered as the
+   int63 type would give [Int 0] the type Empty_set, and [match] on it a
+   closed proof of False. coqc registers only the constant that [Primitive]
+   declares, a parameter whose type is the primitive type's
+   ([Constant_typing.infer_primitive]), and rocqchk refuses any other. [env]
+   holds the constant's universe context. *)
+let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
+  let refuse why =
+    raise (BadConstant (kn, str "is registered as the primitive type " ++
+                            pr_prim_type prm ++ str ", but " ++ why ++ str "."))
+  in
+  let () = match cb.const_body with
+    | Undef _ -> ()
+    | Def _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse (str "it is not a parameter")
+  in
+  let u = match cb.const_universes with
+    | Monomorphic -> UVars.Instance.empty
+    | Polymorphic auctx ->
+      (* coqc declares no primitive with universe constraints
+         ([Constant_typing.adjust_primitive_univ_entry]). *)
+      let constraints = UVars.UContext.constraints (UVars.AbstractContext.repr auctx) in
+      let () =
+        if not (PConstraints.is_empty constraints)
+        then refuse (str "its universe context has constraints")
+      in
+      UVars.make_abstract_instance auctx
+  in
+  (* [Typeops.type_of_prim_type] asserts the length of the instance. *)
+  let () =
+    if UVars.Instance.length u <> UVars.AbstractContext.size (CPrimitives.typ_univs prm)
+    then refuse (str "its universe instance has the wrong length")
+  in
+  match conv env (Typeops.type_of_prim_type env u prm) cb.const_type with
+  | Result.Ok () -> ()
+  | Result.Error () -> refuse (str "its type is not the primitive type's")
+
+(* A library's registrations are in the environment before any of its
+   constants is checked ([Safe_checking.env_of_library]), and so are a
+   module's ([check_module]), which refuses a registration of a constant
+   that the module's own body does not declare: each registered constant is
+   checked here, in an environment that registers it, where the module's
+   own body declares it ([own]). The environment finds a constant by its
+   user name, and so a registration of [kn]; the registered name must also
+   have [kn]'s canonical name, which conversion compares, and coqc
+   registers a constant as one primitive type only. *)
+let check_registered_type env kn cb =
+  let open Retroknowledge in
+  let retro = Environ.retroknowledge env in
+  let registered c prm = match c with
+    | Some c when Constant.UserOrd.equal c kn -> [c, prm]
+    | Some _ | None -> []
+  in
+  let open CPrimitives in
+  match registered retro.retro_int63 (PTE PT_int63)
+        @ registered retro.retro_float64 (PTE PT_float64)
+        @ registered retro.retro_string (PTE PT_string)
+        @ registered retro.retro_array (PTE PT_array) with
+  | [] -> ()
+  | [c, PTE prm] ->
+    let () =
+      if not (Constant.CanOrd.equal c kn) then
+        raise (BadConstant (kn, str "is registered as the primitive type " ++
+                                pr_prim_type prm ++ str " under the canonical name " ++
+                                KerName.print (Constant.canonical c) ++ str ", not its own."))
+    in
+    check_register_type env kn cb prm
+  | _ :: _ :: _ ->
+    raise (BadConstant (kn, str "is registered as more than one primitive type."))
+
+let check_constant_declaration env opac kn cb opacify ~own =
   Flags.if_verbose Feedback.msg_notice (str "  checking cst:" ++ Constant.print kn);
   let env = CheckFlags.set_local_flags cb.const_typing_flags env in
   let poly, env =
@@ -128,6 +202,7 @@ let check_constant_declaration env opac kn cb opacify =
   let jty = Typeops.infer_type env ty in
   if not (Sorts.relevance_equal cb.const_relevance (Sorts.relevance_of_sort jty.utj_type))
   then raise Pp.(BadConstant (kn, str "incorrect const_relevance"));
+  let () = if own then check_registered_type env kn cb in
   let check env bd () =
     let j = Typeops.infer env bd in
     match conv_leq env j.uj_type ty with
@@ -181,10 +256,10 @@ let check_constant_declaration env opac kn cb opacify =
     CheckWorkers.defer kn (fun () -> let c, env = cook o in check env c ());
     opac
 
-let check_constant_declaration env opac kn cb opacify =
+let check_constant_declaration env opac kn cb opacify ~own =
   let opac = NewProfile.profile "check_constant" ~args:(fun () ->
       [("name", `String (Constant.to_string kn))])
-      (fun () -> check_constant_declaration env opac kn cb opacify)
+      (fun () -> check_constant_declaration env opac kn cb opacify ~own)
       ()
   in
   Environ.add_constant kn cb env, opac
@@ -345,12 +420,81 @@ let rec check_mexpression env opac sign mbtyp mp_mse res = match sign with
     MoreFunctor(arg_id,mtb,body), delta
   | MENoFunctor me -> check_mexpr env opac me mp_mse res
 
-let rec check_module env opac mp mb opacify =
+(* A module's own body is the structure in which coqc declares its fields:
+   its signature if it is a [FullStruct], as the library is, its
+   implementation if it is a [Struct], and none if it is [Algebraic] or
+   [Abstract]. A sealed module's signature, the type of an algebraic module
+   and a module type only describe fields that an own body declares, the
+   implementation of the sealed module for instance, possibly as a
+   definition. [check_module] checks the registrations of a module's fields
+   in its own body, and in the own bodies of the modules there ([own]).
+
+   Whether [c], user and canonical name alike, is the name that
+   [check_module] gives a constant of the own body of the module [mb] at
+   [mp], or of the own body of a module there. *)
+let rec module_declares c mp mb =
+  match Mod_declarations.mod_expr mb with
+  | FullStruct -> sign_declares c mp (mod_delta mb) (mod_type mb)
+  | Struct (reso, struc) -> struc_declares c mp reso struc
+  | Algebraic _ | Abstract -> false
+
+and sign_declares c mp delta = function
+  | MoreFunctor (_, _, body) -> sign_declares c mp delta body
+  | NoFunctor struc -> struc_declares c mp delta struc
+
+and struc_declares c mp delta struc =
+  let field_declares (lab, field) = match field with
+    | SFBconst _ ->
+      let kn = Mod_subst.constant_of_delta_kn delta (KerName.make mp lab) in
+      Constant.UserOrd.equal kn c && Constant.CanOrd.equal kn c
+    | SFBmodule mb -> module_declares c (MPdot (mp, lab)) mb
+    | SFBmind _ | SFBrules _ | SFBmodtype _ -> false
+  in
+  List.exists field_declares struc
+
+(* coqc records the registration of a primitive type in the module or
+   library whose [Primitive] declares the constant, and in those around it.
+   [check_registered_type] checks a registered constant where the own body
+   of the module declares it; one that it does not declare, a definition of
+   another library, or a field of a sealed module's signature that its
+   implementation defines, would not be checked, and every literal typed
+   with it would trust it. A module that is not in an own body ([own] is
+   false: in a signature, the type of an algebraic module or a module type)
+   declares nothing, and coqc gives it no registration. Its registrations
+   would still be applied when the library is loaded
+   ([Modops.add_module]). A library's registrations are in the environment
+   before this runs ([Safe_checking.env_of_library]), but none of its
+   constants has been checked yet. *)
+let check_registrations_declared ~own mp mb =
+  let check = function
+    | Retroknowledge.Register_ind _ -> ()
+    | Retroknowledge.Register_type (prm, c) ->
+      if not (own && module_declares c mp mb) then
+        let canonical = Constant.canonical c in
+        let canonical =
+          if KerName.equal (Constant.user c) canonical then mt ()
+          else str "(canonical name " ++ KerName.print canonical ++ str ")" ++ spc ()
+        in
+        raise (BadConstant (c, canonical ++ str "is registered as the primitive type " ++
+                               pr_prim_type prm ++ str " in " ++ ModPath.print mp ++
+                               str ", which does not declare it."))
+  in
+  List.iter check (mod_retroknowledge mb)
+
+(* [own]: whether [mb] is in an own body (see [module_declares]); its
+   signature is an own body if, besides, it is a [FullStruct], and its
+   implementation if it is a [Struct]. *)
+let rec check_module env opac mp mb opacify ~own =
   Flags.if_verbose Feedback.msg_notice (str "  checking module: " ++ str (ModPath.to_string mp));
+  let () = check_registrations_declared ~own mp mb in
   let env = Modops.add_retroknowledge (mod_retroknowledge mb) env in
   let delta_mb = mod_delta mb in
   let opac =
-    check_signature env opac (mod_type mb) mp delta_mb opacify
+    let own = own && match Mod_declarations.mod_expr mb with
+      | FullStruct -> true
+      | Struct _ | Algebraic _ | Abstract -> false
+    in
+    check_signature env opac (mod_type mb) mp delta_mb opacify ~own
   in
   let optsign, opac = match Mod_declarations.mod_expr mb with
     | Struct (reso, sign_struct) ->
@@ -362,7 +506,7 @@ let rec check_module env opac mp mb opacify =
       let vmtab, sign_struct =
         compile_signature env (Environ.vm_library env) mp reso sign_struct in
       let env = Environ.set_vm_library vmtab env in
-      let opac = check_signature env opac sign_struct mp reso opacify in
+      let opac = check_signature env opac sign_struct mp reso opacify ~own in
       Some (sign_struct, reso), opac
     | Algebraic me -> Some (check_mexpression env opac me (mod_type mb) mp delta_mb), opac
     | Abstract|FullStruct -> None, opac
@@ -382,15 +526,15 @@ let rec check_module env opac mp mb opacify =
 and check_module_type env mp mty =
   Flags.if_verbose Feedback.msg_notice (str "  checking module type: " ++ str (ModPath.to_string @@ mp));
   let _ : _ Cmap.t =
-    check_signature env Cmap.empty (mod_type mty) mp (mod_delta mty) Cset.empty in
+    check_signature env Cmap.empty (mod_type mty) mp (mod_delta mty) Cset.empty ~own:false in
   ()
 
-and check_structure_field env opac mp lab res opacify = function
+and check_structure_field env opac mp lab res opacify ~own = function
   | SFBconst cb ->
       let kn = KerName.make mp lab in
       let kn = Mod_subst.constant_of_delta_kn res kn in
       let () = Check_stat.record_constant kn cb in
-      check_constant_declaration env opac kn cb (Cset.mem kn opacify)
+      check_constant_declaration env opac kn cb (Cset.mem kn opacify) ~own
   | SFBmind mib ->
       let kn = KerName.make mp lab in
       let kn = Mod_subst.mind_of_delta_kn res kn in
@@ -401,7 +545,7 @@ and check_structure_field env opac mp lab res opacify = function
       CheckInductive.check_inductive env kn mib, opac
   | SFBmodule msb ->
       let mp = MPdot(mp, lab) in
-      let opac = check_module env opac mp msb opacify in
+      let opac = check_module env opac mp msb opacify ~own in
       Modops.add_module mp msb env, opac
   | SFBmodtype mty ->
       let mp = MPdot (mp, lab) in
@@ -411,20 +555,20 @@ and check_structure_field env opac mp lab res opacify = function
       check_rewrite_rules_body env lab rrb;
       Environ.add_rewrite_rules rrb.rewrules_rules env, opac
 
-and check_signature env opac sign mp_mse res opacify = match sign with
+and check_signature env opac sign mp_mse res opacify ~own = match sign with
   | MoreFunctor (arg_id, mtb, body) ->
       let () = check_module_type env (MPbound arg_id) mtb in
       let env' = Modops.add_module_parameter arg_id mtb env in
-      let opac = check_signature env' opac body mp_mse res Cset.empty in
+      let opac = check_signature env' opac body mp_mse res Cset.empty ~own in
       opac
   | NoFunctor struc ->
       let (_:env), opac = List.fold_left (fun (env, opac) (lab,mb) ->
-        check_structure_field env opac mp_mse lab res opacify mb) (env, opac) struc
+        check_structure_field env opac mp_mse lab res opacify ~own mb) (env, opac) struc
       in
       opac
 
 let check_module env opac mp mb =
   NewProfile.profile "check_module"
     ~args:(fun () -> [("name", `String (ModPath.to_string mp))])
-    (fun () -> check_module env opac mp mb Cset.empty)
+    (fun () -> check_module env opac mp mb Cset.empty ~own:true)
     ()
