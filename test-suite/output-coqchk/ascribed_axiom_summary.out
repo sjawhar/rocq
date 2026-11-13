@@ -17,6 +17,7 @@ CONTEXT SUMMARY
     ascribed_axiom_summary.OverAxiom.Asc.p
     ascribed_axiom_summary.Applied.Asc.p
     ascribed_axiom_summary.Assumes.p
+    ascribed_axiom_summary.Applied.Assumed.p
   
 * Constants/Inductives relying on type-in-type: <none>
   

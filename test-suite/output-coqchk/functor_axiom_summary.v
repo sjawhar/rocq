@@ -1,11 +1,12 @@
-(* What the summary may call a functor's axiom, and what it leaves out.
-   An axiom is named where it is declared, which for a functor's field is the
-   module each application makes: App.in_f. That is the name Print
-   Assumptions prints for it too; the functor's own F.in_f appears in
-   neither account, which is what a reader that joins the two by name, as the
-   BET grader does, needs. Where this summary has only a type to read, it
-   cannot tell an assumption from a definition and names nothing, so no shape
-   below is named one way here and another way by Print Assumptions. *)
+(* What the summary calls a functor's axiom. An axiom is named where it is
+   declared, which for a functor's field is the module each application
+   makes: App.in_f. That is the name Print Assumptions prints for it too; the
+   functor's own F.in_f appears in neither account, which is what a reader
+   that joins the two by name, as the BET grader does, needs. The summary
+   reads an application through its functor's body, as Print Assumptions
+   does, so each shape below is named the same way in both accounts: the
+   axiom of the functor's body under the application's name, wherever the
+   application is, and no field the body defines. *)
 
 Module Type S. Parameter n : nat. End S.
 Module Type T. Parameter tgt : 1 = 2. End T.
@@ -21,15 +22,13 @@ End F.
 Module App := F Arg.
 Definition reached : False := App.use.
 
-(* The shapes the walk leaves out, pinned here so a later change to it cannot
-   alter them unseen. In each, all the summary has is a type that says
-   nothing about what the module expression under it leaves assumed, so it
-   reports no axiom of its own and Print Assumptions names one. *)
+(* The shapes the environment holds a type for, where the functor's body
+   says what is assumed.
 
-(* A seal a functor body declares: Print Assumptions names AppG.Inner.in_g
-   for a proof that uses AppG.Inner.tgt, and the summary names nothing. The
-   helper keeps the opacified-body accounting out of this: it reaches in_g
-   through a constant that has a body, which that accounting drops. *)
+   A seal a functor body declares: Print Assumptions names AppG.Inner.in_g
+   for a proof that uses AppG.Inner.tgt, and so does the summary. The helper
+   keeps the opacified-body accounting out of this: it reaches in_g through a
+   constant that has a body, which that accounting drops. *)
 Module G (X : S).
   Module Inner : T.
     Axiom in_g : False.
@@ -39,8 +38,7 @@ Module G (X : S).
 End G.
 Module AppG := G Arg.
 
-(* An application inside a seal: Print Assumptions names Seal.Inner.in_f and
-   the summary names nothing. *)
+(* An application inside a seal: both accounts name Seal.Inner.in_f. *)
 Module Seal : T.
   Module Inner := F Arg.
   Lemma tgt : 1 = 2. Proof. destruct Inner.use. Qed.
@@ -59,11 +57,10 @@ Module Ascribed : Q.
   Definition q := helper.
 End Ascribed.
 
-(* A sealed functor, and an application an ascription hides: each is listed
-   under its interface's parameter, AppH.tgt and AscApp.tgt, which the
-   environment fold prints on its own. Print Assumptions names AppH.in_h and
-   AscApp.in_k instead, so a reader that joins by name fails closed on them,
-   which is the safe direction. *)
+(* A sealed functor, and an application an ascription hides: the
+   environment holds each under its interface, whose parameter tgt the body
+   defines, so tgt is not named; both accounts name AppH.in_h and
+   AscApp.in_k, the axioms of the bodies. *)
 Module H (X : S) : T.
   Axiom in_h : False.
   Lemma tgt : 1 = 2. Proof. destruct in_h. Qed.
@@ -76,8 +73,8 @@ Module K (X : S).
 End K.
 Module AscApp : T := K Arg.
 
-(* A sealed functor applied inside a seal: Print Assumptions names
-   SealApp.Inside.in_h, and the summary names nothing. *)
+(* A sealed functor applied inside a seal: both accounts name
+   SealApp.Inside.in_h. *)
 Module SealApp : T.
   Module Inside := H Arg.
   Definition helper : 1 = 2 := Inside.tgt.
