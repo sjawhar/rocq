@@ -106,6 +106,74 @@ let set_indirect_accessor f = indirect_accessor := f
 
 exception BadConstant of Constant.t * Pp.t
 
+(* The universe instance at which coqc gives a primitive its type
+   ([Constant_typing.infer_primitive]): the abstract instance of the
+   constant's universe context, a context of the size of the primitive's own
+   context [prim_univs] and with no constraints
+   ([Constant_typing.adjust_primitive_univ_entry]). [refuse] is called with
+   the reason when the constant's context is not such a context. The size
+   is tested before [Typeops] computes the primitive's type, which asserts
+   it. *)
+let primitive_instance refuse cb prim_univs =
+  let auctx = Declareops.constant_polymorphic_context cb in
+  let constraints = UVars.UContext.constraints (UVars.AbstractContext.repr auctx) in
+  let () =
+    if not (PConstraints.is_empty constraints)
+    then refuse (str "its universe context has constraints")
+  in
+  let u = UVars.make_abstract_instance auctx in
+  let () =
+    if UVars.Instance.length u <> UVars.AbstractContext.size prim_univs
+    then refuse (str "its universe instance has the wrong length")
+  in
+  u
+
+let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
+  BadConstant (kn, str "is registered as the primitive type " ++
+                   str (CPrimitives.prim_type_to_string prm) ++ str ", but " ++
+                   why ++ str ".")
+
+(* Typeops types a primitive literal with the constant registered for its
+   primitive type ([Typeops.type_of_int] and the like), and conversion
+   unfolds that constant, so the typing of every literal trusts the
+   registration. A definition [int : Set := Empty_set] registered as the
+   int63 type would give [Int 0] the type Empty_set, and [match] on it a
+   closed proof of False. coqc registers only the constant that [Primitive]
+   declares, a parameter whose type is the primitive type's
+   ([Constant_typing.infer_primitive]), and rocqchk refuses any other. It
+   checks the declaration that the registered name has in the body of its
+   module ([without_constant_registrations]). [env] holds the constant's
+   universe context. *)
+let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
+  let refuse why = raise (bad_registration kn prm why) in
+  let () = match cb.const_body with
+    | Undef _ -> ()
+    | Def _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse (str "it is not a parameter")
+  in
+  let u = primitive_instance refuse cb (CPrimitives.typ_univs prm) in
+  match conv env (Typeops.type_of_prim_type env u prm) cb.const_type with
+  | Result.Ok () -> ()
+  | Result.Error () -> refuse (str "its type is not the primitive type's")
+
+(* coqc registers a primitive type only in a library, or in a module nested
+   in it with no functor parameter ([Safe_typing.add_retroknowledge]), for a
+   constant that [Primitive] declares there. So the registered constant is a
+   field of the body of its module: of the type of a module that has no
+   other implementation ([FullStruct], as a library has), or of the
+   implementation of a [Struct] module. Elsewhere, in the type of a sealed,
+   algebraic or declared module, or in the body of a functor, its
+   declaration can be a parameter that an implementation defines: a sealed
+   [int : Set := Empty_set] is [Parameter int : Set] in its module's type.
+   [check_module] therefore checks such a type, and such a functor body,
+   with the constant registrations withheld: [f] gets [st] without them, and
+   the result has them back. A registration that no module body declares is
+   left over, and [check_module] refuses it. *)
+let without_constant_registrations f st =
+  let (ind_retro, cst_retro) = st.st_retro in
+  let r, st = f { st_retro = (ind_retro, Cmap_env.empty) } in
+  let (ind_retro, _) = st.st_retro in
+  r, { st_retro = (ind_retro, cst_retro) }
+
 let check_constant_declaration env st kn cb =
   Flags.if_verbose Feedback.msg_notice (str "  checking cst:" ++ Constant.print kn);
   let env = CheckFlags.set_local_flags cb.const_typing_flags env in
@@ -156,7 +224,8 @@ let check_constant_declaration env st kn cb =
   in
   let retro, st = match Cmap_env.find_opt kn (snd st.st_retro) with
   | None -> None, st
-  | Some retro ->
+  | Some (CPrimitives.PTE prm as retro) ->
+    let () = check_register_type env kn cb prm in
     let (ind_retro, cst_retro) = st.st_retro in
     let st = { st_retro = (ind_retro, Cmap_env.remove kn cst_retro) } in
     Some retro, st
@@ -189,7 +258,7 @@ let check_constant_declaration env st kn cb =
   let env = match retro with
   | None -> env
   | Some (CPrimitives.PTE prm) ->
-    (* TODO: Some checking is performed by this function, but it looks too lightweight *)
+    (* The inner [check_constant_declaration] ran [check_register_type]. *)
     Primred.add_retroknowledge env (Retroknowledge.Register_type (prm, kn))
   in
   env, st
@@ -380,13 +449,19 @@ let rec check_mexpression env sign mbtyp mp_mse res = match sign with
     MoreFunctor(arg_id,mtb,body), delta
   | MENoFunctor me -> check_mexpr env me mp_mse res
 
+(* [check_module] returns the registrations in force after the module with
+   the state: those in force before it and those it made, which coqc puts in
+   force after it too ([Safe_typing.end_module]). *)
 let rec check_module env st mp mb =
   Flags.if_verbose Feedback.msg_notice (str "  checking module: " ++ str (ModPath.to_string mp));
   let delta_mb = mod_delta mb in
-  let st =
-    check_signature env st (mod_type mb) mp delta_mb
+  let check_type st = check_signature env st (mod_type mb) mp delta_mb in
+  let retro, st = match Mod_declarations.mod_expr mb with
+    | FullStruct -> check_type st
+    | Struct _ | Algebraic _ | Abstract -> without_constant_registrations check_type st
   in
-  let optsign, st = match Mod_declarations.mod_expr mb with
+  let env = Environ.set_retroknowledge env retro in
+  let optsign, retro, st = match Mod_declarations.mod_expr mb with
     | Struct (reso, sign_struct) ->
       (* TODO: a bit wasteful, we recheck the types of parameters twice *)
       let sign_struct = Modops.annotate_struct_body sign_struct (mod_type mb) in
@@ -395,10 +470,10 @@ let rec check_module env st mp mb =
       let vmtab, sign_struct =
         compile_signature env (Environ.vm_library env) mp reso sign_struct in
       let env = Environ.set_vm_library vmtab env in
-      let st = check_signature env st sign_struct mp reso in
-      Some (sign_struct, reso), st
-    | Algebraic me -> Some (check_mexpression env me (mod_type mb) mp delta_mb), st
-    | Abstract|FullStruct -> None, st
+      let retro, st = check_signature env st sign_struct mp reso in
+      Some (sign_struct, reso), retro, st
+    | Algebraic me -> Some (check_mexpression env me (mod_type mb) mp delta_mb), retro, st
+    | Abstract|FullStruct -> None, retro, st
   in
   let () = match optsign with
   | None -> ()
@@ -410,11 +485,11 @@ let rec check_module env st mp mb =
     let _ : UGraph.t = Subtyping.check_subtypes state env mp mp mtb2 in
     ()
   in
-  st
+  retro, st
 
 and check_module_type env mp mty =
   Flags.if_verbose Feedback.msg_notice (str "  checking module type: " ++ str (ModPath.to_string @@ mp));
-  let _ : check_state =
+  let (_ : Retroknowledge.retroknowledge), (_ : check_state) =
     check_signature env empty_state (mod_type mty) mp (mod_delta mty) in
   ()
 
@@ -446,10 +521,10 @@ and check_structure_field env st mp lab res = function
       env', st
   | SFBmodule msb ->
       let mp = MPdot(mp, lab) in
-      let st = check_module env st mp msb in
+      let retro, st = check_module env st mp msb in
       let env = Modops.add_module mp msb env in
       let () = check_nested_resolver env res mp msb in
-      env, st
+      Environ.set_retroknowledge env retro, st
   | SFBmodtype mty ->
       let mp = MPdot (mp, lab) in
       let () = check_module_type env mp mty in
@@ -458,17 +533,21 @@ and check_structure_field env st mp lab res = function
       check_rewrite_rules_body env lab rrb;
       Environ.add_rewrite_rules rrb.rewrules_rules env, st
 
+(* The registrations in force after the signature, and the state. A functor
+   makes none ([without_constant_registrations]). *)
 and check_signature env st sign mp_mse res = match sign with
   | MoreFunctor (arg_id, mtb, body) ->
       let () = check_module_type env (MPbound arg_id) mtb in
       let env' = Modops.add_module_parameter arg_id mtb env in
-      let st = check_signature env' st body mp_mse res in
-      st
+      let (_ : Retroknowledge.retroknowledge), st =
+        without_constant_registrations (fun st -> check_signature env' st body mp_mse res) st
+      in
+      Environ.retroknowledge env, st
   | NoFunctor struc ->
-      let (_:env), st = List.fold_left (fun (env, st) (lab,mb) ->
+      let env, st = List.fold_left (fun (env, st) (lab,mb) ->
         check_structure_field env st mp_mse lab res mb) (env, st) struc
       in
-      st
+      Environ.retroknowledge env, st
 
 let rec collect_module_axioms axioms mp mb =
   match mod_expr mb with
@@ -537,8 +616,27 @@ let get_retroknowlege env retro =
     else
       (Mindmap_env.add ind (i, CPrimitives.PIE prm) imap, cmap, extind)
   | Retroknowledge.Register_type (prm, cst) ->
-    let () = assert (not (Cmap_env.mem cst cmap)) in
-    let () = assert (not (Environ.mem_constant cst env)) in
+    let () =
+      if Cmap_env.mem cst cmap then
+        raise (BadConstant (cst, str "is registered twice as a primitive type."))
+    in
+    (* coqc registers the constant that [Primitive] declares, in this
+       library, and names it as declared, with no other canonical name
+       ([Safe_typing.add_constant]). [check_constant_declaration] checks the
+       declaration that the user name has in this library, while
+       [Safe_typing.import] puts the registration in force with the
+       canonical name, which conversion compares. *)
+    let () =
+      if Environ.mem_constant cst env then
+        raise (bad_registration cst prm (str "an earlier library declares it"))
+    in
+    let () =
+      let canonical = Constant.canonical cst in
+      if not (KerName.equal (Constant.user cst) canonical) then
+        raise (bad_registration cst prm
+                 (str "the registration gives it another canonical name, " ++
+                  KerName.print canonical))
+    in
     (imap, Cmap_env.add cst (CPrimitives.PTE prm) cmap, extind)
   in
   let (imap, cmap, _) = List.fold_left fold (Mindmap_env.empty, Cmap_env.empty, Mindmap_env.empty) retro in
@@ -547,7 +645,7 @@ let get_retroknowlege env retro =
 let check_module env axioms retro mp mb =
   let retro = get_retroknowlege env retro in
   let st = { st_retro = retro } in
-  let { st_retro = (imap, cmap) } = check_module env st mp mb in
+  let (_ : Retroknowledge.retroknowledge), { st_retro = (imap, cmap) } = check_module env st mp mb in
   let () = match Mindmap_env.choose_opt imap, Cmap_env.choose_opt cmap with
   | None, None -> ()
   | Some (ind, _), (None | Some _) ->
