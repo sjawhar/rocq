@@ -497,10 +497,16 @@ and ``rocq repl``, unless stated otherwise:
   :cmd:`Succeed`, as the :flag:`Skip Qed Typecheck` flag describes.
   A proof that a command rolling the document back discards, such as
   :cmd:`Reset`, is typechecked at that command for the same reason, when
-  ``rocq compile`` is building a file.
-  A command that writes no file for ``rocqchk`` to check typechecks every
-  opaque proof: ``rocq compile -vok``, which refuses this option, and
-  ``rocq repl`` and ``coqidetop``, which warn that it has no effect.
+  ``rocq compile`` is building a file. This does not hold for a proof
+  delegated to a proof worker (``-async-proofs on``): such a proof is
+  discarded without a check, with this option or without it.
+  A proof nested in another (:flag:`Nested Proofs Allowed`) is typechecked
+  at its :cmd:`Qed` even with this option, because closing it discards its
+  declaration and declares it again.
+  ``rocq compile -vok``, ``rocq repl`` and ``coqidetop`` write no file for
+  ``rocqchk`` to check, so they typecheck every opaque proof: ``-vok``
+  refuses this option, and ``rocq repl`` and ``coqidetop`` warn that it has
+  no effect.
 
   .. warning:: A library compiled with this option can contain an ill-typed
      proof, for instance one built with ``exact_no_check``, until ``rocqchk``

@@ -94,8 +94,8 @@ let compile opts stm_options injections copts ~echo ~f_in ~f_out =
 (* -vok writes no library, so nothing it processes ever reaches rocqchk and
    its exit status is the whole verdict: it typechecks every opaque proof,
    those of the files it loads first included. The option is refused with it,
-   and the flag, which a file can set at any point, is forced off for the
-   whole document instead. *)
+   and the check is forced on for the whole document instead, whatever the
+   flag, which a file can set at any point, says. *)
 let compile opts stm_opts copts injections ~echo ~f_in ~f_out =
   let vok = copts.compilation_mode = BuildVok in
   if vok && opts.config.skip_qed_typecheck then
