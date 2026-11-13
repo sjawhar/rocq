@@ -14,7 +14,7 @@ let empty_axioms = { cset = KerName.Set.empty }
 
 let constants_of_axioms {cset} = KerName.Set.elements cset
 
-let axioms_add c {cset} = {cset=KerName.Set.add c cset}
+let axioms_add c {cset} = {cset=KerName.Set.add (Constant.user c) cset}
 
 (** {6 Compiling the VM bytecode}
 
@@ -391,7 +391,7 @@ let rec collect_module_axioms axioms mp mb =
   | Struct (reso, struc) ->
     (* Module with implementation separate from its type: don't produce axioms from the type *)
     let struc = Modops.annotate_struct_body struc (mod_type mb) in
-    collect_signature_axioms axioms struc mp
+    collect_signature_axioms axioms struc mp reso
   | Algebraic _ ->
     (* any axioms are already declared from the modules and functors
        involved in the application (this means an axiom in a functor
@@ -399,16 +399,15 @@ let rec collect_module_axioms axioms mp mb =
        application) *)
     axioms
   | Abstract | FullStruct ->
-    collect_signature_axioms axioms (mod_type mb) mp
+    collect_signature_axioms axioms (mod_type mb) mp (mod_delta mb)
 
-and collect_signature_axioms axioms sign mp =
-  match sign with
+and collect_signature_axioms axioms sign mp res = match sign with
   | MoreFunctor (arg_id, mtb, body) ->
-    collect_signature_axioms axioms body mp
+    collect_signature_axioms axioms body mp res
   | NoFunctor struc ->
     let fold axioms (lab, field) = match field with
     | SFBconst cb ->
-      let kn = KerName.make mp lab in
+      let kn = Mod_subst.constant_of_delta_kn res (KerName.make mp lab) in
       let axioms =
         match cb.const_body with
         | Def _ | OpaqueDef _ | Primitive _ -> axioms
