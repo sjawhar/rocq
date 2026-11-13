@@ -74,9 +74,9 @@ let root_context mp = { raw = mp; subst = Mod_subst.empty_subst; within = [] }
    under it, which the walk goes through, and whether each constant has a
    body, which is the answer it is after. [struc] is that structure, in the
    order it declares its fields, and [ctx] where it is read. [implemented] is
-   false for the empty record that stands for an implementation the walk cannot
-   read; for an application, [types] then holds the result type of the
-   functor it names, when the walk found that functor. *)
+   false for the empty record that stands for an implementation the walk
+   cannot read; for an application, [types] then holds the result type of
+   each functor the walk followed to it, the innermost first. *)
 type fields = {
   modules : module_body Id.Map.t;
   constants : bool Id.Map.t;
@@ -122,12 +122,15 @@ let rec unapply args = function
   | MEapply (me, arg) -> unapply (arg :: args) me
   | MEwith _ -> None
 
+(* [subst] with the parameter [mbid] bound to the argument [arg]. *)
+let bind_param subst mbid arg =
+  Mod_subst.add_mbid mbid arg (Mod_subst.empty_delta_resolver arg) subst
+
 (* [subst] extended with each parameter of the functor type [sign] bound to
    the argument at its place, if [args] are exactly as many. *)
 let rec bind subst sign args = match sign, args with
   | NoFunctor _, [] -> Some subst
-  | MoreFunctor (mbid, _, sign), arg :: args ->
-    bind (Mod_subst.add_mbid mbid arg (Mod_subst.empty_delta_resolver arg) subst) sign args
+  | MoreFunctor (mbid, _, sign), arg :: args -> bind (bind_param subst mbid arg) sign args
   | NoFunctor _, _ :: _ | MoreFunctor _, [] -> None
 
 (* For [Module G (X : S) := E], whose type is the functor type [sign] and
@@ -139,8 +142,7 @@ let rec bind subst sign args = match sign, args with
 let rec bind_expression subst sign fe args = match sign, fe, args with
   | _, MENoFunctor me, args -> Some (subst, me, args)
   | MoreFunctor (mbid, _, sign), MEMoreFunctor fe, arg :: args ->
-    bind_expression
-      (Mod_subst.add_mbid mbid arg (Mod_subst.empty_delta_resolver arg) subst) sign fe args
+    bind_expression (bind_param subst mbid arg) sign fe args
   | (NoFunctor _ | MoreFunctor _), MEMoreFunctor _, _ -> None
 
 let rec functor_result = function
@@ -155,27 +157,33 @@ let rec functor_result = function
    path resolves to depends on it. A path that cannot be read is kept as the
    empty record, which answers for every label as a structure without that
    label does. [instances] counts the applications read for the
-   environment. *)
+   environment, and [stops] those read as the empty record at one of the
+   stops below. *)
 type memo = {
   env : Environ.env;
   read : fields ModPath.Map.t;
   instances : int;
+  stops : int;
 }
 
 let memo = ref None
 
-let read_memo env =
+let current env =
   match !memo with
-  | Some m when m.env == env -> m.read
-  | Some _ | None -> ModPath.Map.empty
+  | Some m when m.env == env -> m
+  | Some _ | None -> { env; read = ModPath.Map.empty; instances = 0; stops = 0 }
 
-let instances_read env =
-  match !memo with
-  | Some m when m.env == env -> m.instances
-  | Some _ | None -> 0
+let read_memo env = (current env).read
+
+let instances_read env = (current env).instances
 
 let count_instance env =
-  memo := Some { env; read = read_memo env; instances = instances_read env + 1 }
+  let m = current env in
+  memo := Some { m with instances = m.instances + 1 }
+
+let count_stop env =
+  let m = current env in
+  memo := Some { m with stops = m.stops + 1 }
 
 (* The paths whose fields are being read and are not kept yet. A library
    rocqchk checks cannot make a module its own implementation, since
@@ -191,7 +199,7 @@ let keep_fields env paths fields =
   let read = List.fold_left (fun read mp -> ModPath.Map.add mp fields read)
       (read_memo env) paths
   in
-  memo := Some { env; read; instances = instances_read env };
+  memo := Some { (current env) with read };
   reading := List.fold_left (fun s mp -> ModPath.Set.remove mp s) !reading paths;
   fields
 
@@ -253,7 +261,7 @@ let rec read_module env read ctx mb =
     (* [Module R := F A] and [Module R : T := F A]: F's body, instantiated.
        [read] is never empty, and its first path is the module whose
        expression this is. *)
-    keep_fields env read (applied env (List.hd read) ctx ctx ModPath.Set.empty me [])
+    keep_fields env read (applied env (List.hd read) ctx ctx ModPath.Set.empty [] me [])
   | NoFunctor _, Algebraic (MENoFunctor (MEwith _) | MEMoreFunctor _) ->
     (* Neither is in an implementation of a module that is not a functor. *)
     keep_fields env read no_fields
@@ -275,48 +283,46 @@ let rec read_module env read ctx mb =
    are followed to the functor they name, as [fields_of_expr] and
    [fields_of_expression] in vernac/assumptions.ml follow them; [seen] stops
    a cycle of them. A functor declared with [Declare Module] has no body to
-   read. Where the body is not read, the empty record carries the result
-   type of each functor on the way, for the listing. *)
-and applied env app site ctx seen me args =
+   read. [outer] holds the result type of each functor followed so far, the
+   innermost first; where the body is not read, the empty record carries
+   them, for the listing. *)
+and applied env app site ctx seen outer me args =
+  let unread types = { no_fields with types } in
   match unapply [] me with
-  | None -> no_fields
+  | None -> unread outer
   | Some (f, args') ->
     let resolve = Mod_subst.subst_mp ctx.subst in
     let f = resolve f and args = List.map resolve args' @ args in
-    if ModPath.Set.mem f seen then no_fields else
+    if ModPath.Set.mem f seen then unread outer else
     match module_at env f with
-    | None -> no_fields
+    | None -> unread outer
     | Some (mb, ctx) ->
-      let unread = { no_fields with types = [functor_result (mod_type mb)] } in
-      let or_unread fields =
-        if fields.implemented then fields
-        else { fields with types = fields.types @ unread.types }
-      in
+      let types = functor_result (mod_type mb) :: outer in
       let seen = ModPath.Set.add f seen in
       match mod_expr mb with
-      | Struct (_, struc) -> or_unread (instantiate env app site ctx (mod_type mb) args struc)
+      | Struct (_, struc) -> instantiate env app site ctx types (mod_type mb) args struc
       | FullStruct ->
-        or_unread
-          (instantiate env app site ctx (mod_type mb) args (functor_result (mod_type mb)))
-      | Abstract -> unread
-      | Algebraic (MENoFunctor me) -> or_unread (applied env app site ctx seen me args)
+        instantiate env app site ctx types (mod_type mb) args (functor_result (mod_type mb))
+      | Abstract -> unread types
+      | Algebraic (MENoFunctor me) -> applied env app site ctx seen types me args
       | Algebraic (MEMoreFunctor _ as fe) ->
         match bind_expression ctx.subst (mod_type mb) fe args with
-        | None -> unread
-        | Some (subst, me, args) -> or_unread (applied env app site { ctx with subst } seen me args)
+        | None -> unread types
+        | Some (subst, me, args) -> applied env app site { ctx with subst } seen types me args
 
 (* The body [struc] of the functor of type [sign] declared where [ctx] says,
-   bound to [args], read as [app]'s, inside the applications of [site]; or the
-   empty record, at one of the stops above. *)
-and instantiate env app site ctx sign args struc =
+   bound to [args], read as [app]'s, inside the applications of [site]; or,
+   at one of the stops above, or where [args] do not fit [sign], the empty
+   record carrying [types]. *)
+and instantiate env app site ctx types sign args struc =
   let instance = (ctx.raw, args) in
   if List.exists (same_instance instance) site.within
   || List.length site.within >= max_depth
   || instances_read env >= max_instances
-  then no_fields
+  then (count_stop env; { no_fields with types })
   else
     match bind ctx.subst sign args with
-    | None -> no_fields
+    | None -> { no_fields with types }
     | Some subst ->
       count_instance env;
       let subst = Mod_subst.add_mp ctx.raw app (Mod_subst.empty_delta_resolver app) subst in
@@ -375,7 +381,8 @@ let defines_constant env kn =
 (* Every constant without a body in the implementation of [mp], and in the
    modules under it, named under [mp], in the order the structures declare
    them: what the environment fold lists for a module it holds, for one
-   whose implementation it does not hold. A module under it is read as it is
+   whose implementation it does not hold. [mb] is the module the walk of
+   [Mod_checking] recorded at [mp]. A module under it is read as it is
    implemented: a plain or sealed structure for what it declares, an
    application for its functor's body, a declared module for its type,
    whose parameters are what Print Assumptions names. An alias is not read:
@@ -385,15 +392,16 @@ let defines_constant env kn =
    body exactly where [defines_constant] may drop a name for it.
 
    An application whose body the walk does not read, at a stop, with a
-   functor declared with [Declare Module], or with one it cannot find, is
-   listed by its types instead: the constants without a body in the type the
+   functor declared with [Declare Module] or one it cannot find, or one
+   declared by a module type, as under a [Declare Module], where no
+   implementation leads to it, is listed by its types instead: the constants without a body in the type the
    application has, which is the functor's result type bound to its
    arguments, or the type an ascription gives it, and in the result type of
    each functor the walk followed to it. That lists every parameter those
    types declare, including ones the body may define, and names no axiom the
    body hides behind them: more names than Print Assumptions prints, which
    fails closed, rather than none for what an honest proof rests on. *)
-let application_axioms env mp =
+let application_axioms env mp mb =
   reading := ModPath.Set.empty;
   let bodyless mp acc lab cb =
     if Declareops.constant_has_body cb then acc else Constant.make2 mp lab :: acc
@@ -422,8 +430,14 @@ let application_axioms env mp =
         | SFBmind _ | SFBrules _ | SFBmodtype _ -> acc)
       acc struc
   in
-  let acc = match module_at env mp with
-    | Some (mb, _) -> module_ [] mp mb
-    | None -> structure [] mp (fields_in_implementation env mp)
-  in
-  List.rev acc
+  List.rev (module_ [] mp mb)
+
+(* With [-d checker-summary], how many applications the summary read for the
+   environment, and how many it read as the empty record at a stop. *)
+let debug = CDebug.create ~name:"checker-summary" ()
+
+let debug_counts env =
+  debug (fun () ->
+      let m = current env in
+      Pp.(str "applications read: " ++ int m.instances ++ str " of at most "
+          ++ int max_instances ++ str "; stopped: " ++ int m.stops))

@@ -167,14 +167,16 @@ let record_axiom c =
 
 (* A functor application's axioms are its functor's, under its own name, and
    the environment holds them only where it holds the application with the
-   functor's own type. The walk records each application it passes, and the
-   section reads its functor's body at the end, over the final environment
+   functor's own type. The walk records each application it passes, with the
+   module body it holds for it, which may come from a type, as under a
+   [Declare Module], where no implementation leads to it; the section reads
+   its functor's body at the end, over the final environment
    ([Mod_impl.application_axioms]), which holds every functor an application
-   names; [record_sealed_axioms] says why the walk records them. *)
+   names. [record_sealed_axioms] says why the walk records them. *)
 let applications = ref []
 
-let record_application mp =
-  if summary_enabled () then applications := mp :: !applications
+let record_application mp mb =
+  if summary_enabled () then applications := (mp, mb) :: !applications
 
 (* The environment walk keeps its own order, and a recorded name it already
    holds is dropped, so a constant is never listed twice. The membership test
@@ -240,11 +242,12 @@ let pr_axioms env opac =
   let csts = Cset.filter (fun c -> not (Mod_impl.defines_constant env c)) csts in
   let csts = Cset.fold (fun c acc -> Constant.to_string c :: acc) csts [] in
   let extras =
-    List.fold_left (fun extras mp ->
+    List.fold_left (fun extras (mp, mb) ->
         List.fold_left (fun extras c -> constant_name c :: extras) extras
-          (Mod_impl.application_axioms env mp))
+          (Mod_impl.application_axioms env mp mb))
       !sealed_axioms (List.rev !applications)
   in
+  Mod_impl.debug_counts env;
   pr_assumptions "Axioms" (add_missing csts extras)
 
 let pr_type_in_type env flags =

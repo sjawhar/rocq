@@ -237,3 +237,14 @@ Module SDeep : UseT.
   Definition use : False := helper.
 End SDeep.
 Definition boom_deep : False := SDeep.use.
+
+(* An application a module type declares, reached through a Declare Module
+   inside the seal: no implementation leads to it, so the walk lists what
+   its type declares without a body, here the axiom SDeclType.D.App.in_f. *)
+Module Type WithApp. Module App := F E. End WithApp.
+Module SDeclType : UseT.
+  Declare Module D : WithApp.
+  Definition helper : False := D.App.in_f.
+  Definition use : False := helper.
+End SDeclType.
+Definition boom_decl_type : False := SDeclType.use.
