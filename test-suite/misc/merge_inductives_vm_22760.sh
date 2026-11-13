@@ -3,9 +3,10 @@
 # rocq#22760 over a merged type.
 #
 # For a constructor with an extended tag (the 245th non-constant constructor
-# of its type and after), the VM's symbolic branches give the constructor's
-# arguments the levels just below the branch's own binders
-# (Vmvalues.branch_arg; test-suite/bugs/bug_22760.v). One level too high, the
+# of its type and later with OCaml 4.14, the 243rd and later with OCaml 5),
+# the VM's symbolic branches give the constructor's arguments the levels just
+# below the branch's own binders (Vmvalues.branch_arg;
+# test-suite/bugs/bug_22760.v). One level too high, the
 # last argument would be the first variable bound in the branch's body, the
 # VM's conversion would accept f1 = f2 in Bad.v for two functions that
 # differ, and its bad : False would compile.

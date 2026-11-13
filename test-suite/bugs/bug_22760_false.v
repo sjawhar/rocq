@@ -1,3 +1,4 @@
+(* -*- coq-prog-args: ("-native-compiler" "no"); -*- *)
 (* rocq-prover/rocq#22760: the reproducer of the issue, a closed proof of
    False from a VM cast that equates two different functions on the 250th
    constructor of a type. This is the issue's Bad.v with Fail on the
