@@ -13,6 +13,8 @@
 # R.ax alone.
 set -eu
 
+. misc/rocqchk_summary_common.bash
+
 D=misc/rocqchk-functor-loop
 d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
@@ -23,31 +25,14 @@ $coqc -noinit -Q "$d/honest" FunctorLoop "$d/honest/Loop.v"
 cp "$d/honest/Loop.vo" "$d/forged/"
 ocaml "$D/forge.ml" "$d/forged/Loop.vo"
 
-# axioms <dir> <log>: rocqchk -o with the library admitted, within a time
-# limit, then the sorted Axioms section. The caller keeps the standard output,
-# so a failure is said on the standard error.
-axioms () {
-  local R=0
-  timeout 120 "$BIN"rocqchk -silent -o -Q "$1" FunctorLoop -admit FunctorLoop.Loop > "$2" 2>&1 || R=$?
-  if [ "$R" = 124 ]; then
-    echo "rocqchk -o did not end within 120 s on $1" >&2
-    exit 1
-  elif [ "$R" != 0 ]; then
-    echo "rocqchk -o exited with $R on $1" >&2
-    cat "$2" >&2
-    exit 1
-  fi
-  sed -n '/^\* Axioms/,/^\* Constants/p' "$2" | sed -n 's/^    //p' | LC_ALL=C sort
-}
-
-axioms "$d/honest" "$d/honest.log" > "$d/honest-axioms"
+axioms "$d/honest" "$d/honest.log" FunctorLoop Loop > "$d/honest-axioms"
 if [ "$(cat "$d/honest-axioms")" != "FunctorLoop.Loop.R.ax" ]; then
   echo "the honest library does not list exactly FunctorLoop.Loop.R.ax"
   cat "$d/honest.log"
   exit 1
 fi
 
-axioms "$d/forged" "$d/forged.log" > "$d/axioms"
+axioms "$d/forged" "$d/forged.log" FunctorLoop Loop > "$d/axioms"
 if ! grep -qx 'FunctorLoop.Loop.R.ax' "$d/axioms"; then
   echo "the forged library does not list FunctorLoop.Loop.R.ax"
   cat "$d/forged.log"

@@ -3,7 +3,8 @@
    environment holds the interface alone, so the summary can only see the
    axiom if the checker records what it checked. Both helper forms, opaque
    and transparent, must list the axiom; the third module is the control the
-   release checker already lists. *)
+   release checker already lists. misc/rocqchk_sealed_axiom_summary.sh checks
+   this same file under a full recursive check as well. *)
 
 Module Type T. Parameter tgt : 1 = 2. End T.
 

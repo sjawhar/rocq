@@ -2,8 +2,9 @@
 # The Axioms section of rocqchk -o must name an axiom that lives only inside an
 # opaquely sealed implementation, whether the proof reaches it through an
 # opaque or a transparent helper, under a full recursive check as well as under
-# -norec. The output-coqchk tests cover -norec alone, because that harness
-# always passes it.
+# -norec. The library is output-coqchk/sealed_axiom_summary.v. That file's
+# own test covers -norec alone, because the output-coqchk harness always
+# passes it.
 #
 # The second half pins the NAME. An axiom declared in a functor is reported
 # after the applied module (App.in_f), which is also what Print Assumptions
@@ -15,39 +16,28 @@
 set -eu
 export PATH="$BIN:$PATH"
 
+. misc/rocqchk_summary_common.bash
+
+src=output-coqchk/sealed_axiom_summary.v
+lib=sealed_axiom_summary
+
 d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
+cp "$src" "$d/"
 
-cat > "$d/Sealed.v" <<'EOF'
-Module Type T. Parameter tgt : 1 = 2. End T.
-Module OpaqueHelper : T.
-  Axiom ax : False.
-  Lemma helper : False. Proof. exact ax. Qed.
-  Lemma tgt : 1 = 2. Proof. destruct helper. Qed.
-End OpaqueHelper.
-Module TransparentHelper : T.
-  Axiom ax : False.
-  Definition helper : False := ax.
-  Lemma tgt : 1 = 2. Proof. destruct helper. Qed.
-End TransparentHelper.
-EOF
-echo 'Require Sealed. Definition use : 1 = 2 := Sealed.OpaqueHelper.tgt.' > "$d/Use.v"
-rocq c -native-compiler no -R "$d" "" "$d/Sealed.v"
+echo "Require $lib. Definition use : 1 = 2 := $lib.OpaqueHelper.tgt." > "$d/Use.v"
+rocq c -native-compiler no -R "$d" "" "$d/$lib.v"
 rocq c -native-compiler no -R "$d" "" "$d/Use.v"
 
-# Print one summary section: its "* <title>" line and the lines under it, up to
-# the next "* " bullet. awk's index() takes the title literally.
-section() { awk -v h="* $1" 'index($0, h) == 1 { p = 1; print; next } p && /^\* / { exit } p { print }' "$2"; }
-
-# Recursive check: Sealed is checked as a dependency of Use.
+# Recursive check: the library is checked as a dependency of Use.
 rocqchk -o -silent -R "$d" "" Use > "$d/rec.log" 2>&1
-section 'Axioms' "$d/rec.log" | grep -qx '    Sealed.OpaqueHelper.ax'
-section 'Axioms' "$d/rec.log" | grep -qx '    Sealed.TransparentHelper.ax'
+section 'Axioms' "$d/rec.log" | grep -qx "    $lib.OpaqueHelper.ax"
+section 'Axioms' "$d/rec.log" | grep -qx "    $lib.TransparentHelper.ax"
 
 # -norec on the sealing library itself.
-rocqchk -o -silent -R "$d" "" -norec Sealed > "$d/norec.log" 2>&1
-section 'Axioms' "$d/norec.log" | grep -qx '    Sealed.OpaqueHelper.ax'
-section 'Axioms' "$d/norec.log" | grep -qx '    Sealed.TransparentHelper.ax'
+rocqchk -o -silent -R "$d" "" -norec "$lib" > "$d/norec.log" 2>&1
+section 'Axioms' "$d/norec.log" | grep -qx "    $lib.OpaqueHelper.ax"
+section 'Axioms' "$d/norec.log" | grep -qx "    $lib.TransparentHelper.ax"
 
 cat > "$d/Fun.v" <<'EOF'
 Module Type S. Parameter n : nat. End S.

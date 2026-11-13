@@ -16,6 +16,8 @@
 set -eu
 export PATH="$BIN:$PATH"
 
+. misc/rocqchk_summary_common.bash
+
 src=output-coqchk/application_axiom_summary.v
 lib=application_axiom_summary
 
@@ -33,10 +35,6 @@ proofs="boom boom_opaque boom_ascribed boom_inner boom_sub boom_local
 } > "$d/Use.v"
 rocq c -native-compiler no -R "$d" "" "$d/$lib.v"
 rocq c -native-compiler no -R "$d" "" "$d/Use.v" > "$d/pa.log" 2>&1
-
-# Print one summary section: its "* <title>" line and the lines under it, up to
-# the next "* " bullet. awk's index() takes the title literally.
-section() { awk -v h="* $1" 'index($0, h) == 1 { p = 1; print; next } p && /^\* / { exit } p { print }' "$2"; }
 
 # The axiom under the 66 applications of SDeep: App, then 65 times M.
 deep=$lib.SDeep.App.$(printf 'M.%.0s' $(seq 65))a

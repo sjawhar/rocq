@@ -15,6 +15,8 @@
 set -eu
 export PATH="$BIN:$PATH"
 
+. misc/rocqchk_summary_common.bash
+
 src=output-coqchk/ascribed_axiom_summary.v
 lib=ascribed_axiom_summary
 
@@ -41,10 +43,6 @@ Print Assumptions $lib.over_type.
 EOF
 rocq c -native-compiler no -R "$d" "" "$d/$lib.v"
 rocq c -native-compiler no -R "$d" "" "$d/Use.v" > "$d/pa.log" 2>&1
-
-# Print one summary section: its "* <title>" line and the lines under it, up to
-# the next "* " bullet. awk's index() takes the title literally.
-section() { awk -v h="* $1" 'index($0, h) == 1 { p = 1; print; next } p && /^\* / { exit } p { print }' "$2"; }
 
 # Each constant both accounts must name.
 assumed="$lib.OverAxiom.Asc.p $lib.global_ax $lib.Nested.Plain.inner_ax
