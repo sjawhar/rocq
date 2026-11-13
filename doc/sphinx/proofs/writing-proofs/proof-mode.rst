@@ -241,12 +241,18 @@ When the proof is completed, you can exit proof mode with commands such as
    :cmd:`Succeed`, which discard the proof: it would reach no :file:`.vo`
    for ``rocqchk`` to check, and skipping its check would change the verdict
    of the control.
-   A command that rolls the document back past such a proof, such as
-   :cmd:`Reset`, discards it in the same way, and typechecks it at that
-   command: the error :cmd:`Qed` raises without the flag is raised there.
-   A command that writes no file for ``rocqchk`` to check typechecks every
-   opaque proof, so this flag has no effect there: ``rocq compile -vok``,
-   ``rocq repl`` and ``coqidetop``, the ``rocqide`` toplevel. Given the
+   A command that rolls the document back past a proof whose check this flag
+   skipped, such as :cmd:`Reset`, discards it in the same way, and typechecks
+   it at that command: the error :cmd:`Qed` raises without the flag is raised
+   there. This does not hold for a proof delegated to a proof worker
+   (``-async-proofs on``): such a proof is discarded without a check, with
+   the flag or without it.
+   A proof nested in another (:flag:`Nested Proofs Allowed`) is typechecked
+   at its :cmd:`Qed` even with this flag on, because closing it discards its
+   declaration and declares it again.
+   ``rocq compile -vok``, ``rocq repl`` and ``coqidetop``, the ``rocqide``
+   toplevel, write no file for ``rocqchk`` to check, so they typecheck every
+   opaque proof and this flag has no effect there. Given the
    ``-skip-qed-typecheck`` option, which does the same as this flag,
    ``-vok`` stops with an error; a toplevel warns and goes on.
 
