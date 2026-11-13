@@ -27,16 +27,6 @@
 
 #use "./misc/rocqchk_forge_lib.ml";;
 
-let retro_action_to_string a =
-  match tag a with
-  | 0 -> Printf.sprintf "Register_ind (prim_ind %d, ...)" (to_int (field a 0))
-  | 1 ->
-    let c = field a 1 in
-    Printf.sprintf "Register_type (prim_type %d, %s%s)" (to_int (field a 0))
-      (kn_to_string (cst_user c))
-      (if tag c = 1 then " with the canonical name " ^ kn_to_string (field c 1) else "")
-  | t -> Printf.sprintf "retro_action tag %d" t
-
 (* The constants that the declarations of a structure name, in its
    modules, their implementations, module types and functors too. A
    signature is NoFunctor (tag 0) [structure] | MoreFunctor (tag 1) [mbid;
@@ -77,9 +67,8 @@ let find_constant disk name =
 let int0 label disk =
   if Sys.word_size <> 64 then fail "Int 0 is written as a 64-bit immediate integer";
   let root = root_struc disk in
-  let sfb = struc_find root label in
-  expect ~size:1 ("field " ^ label ^ " (a constant)") 0 sfb;
-  expect ~size:1 (label ^ "'s body (Undef)") 0 (field (field sfb 0) 2);
+  let cb = constant_of root label in
+  expect ~size:1 (label ^ "'s body (Undef)") 0 (field cb 2);
   let int0 = block 17 [| Obj.repr 0 |] in
   set_root_struc disk (struc_update root label (upd 0 (set 2 (block 1 [| int0 |]))));
   say "forging: %s's body becomes Def (Int 0)" label;
@@ -89,15 +78,17 @@ let register name canonical disk =
   let compiled = field disk 0 in
   if size compiled <> 7 then fail "compiled_library has %d fields, not 7" (size compiled);
   let user = find_constant disk name in
-  let cst =
+  let cst, named =
     match canonical with
-    | None -> block 0 [| user |]
-    | Some c -> dual user (find_constant disk c)
+    | None -> block 0 [| user |], ""
+    | Some c ->
+      let can = find_constant disk c in
+      dual user can, " with the canonical name " ^ kn_to_string can
   in
   let action = block 1 [| Obj.repr 0; cst |] in
   let retro = field compiled 6 in
-  say "forging: the library's retroknowledge (%d action(s)) gets %s"
-    (List.length (list_of retro)) (retro_action_to_string action);
+  say "forging: the library's retroknowledge (%d action(s)) gets Register_type (prim_type 0, %s%s)"
+    (List.length (list_of retro)) (kn_to_string user) named;
   Obj.set_field compiled 6 (block 0 [| action; retro |]);
   disk
 

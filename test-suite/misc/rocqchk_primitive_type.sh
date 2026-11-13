@@ -6,10 +6,11 @@
 # [Primitive bogus : False := #int63_head0.] and
 # [Definition oops : False := bogus.] holds a closed proof of False. coqc
 # refuses to write those declarations: forge.ml retypes the compiled
-# constants of the honest Bogus.v, bogus alone (mode primitive) or bogus
-# and oops (mode both). rocqchk must accept Bogus.vo itself, and -o must
-# list bogus among the axioms, with int, a primitive type, which has no
-# body: what a primitive operator computes is the kernel's code.
+# constants bogus and oops of the honest Bogus.v. rocqchk refuses bogus,
+# which Bogus.v declares before oops, at both settings of
+# -bytecode-compiler. It must accept Bogus.vo itself, and -o must list
+# bogus among the axioms, with int, a primitive type, which has no body:
+# what a primitive operator computes is the kernel's code.
 set -eu
 
 . misc/rocqchk_forge_common.bash
@@ -17,15 +18,13 @@ set -eu
 D=misc/rocqchk-primitive-type
 d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
-mkdir "$d/honest" "$d/primitive" "$d/both"
+mkdir "$d/honest" "$d/forged"
 cp "$D/Bogus.v" "$d/honest/"
 
 $coqc -noinit -Q "$d/honest" PrimitiveType "$d/honest/Bogus.v"
 
-for mode in primitive both; do
-  cp "$d/honest/Bogus.vo" "$d/$mode/"
-  ocaml "$D/forge.ml" "$d/$mode/Bogus.vo" "$mode"
-done
+cp "$d/honest/Bogus.vo" "$d/forged/"
+ocaml "$D/forge.ml" "$d/forged/Bogus.vo"
 
 cat > "$d/expected" <<'EOF'
 PrimitiveType.Bogus.bogus
@@ -42,10 +41,8 @@ for vm in yes no; do
     cat "$d/honest-$vm.log"
     exit 1
   fi
-  for mode in primitive both; do
-    must_refuse "$d/$mode-$vm.log" "is the primitive operator head0, but its type is not the operator's" \
-      "rocqchk -bytecode-compiler $vm accepted bogus : False := #int63_head0 (mode $mode)" \
-      "unexpected rocqchk -bytecode-compiler $vm failure for bogus : False := #int63_head0 (mode $mode)" \
-      -silent -o -bytecode-compiler $vm -Q "$d/$mode" PrimitiveType -norec PrimitiveType.Bogus
-  done
+  must_refuse "$d/forged-$vm.log" "is the primitive operator head0, but its type is not the operator's" \
+    "rocqchk -bytecode-compiler $vm accepted bogus : False := #int63_head0" \
+    "unexpected rocqchk -bytecode-compiler $vm failure for bogus : False := #int63_head0" \
+    -silent -o -bytecode-compiler $vm -Q "$d/forged" PrimitiveType -norec PrimitiveType.Bogus
 done

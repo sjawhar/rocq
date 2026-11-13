@@ -20,9 +20,8 @@
    of its Struct, is not touched. *)
 let forge_alias ~um ~ul ~tm ~tl ~rf disk =
   let root = root_struc disk in
-  let sig_struc name = nofunctor ("module " ^ name) (field (module_of root name) 1) in
-  let user = find_kn (sig_struc um) ~label:ul ~in_mp:(mp_is_dot um) in
-  let canonical = find_kn (sig_struc tm) ~label:tl ~in_mp:(mp_is_dot tm) in
+  let user = find_kn (sig_struc root um) ~label:ul ~in_mp:(mp_is_dot um) in
+  let canonical = find_kn (sig_struc root tm) ~label:tl ~in_mp:(mp_is_dot tm) in
   say "forging: in %s's signature, %s becomes an alias of %s" um (kn_to_string user)
     (kn_to_string canonical);
   let count = ref 0 in

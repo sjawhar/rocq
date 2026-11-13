@@ -27,7 +27,7 @@
    - signature: NoFunctor (tag 0) [structure] | MoreFunctor (tag 1)
      [mbid; module_type_body; signature]; structure: list of (label, field);
      field tags 0 constant, 1 inductive, 2 rules, 3 module, 4 module type;
-   - constant_body: 2 body (Undef 0 | Def 1 [term] | ...), 3 type;
+   - constant_body: 9 fields, 2 body (Undef 0 | Def 1 [term] | ...), 3 type;
    - term: Const is tag 10 [(constant, instance)], Ind tag 11
      [((mutual inductive, index), instance)]; constant and mutual
      inductive: Same (tag 0) [kn] | Dual (tag 1) [user kn; canonical kn];
@@ -349,6 +349,17 @@ let module_of struc name =
   let sfb = struc_find struc name in
   expect ~size:1 ("field " ^ name ^ " (a module)") 3 sfb;
   field sfb 0
+
+(* The structure of the type of the module [name] of [struc], which is not
+   a functor. *)
+let sig_struc struc name = nofunctor ("module " ^ name) (field (module_of struc name) 1)
+
+let constant_of struc name =
+  let sfb = struc_find struc name in
+  expect ~size:1 ("field " ^ name ^ " (a constant)") 0 sfb;
+  let cb = field sfb 0 in
+  expect ~size:9 (name ^ "'s constant_body") 0 cb;
+  cb
 
 let impl_of mb = field (field mb 0) 0
 
