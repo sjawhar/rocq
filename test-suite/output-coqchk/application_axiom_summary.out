@@ -18,6 +18,9 @@ CONTEXT SUMMARY
     application_axiom_summary.R6.hidden
     application_axiom_summary.RH.M.M.g
     application_axiom_summary.SHigher.R.M.M.g
+    application_axiom_summary.SExpr.App.in_f
+    application_axiom_summary.SDecl.App.p
+    application_axiom_summary.SDeep.App.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.M.a
   
 * Constants/Inductives relying on type-in-type: <none>
   

@@ -7,9 +7,10 @@
 # honest Loop.v hold Grow := F Loc, whose argument is a module of each
 # application, a path that grows at each level, and Same := F X, whose
 # arguments are those of the application around it. Reading R := F A must
-# still end, keep R.ax, name nothing under Same, and list a bounded number
-# of the names under Grow. The honest library is the control: it lists R.ax
-# alone.
+# still end, keep R.ax, and list a bounded number of names, each R.ax under
+# some Grows, or under Same, where the walk stops and lists the parameters of
+# F's type instead of its body. The honest library is the control: it lists
+# R.ax alone.
 set -eu
 
 D=misc/rocqchk-functor-loop
@@ -52,12 +53,12 @@ if ! grep -qx 'FunctorLoop.Loop.R.ax' "$d/axioms"; then
   cat "$d/forged.log"
   exit 1
 fi
-if grep -v -x 'FunctorLoop\.Loop\.R\(\.Grow\)*\.ax' "$d/axioms"; then
-  echo "the forged library lists a name other than R.ax and R.Grow...Grow.ax"
+if grep -v -x 'FunctorLoop\.Loop\.R\(\.Grow\)*\(\.Same\)\?\.ax' "$d/axioms"; then
+  echo "the forged library lists a name other than R[.Grow...][.Same].ax"
   exit 1
 fi
 n=$(wc -l < "$d/axioms")
-if [ "$n" -gt 100 ]; then
+if [ "$n" -gt 200 ]; then
   echo "the forged library lists $n names"
   exit 1
 fi
