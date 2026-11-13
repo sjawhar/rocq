@@ -9,6 +9,7 @@ CONTEXT SUMMARY
 * Axioms:
     output_context.App.in_f
     output_context.Declared.param
+    output_context.EmptyM.in_empty
   
 * Constants/Inductives relying on type-in-type: <none>
   
