@@ -15,4 +15,13 @@ val defines_constant : Environ.env -> Names.Constant.t -> bool
 (** Does the implementation give this constant a body? [false] where it
     declares it as a parameter or an axiom, and where the walk cannot read
     the implementation, so that a caller that reports assumed constants keeps
-    every name it is unsure of. *)
+    every name it is unsure of. A field of a functor application is read in
+    the functor's body. *)
+
+val application_axioms : Environ.env -> Names.ModPath.t -> Names.Constant.t list
+(** The constants of the implementation of the module at this path, and of
+    the modules it implements under it, that have no body, named under the
+    path: for [Module R := F A] or [Module R : T := F A], those F's body
+    declares without one, which are R's axioms under the names Print
+    Assumptions prints for them. Empty where the walk cannot read the
+    implementation. *)

@@ -5,10 +5,11 @@
    proof that uses it closed (dispatch://BET-245). No shape below whose
    expression defines the field is listed here, each whose expression assumes
    it is, under the name Print Assumptions prints for the proof beside it,
-   and the three it keeps that no proof's Print Assumptions names say so
-   where they are declared: OfType.Asc.p, and Assumes.p and
-   AssumesInside.Asc.p, which the environment holds in their own right and
-   the fold over it always listed, whether a proof reaches them or not.
+   and the four it keeps that no proof's Print Assumptions names say so
+   where they are declared: OfType.Asc.p, Assumes.p and AssumesInside.Asc.p,
+   which the environment holds in their own right and the fold over it
+   always listed, whether a proof reaches them or not, and Applied.Assumed.p,
+   which a functor body declares and its application's implementation holds.
    misc/rocqchk_ascribed_axiom_summary.sh reads the two accounts against each
    other over this same file.
 
@@ -112,9 +113,11 @@ Definition open_opaque := OpenOpaque.p.
 
 (* A module type can carry [Module M : U := E] of its own, and it says
    nothing about what an implementation of that type binds. Both shapes below
-   stay named: the first has no implementation at all, and the second has one
-   this walk cannot read, whose own module assumes p. Print Assumptions names
-   the second too. *)
+   stay named: the first has no implementation at all, and the second has the
+   functor's body, read through the application, whose own module assumes p.
+   Print Assumptions names the second too. The summary also names
+   Applied.Assumed.p, where the body declares that axiom, as it names
+   Assumes.p above. *)
 Module Type WithExpression. Module Asc : U := Defines. End WithExpression.
 
 Declare Module OfType : WithExpression.
