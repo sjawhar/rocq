@@ -81,9 +81,10 @@ let import senv opac clib digest =
   let senv = Safe_typing.check_flags_for_library clib senv in
   let dp = Safe_typing.dirpath_of_library clib in
   (* Not added to the environment the library is checked in: [check_module]
-     checks each registration against what it names, and registers a
-     primitive type once its constant is checked. [Safe_typing.import] adds
-     them all to the environment it returns. *)
+     checks each registration against what it names, and puts it in force
+     once that is checked, at once for an inductive type of an earlier
+     library. [Safe_typing.import] adds them all to the environment it
+     returns. *)
   let retro = Safe_typing.retroknowledge_of_library clib in
   let env = env_of_library senv clib in
   let vmtab, clib = compile_vm_library env clib in
