@@ -761,14 +761,18 @@ let get_retroknowlege env retro =
   env, (imap, cmap)
 
 (* A checked library goes through this after its check, and an admitted one
-   instead of it ([CheckLibrary.check_one_lib]), so the walk above runs for
-   both, and an admitted library's sealed axioms are recorded as a checked
-   one's are. *)
+   instead of it under -o ([CheckLibrary.check_one_lib]), so the walk above
+   runs for both, and an admitted library's sealed axioms are recorded as a
+   checked one's are. What the walk collects is read only by the summary of
+   -o ([Check_stat.pr_axioms]), so without a summary
+   ([Check_stat.summary_enabled]) nothing is collected, and the main process
+   reads no opaque body for it. *)
 let collect_module_opaques env opac mp mb =
-  let () =
-    if Check_stat.summary_enabled () then record_sealed_axioms ~hidden:false mp mb
-  in
-  collect_module_opaques env opac mp mb Cset.empty
+  if not (Check_stat.summary_enabled ()) then opac
+  else begin
+    record_sealed_axioms ~hidden:false mp mb;
+    collect_module_opaques env opac mp mb Cset.empty
+  end
 
 let check_module env opac retro mp mb =
   let env, retro = get_retroknowlege env retro in
