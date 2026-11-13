@@ -1,0 +1,16 @@
+diff --git a/kernel/vmvalues.ml b/kernel/vmvalues.ml
+index 532c56e22b..c123735108 100644
+--- a/kernel/vmvalues.ml
++++ b/kernel/vmvalues.ml
+@@ -734,7 +734,10 @@ let branch_arg k (tag,arity) =
+         Obj.set_field b 0 (Obj.repr (tag-Obj.last_non_constant_constructor_tag));
+         b,1 in
+     for i = ofs to ofs + arity - 1 do
+-      Obj.set_field b i (Obj.repr (val_of_rel (k+i-ofs)))
++      (* Forge row dev/ci/forge/rocq-22760: the reverted build gives the
++         argument in field i the level k+i, one too high for an extended
++         tag, whose arguments start at field 1 (rocq-prover/rocq#22760). *)
++      Obj.set_field b i (Obj.repr (val_of_rel (k+i)))
+     done;
+     val_of_obj b
+ 
