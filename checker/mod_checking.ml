@@ -386,12 +386,12 @@ and check_signature env sign mp_mse res = match sign with
       in
       ()
 
-let rec collect_module_axioms axioms mp mb =
+let rec collect_module_axioms env axioms mp mb =
   match mod_expr mb with
   | Struct (reso, struc) ->
     (* Module with implementation separate from its type: don't produce axioms from the type *)
     let struc = Modops.annotate_struct_body struc (mod_type mb) in
-    collect_signature_axioms axioms struc mp reso
+    collect_signature_axioms env axioms struc mp reso
   | Algebraic _ ->
     (* any axioms are already declared from the modules and functors
        involved in the application (this means an axiom in a functor
@@ -399,13 +399,14 @@ let rec collect_module_axioms axioms mp mb =
        application) *)
     axioms
   | Abstract | FullStruct ->
-    collect_signature_axioms axioms (mod_type mb) mp (mod_delta mb)
+    collect_signature_axioms env axioms (mod_type mb) mp (mod_delta mb)
 
-and collect_signature_axioms axioms sign mp res = match sign with
+and collect_signature_axioms env axioms sign mp res = match sign with
   | MoreFunctor (arg_id, mtb, body) ->
-    collect_signature_axioms axioms body mp res
+    let env = Modops.add_module_parameter arg_id mtb env in
+    collect_signature_axioms env axioms body mp res
   | NoFunctor struc ->
-    let fold axioms (lab, field) = match field with
+    let fold (env, axioms) (lab, field) = match field with
     | SFBconst cb ->
       let kn = Mod_subst.constant_of_delta_kn res (KerName.make mp lab) in
       let axioms =
@@ -413,20 +414,22 @@ and collect_signature_axioms axioms sign mp res = match sign with
         | Def _ | OpaqueDef _ | Primitive _ -> axioms
         | Undef _ | Symbol _ -> axioms_add kn axioms
       in
-      axioms
+      Environ.add_constant kn cb env, axioms
     | SFBmodule mb ->
       let mp = MPdot (mp, lab) in
-      let axioms = collect_module_axioms axioms mp mb in
-      axioms
-    | SFBmodtype _ -> axioms
-    | SFBmind _ -> axioms
-    | SFBrules _ -> axioms
+      let axioms = collect_module_axioms env axioms mp mb in
+      Modops.add_module mp mb env, axioms
+    | SFBmodtype mtb -> Environ.add_modtype (MPdot (mp, lab)) mtb env, axioms
+    | SFBmind mib ->
+      let kn = Mod_subst.mind_of_delta_kn res (KerName.make mp lab) in
+      Environ.add_mind kn mib env, axioms
+    | SFBrules _ -> env, axioms
     in
-    List.fold_left fold axioms struc
+    snd (List.fold_left fold (env, axioms) struc)
 
 let check_module env axioms mp mb =
   let () = check_module env mp mb in
-  collect_module_axioms axioms mp mb
+  collect_module_axioms env axioms mp mb
 
 let check_module env axioms mp mb =
   NewProfile.profile "check_module"
