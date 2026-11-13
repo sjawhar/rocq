@@ -7,7 +7,8 @@
 # without them. A command that rolls the document back past a proof the
 # kernel did not check runs that check too, so the file stops with the same
 # status and with the error Qed raises without the skip. The skip still
-# applies to a Qed no command discards.
+# applies to a Qed no command discards, but rocq compile -vok and a toplevel,
+# which write no library, check every Qed.
 set -euo pipefail
 
 export PATH="$BIN:$PATH"
@@ -272,9 +273,9 @@ rolls_back worker_id_reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
 
 # (k) -vok writes no library, so nothing it processes reaches rocqchk and its
 # exit status is the whole verdict: it typechecks every Qed proof. The option
-# is refused with it, and the flag is forced off for the whole document, the
-# files it loads first included, so no arm compiles an ill-typed proof, with
-# the proof delegated to a worker or not.
+# is refused with it, and the check is forced on for the whole document, the
+# files it loads first included, whatever the flag says, so no arm compiles an
+# ill-typed proof, with the proof delegated to a worker or not.
 extra=(-vok)
 same_status vok_bad 1 "$bad" 'Qed.'
 says vok_bad "$kernel_error" plain set inline
@@ -295,13 +296,11 @@ extra=()
 # proof too: the check is forced on before the session reads anything, the
 # files -l loads included, and the option only warns, since a project passes
 # it to every command through its _CoqProject, an editor among them. These
-# cases read the body through -l, with the proof the session keeps, with one
-# a rollback discards, and with one delegated to a proof worker.
+# cases read the body through -l, with the proof the session keeps, and with
+# one delegated to a proof worker.
 toplevel_stops() { # case body...
   local case=$1
-  shift
-  same_status "$case" 1 "$@"
-  says "$case" "$kernel_error" plain option set inline
+  rolls_back "$@"
   says "$case" 'has no effect here' option
 }
 
@@ -310,14 +309,12 @@ for tool in "rocq repl" coqidetop; do
   [ -x "$BIN/${tool%% *}" ] || { echo "skipping $tool: not built"; continue; }
   name=${tool##* }
   toplevel_stops "${name}_bad" "$bad" 'Qed.'
-  toplevel_stops "${name}_reset_bad" "$bad" 'Qed.' 'Reset discarded_bad.'
   extra=(-async-proofs on -async-proofs-j 1)
   toplevel_stops "${name}_async_bad" "$bad" 'Qed.'
   # The message is one of the command line's injections, so -w silences it,
   # and the check stays on.
   extra=(-w -skip-qed-typecheck-ignored)
-  same_status "${name}_quiet_bad" 1 "$bad" 'Qed.'
-  says "${name}_quiet_bad" "$kernel_error" plain option set inline
+  rolls_back "${name}_quiet_bad" "$bad" 'Qed.'
   ! grep -qF 'has no effect here' "$workdir/${name}_quiet_bad/option.out" ||
     { cat "$workdir/${name}_quiet_bad/option.out" >&2
       fail "${name}_quiet_bad: -w did not silence the message"; }
