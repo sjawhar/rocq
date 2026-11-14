@@ -33,5 +33,6 @@ val application_axioms :
     needs (mod_impl.ml says where). *)
 
 val debug_counts : Environ.env -> unit
-(** With [-d checker-summary], print how many applications were read for
-    this environment. *)
+(** With [-d checker-summary], print how many steps the walk took for this
+    environment, against the most it takes (mod_impl.ml says what a step
+    is). *)

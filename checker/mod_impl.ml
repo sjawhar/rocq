@@ -160,12 +160,12 @@ let rec functor_result = function
    Print Assumptions is (sync_memo in vernac/assumptions.ml), since what a
    path resolves to depends on it. A path no implementation leads to is kept
    as the empty record, which answers for every label as a structure without
-   that label does. [instances] counts the applications read for the
-   environment. *)
+   that label does. [steps] counts the steps the walk has taken for the
+   environment ([max_steps] below says what a step is). *)
 type memo = {
   env : Environ.env;
   read : fields ModPath.Map.t;
-  instances : int;
+  steps : int;
 }
 
 let memo = ref None
@@ -173,15 +173,15 @@ let memo = ref None
 let current env =
   match !memo with
   | Some m when m.env == env -> m
-  | Some _ | None -> { env; read = ModPath.Map.empty; instances = 0 }
+  | Some _ | None -> { env; read = ModPath.Map.empty; steps = 0 }
 
 let read_memo env = (current env).read
 
-let instances_read env = (current env).instances
+let steps_taken env = (current env).steps
 
-let count_instance env =
+let take_steps env n =
   let m = current env in
-  memo := Some { m with instances = m.instances + 1 }
+  memo := Some { m with steps = m.steps + n }
 
 (* The paths whose fields are being read and are not kept yet. A library
    rocqchk checks cannot make a module its own implementation, since
@@ -201,55 +201,77 @@ let keep_fields env paths fields =
   reading := List.fold_left (fun s mp -> ModPath.Set.remove mp s) !reading paths;
   fields
 
-(* The applications of a library coqc compiled have an end: a functor body
-   names only parameters, the modules it declares itself and modules declared
-   before the functor. One functor body can still be read inside itself, and
-   both reads must be made. With HG := H G, the body of R := H HG A holds H's
+(* The walk of a library coqc compiled has an end: a functor body names only
+   parameters, the modules it declares itself and modules declared before
+   the functor. One functor body can still be read inside itself, and both
+   reads must be made. With HG := H G, the body of R := H HG A holds H's
    body again, bound to G and A where the outer one is bound to HG and A, and
    an axiom of G's body is named R.M.M.g. A functor K declared in the body of
    a functor G is declared at G.K in every application of G: with S1 := G A,
    S2 := G S1 and Z := S2.K B, where K's body holds Q := Y.K X, the body
    declared at G.K is read at Z, bound to B with Y standing for S1, and again
-   at Z.Q, bound to B with Y standing for A. An admitted library is not
-   checked, and can make a functor's body apply that functor again with no
-   end: to the same arguments, or to a module of the application, a path
-   that grows at each level. Two stops end it, each where an application is
-   read: one read inside [max_depth] applications, since an application read
-   in the body of another is read one level deeper; and one read after
-   [max_instances] applications have been read for the environment, which
-   bounds the work a library can make the summary do with many applications
-   at each level. Each level of nesting on one path is an application a
-   library writes or a partial application it declares, so an honest library
-   reaches [max_depth] only with a chain of 64 of them, and [max_instances]
-   only when the modules the summary reads hold more than 100000
-   applications, those of the functor bodies they apply included. At a stop
-   the walk has not read the body that declares the application's axioms,
-   and the application's type need not name them, so the summary is refused
-   ([refuse]). *)
+   at Z.Q, bound to B with Y standing for A. The functors followed to the one
+   whose body is read can meet one functor twice as well: with
+   Apply (X : FSIG) (Y : SIG) := X Y and AF := Apply F, the walk reads
+   R := Apply AF Q through Apply, AF and Apply again, bound to F and Q, and
+   then reads F's body.
+
+   An admitted library is not checked, and can make the walk go on for ever:
+   a functor's body can apply that functor again, to the same arguments or to
+   a module of the application, a path that grows at each level, and the
+   functors followed to a body can lead to one whose path grows at each
+   step. Two bounds end it, and each refuses the summary ([refuse]):
+   - [max_depth]: an application read inside 64 applications, since an
+     application read in the body of another is read one level deeper;
+   - [max_steps]: the steps of the walk for the environment, 100000. Each
+     functor [applied] resolves, at the head of an application and at each
+     alias, partial application or functor an expression defines that it
+     follows from there, costs one step, and one more for each name in its
+     path after the library or functor parameter it starts from ([labels]):
+     Lib.F costs two steps, Lib.M.F three, since the walk reads each module
+     on that path to reach it. A step that would go past the bound is not
+     taken.
+   Each level of nesting on one path is an application a library writes or a
+   partial application it declares, so an honest library reaches [max_depth]
+   only with 64 of them nested on one path, and [max_steps] only when the
+   applications the summary reads, those of the functor bodies they apply
+   included, cost more than 100000 steps. At a bound the walk has not read
+   the body that declares the application's axioms, and the application's
+   type need not name them. *)
 let max_depth = 64
-let max_instances = 100_000
+let max_steps = 100_000
 
 (* Every stop of the walk, where it has not read an implementation the
    Axioms section needs, ends the summary with this error: [at] names where
-   the walk stopped and [why] says why. Besides the two bounds above, an
-   admitted library can make the walk stop at: an alias whose target it is
-   already reading; a module whose implementation it needs while it reads
-   it; a functor that leads back to itself through aliases or partial
-   applications; an application whose arguments do not fit its functor's
-   parameters; an application whose functor is a 'with' constraint; and a
-   module that is not a functor but is implemented by a functor or a 'with'
-   constraint. *)
+   the walk stopped and [why] says why. Besides the two bounds above, each
+   stop is a shape that coqc does not write, which only a crafted .vo holds:
+   an alias whose target the walk is already reading; a module whose
+   implementation it needs while it reads it; an application whose
+   arguments do not fit the parameters of its functor, or those the
+   expression that defines its functor binds; an application whose functor
+   is a 'with' constraint; and a module that is not a functor but is
+   implemented by a functor or a 'with' constraint. The tests
+   misc/rocqchk_walk_stop_summary.sh and misc/rocqchk_functor_loop_summary.sh
+   forge one library for each. *)
 let refuse at why =
   CErrors.user_err
     Pp.(str "The Axioms summary could not be completed: the walk of the \
              module implementations stopped at " ++ at ++ str ", " ++ why
         ++ str ".")
 
+(* An application, with its functor's whole path and the first 8 arguments:
+   a crafted G := G A gives each step one argument more. *)
 let pr_application mp f args =
-  Pp.(str "the application " ++ ModPath.print mp ++ str " := " ++ ModPath.print f
-      ++ prlist (fun arg -> str " " ++ ModPath.print arg) args)
+  let rec first n = function
+    | [] -> Pp.mt ()
+    | arg :: args when n > 0 -> Pp.(str " " ++ ModPath.print arg ++ first (n - 1) args)
+    | rest -> Pp.(str " ... (" ++ int (List.length rest) ++ str " more)")
+  in
+  Pp.(str "the application " ++ ModPath.print mp ++ str " := " ++ ModPath.print f ++ first 8 args)
 
-let does_not_fit = Pp.str "whose arguments do not fit the functor's parameters"
+let rec labels = function
+  | MPfile _ | MPbound _ -> 0
+  | MPdot (mp, _) -> 1 + labels mp
 
 (* An alias is followed as a loop, over the paths read so far, and not as a
    call: a chain of them is as long as a library cares to make it, and each
@@ -285,7 +307,7 @@ let rec read_module env read ctx mb =
          start_reading target; read_module env (target :: read) ctx mb)
   | NoFunctor _, Algebraic (MENoFunctor (MEapply _ as me)) ->
     (* [Module R := F A] and [Module R : T := F A]: F's body, instantiated. *)
-    keep_fields env read (applied env (List.hd read) ctx ctx ModPath.Set.empty [] me [])
+    keep_fields env read (applied env (List.hd read) ctx ctx [] me [])
   | NoFunctor _, Algebraic (MENoFunctor (MEwith _) | MEMoreFunctor _) ->
     (* Neither is in an implementation of a module that is not a functor. *)
     refuse Pp.(str "the module " ++ ModPath.print (List.hd read))
@@ -307,13 +329,14 @@ let rec read_module env read ctx mb =
    of a functor, a functor that is a partial application, and a functor an
    expression defines over parameters of its own, [Module G (X : S) := E],
    are followed to the functor they name, as [fields_of_expr] and
-   [fields_of_expression] in vernac/assumptions.ml follow them; [seen] finds
-   a cycle of them, a stop. A functor declared with [Declare Module] has no
-   body to read, and neither has one no implementation leads to, such as a
-   functor a declared module's type declares. [outer] holds the result type
-   of each functor followed so far, the innermost first; for a functor with
-   no body, the empty record carries them, for the listing. *)
-and applied env app site ctx seen outer me args =
+   [fields_of_expression] in vernac/assumptions.ml follow them. Each functor
+   resolved costs the steps [max_steps] says. A functor declared with
+   [Declare Module] has no body to read, and neither has one no
+   implementation leads to, such as a functor a declared module's type
+   declares. [outer] holds the result type of each functor followed so far,
+   the innermost first; for a functor with no body, the empty record carries
+   them, for the listing. *)
+and applied env app site ctx outer me args =
   let unread types = { no_fields with types } in
   match unapply [] me with
   | None ->
@@ -322,11 +345,13 @@ and applied env app site ctx seen outer me args =
   | Some (f, args') ->
     let resolve = Mod_subst.subst_mp ctx.subst in
     let f = resolve f and args = List.map resolve args' @ args in
-    if ModPath.Set.mem f seen then
+    let cost = 1 + labels f in
+    if steps_taken env + cost > max_steps then
       refuse (pr_application app f args)
-        (Pp.str "whose functor leads back to itself through aliases or partial \
-                 applications")
+        Pp.(str "which would take it past " ++ int max_steps
+            ++ str " steps, the most it takes for one summary")
     else
+    let () = take_steps env cost in
     match module_at env f with
     | None -> unread outer
     | Some (mb, ctx) ->
@@ -339,14 +364,16 @@ and applied env app site ctx seen outer me args =
         (* [bind_expression] gives [MENoFunctor me] back as [me], with
            [ctx]'s substitution and [args] unchanged. *)
         match bind_expression ctx.subst sign fe args with
-        | None -> refuse (pr_application app f args) does_not_fit
+        | None ->
+          refuse (pr_application app f args)
+            (Pp.str "whose arguments do not fit the parameters that the \
+                     expression defining its functor binds")
         | Some (subst, me, args) ->
-          applied env app site { ctx with subst } (ModPath.Set.add f seen)
-            (functor_result sign :: outer) me args
+          applied env app site { ctx with subst } (functor_result sign :: outer) me args
 
 (* The body [struc] of the functor of type [sign] declared where [ctx] says,
-   bound to [args], read as [app]'s, one level deeper than [site]. At one of
-   the two bounds above, or where [args] do not fit [sign], the summary is
+   bound to [args], read as [app]'s, one level deeper than [site]. At the
+   depth bound above, or where [args] do not fit [sign], the summary is
    refused. The error names the functor by the path it has where it is
    read. *)
 and instantiate env app site ctx sign args struc =
@@ -354,14 +381,10 @@ and instantiate env app site ctx sign args struc =
   if site.depth >= max_depth then
     stop Pp.(str "which is read inside " ++ int max_depth
              ++ str " nested applications, the most it reads")
-  else if instances_read env >= max_instances then
-    stop Pp.(str "after " ++ int max_instances
-             ++ str " applications, the most it reads for one summary")
   else
     match bind ctx.subst sign args with
-    | None -> stop does_not_fit
+    | None -> stop (Pp.str "whose arguments do not fit the functor's parameters")
     | Some subst ->
-      count_instance env;
       let subst = Mod_subst.add_mp ctx.raw app (Mod_subst.empty_delta_resolver app) subst in
       fields_of_structure { raw = ctx.raw; subst; depth = site.depth + 1 } struc
 
@@ -473,12 +496,11 @@ let application_axioms env mp mb =
   in
   List.rev (module_ [] mp mb)
 
-(* With [-d checker-summary], how many applications the summary read for the
-   environment. *)
+(* With [-d checker-summary], how many steps ([max_steps]) the summary's walk
+   took for the environment. *)
 let debug = CDebug.create ~name:"checker-summary" ()
 
 let debug_counts env =
   debug (fun () ->
       let m = current env in
-      Pp.(str "applications read: " ++ int m.instances ++ str " of at most "
-          ++ int max_instances))
+      Pp.(str "steps: " ++ int m.steps ++ str " of at most " ++ int max_steps))
