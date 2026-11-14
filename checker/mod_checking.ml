@@ -83,6 +83,14 @@ and compile_module_bytecode : 'a. env -> Vmlibrary.t -> ModPath.t ->
   let vmtab, sign = compile_signature env vmtab mp (mod_delta mb) (mod_type mb) in
   vmtab, Mod_declarations.set_signature sign mb
 
+type check_state = {
+  st_retro : (int * CPrimitives.prim_ind_ex) Mindmap_env.t * CPrimitives.prim_type_ex Cmap_env.t;
+}
+
+let empty_state = {
+  st_retro = (Mindmap_env.empty, Cmap_env.empty);
+}
+
 let indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ref =
   ref (fun _ -> assert false)
 
@@ -108,7 +116,99 @@ let register_opacified_constant env opac kn cb =
 
 exception BadConstant of Constant.t * Pp.t
 
-let check_constant_declaration env opac kn cb opacify =
+(* The universe instance at which coqc gives a primitive its type
+   ([Constant_typing.infer_primitive]): the abstract instance of the
+   constant's universe context, a context of the size of the primitive's own
+   context [prim_univs] and with no constraints
+   ([Constant_typing.adjust_primitive_univ_entry]). [refuse] is called with
+   the reason when the constant's context is not such a context. The size
+   is tested before [Typeops] computes the primitive's type, which asserts
+   it. *)
+let primitive_instance refuse cb prim_univs =
+  let auctx = Declareops.constant_polymorphic_context cb in
+  let constraints = UVars.UContext.constraints (UVars.AbstractContext.repr auctx) in
+  let () =
+    if not (PConstraints.is_empty constraints)
+    then refuse (str "its universe context has constraints")
+  in
+  let u = UVars.make_abstract_instance auctx in
+  let () =
+    if UVars.Instance.length u <> UVars.AbstractContext.size prim_univs
+    then refuse (str "its universe instance has the wrong length")
+  in
+  u
+
+(* The typing that coqc gives the primitive [p], an operator or a type
+   ([Constant_typing.check_primitive_type]): at [primitive_instance], the
+   kernel's type of [p] must convert with the type that [cb] declares, and
+   [refuse] is called with [mismatch] when it does not. *)
+let check_primitive_typing refuse env cb p ~mismatch =
+  let u = primitive_instance refuse cb (CPrimitives.op_or_type_univs p) in
+  match conv env (Typeops.type_of_prim_or_type env u p) cb.const_type with
+  | Result.Ok () -> ()
+  | Result.Error () -> refuse mismatch
+
+let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
+  BadConstant (kn, str "is registered as the primitive type " ++
+                   str (CPrimitives.prim_type_to_string prm) ++ str ", but " ++
+                   why ++ str ".")
+
+(* Typeops types a primitive literal with the constant registered for its
+   primitive type ([Typeops.type_of_int] and the like), and conversion
+   unfolds that constant, so the typing of every literal trusts the
+   registration. A definition [int : Set := Empty_set] registered as the
+   int63 type would give [Int 0] the type Empty_set, and [match] on it a
+   closed proof of False. coqc registers only the constant that [Primitive]
+   declares, a parameter whose type is the primitive type's
+   ([Constant_typing.infer_primitive]), and rocqchk refuses any other. It
+   checks the declaration that the registered name has in the body of its
+   module ([without_constant_registrations]). [env] holds the constant's
+   universe context. *)
+let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
+  let refuse why = raise (bad_registration kn prm why) in
+  let () = match cb.const_body with
+    | Undef _ -> ()
+    | Def _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse (str "it is not a parameter")
+  in
+  check_primitive_typing refuse env cb (CPrimitives.OT_type prm)
+    ~mismatch:(str "its type is not the primitive type's")
+
+(* Conversion and the VM compute with a primitive operator whatever the
+   type that its constant declares, so [add : int -> int -> False] with the
+   body [Primitive Int63add] would make [add m m] a closed proof of False.
+   coqc gives the constant the type of the operator
+   ([Constant_typing.infer_primitive] and [check_primitive_type]), and
+   rocqchk refuses any other. [env] holds the constant's universe context,
+   and the registrations that the operator's type names. *)
+let check_primitive_operator env kn cb op =
+  let refuse why =
+    raise (BadConstant (kn, str "is the primitive operator " ++
+                            str (CPrimitives.to_string op) ++ str ", but " ++
+                            why ++ str "."))
+  in
+  check_primitive_typing refuse env cb (CPrimitives.OT_op op)
+    ~mismatch:(str "its type is not the operator's")
+
+(* coqc registers a primitive type only in a library, or in a module nested
+   in it with no functor parameter ([Safe_typing.add_retroknowledge]), for a
+   constant that [Primitive] declares there. So the registered constant is a
+   field of the body of its module: of the type of a module that has no
+   other implementation ([FullStruct], as a library has), or of the
+   implementation of a [Struct] module. Elsewhere, in the type of a sealed,
+   algebraic or declared module, or in the body of a functor, its
+   declaration can be a parameter that an implementation defines: a sealed
+   [int : Set := Empty_set] is [Parameter int : Set] in its module's type.
+   [check_module] therefore checks such a type, and such a functor body,
+   with the constant registrations withheld: [f] gets [st] without them, and
+   the result has them back. A registration that no module body declares is
+   left over, and [check_module] refuses it. *)
+let without_constant_registrations f st =
+  let (ind_retro, cst_retro) = st.st_retro in
+  let r, st = f { st_retro = (ind_retro, Cmap_env.empty) } in
+  let (ind_retro, _) = st.st_retro in
+  r, { st_retro = (ind_retro, cst_retro) }
+
+let check_constant_declaration env st kn cb =
   Flags.if_verbose Feedback.msg_notice (str "  checking cst:" ++ Constant.print kn);
   let env = CheckFlags.set_local_flags cb.const_typing_flags env in
   let poly, env =
@@ -156,20 +256,21 @@ let check_constant_declaration env opac kn cb opacify =
     in
     c, env
   in
-  match cb.const_body with
-  | Undef _ | Primitive _ | Symbol _ -> opac
+  let retro, st = match Cmap_env.find_opt kn (snd st.st_retro) with
+  | None -> None, st
+  | Some (CPrimitives.PTE prm as retro) ->
+    let () = check_register_type env kn cb prm in
+    let (ind_retro, cst_retro) = st.st_retro in
+    let st = { st_retro = (ind_retro, Cmap_env.remove kn cst_retro) } in
+    Some retro, st
+  in
+  let () = match cb.const_body with
+  | Undef _ | Symbol _ -> ()
+  | Primitive op -> check_primitive_operator env kn cb op
   | Def c ->
     (* A transparent body may be unfolded by later checks, which rely on
        it being well-typed, so it is checked here. *)
-    check env c ();
-    if opacify then register_opacified_constant env opac kn c else opac
-  | OpaqueDef o when opacify ->
-    (* A constant of a sealed module that its signature declares without
-       a body: what it uses is recorded from its body, which is therefore
-       cooked here, in the main process. Its check is still deferred. *)
-    let c, env = cook o in
-    CheckWorkers.defer kn (check env c);
-    register_opacified_constant env opac kn c
+    check env c ()
   | OpaqueDef o ->
     (* Nothing else that is checked looks into an opaque body, so its check
        can be postponed, and possibly run in another process, and so can
@@ -178,16 +279,24 @@ let check_constant_declaration env opac kn cb opacify =
        ([CheckLibrary.indirect_accessor]), and a check handed back cooks
        again in the process that runs it. With -j 1, [defer] runs the
        closure at once, so the order of effects is as before. *)
-    CheckWorkers.defer kn (fun () -> let c, env = cook o in check env c ());
-    opac
+    CheckWorkers.defer kn (fun () -> let c, env = cook o in check env c ())
+  in
+  retro, st
 
-let check_constant_declaration env opac kn cb opacify =
-  let opac = NewProfile.profile "check_constant" ~args:(fun () ->
+let check_constant_declaration env st kn cb =
+  let retro, st = NewProfile.profile "check_constant" ~args:(fun () ->
       [("name", `String (Constant.to_string kn))])
-      (fun () -> check_constant_declaration env opac kn cb opacify)
+      (fun () -> check_constant_declaration env st kn cb)
       ()
   in
-  Environ.add_constant kn cb env, opac
+  let env = Environ.add_constant kn cb env in
+  let env = match retro with
+  | None -> env
+  | Some (CPrimitives.PTE prm) ->
+    (* The inner [check_constant_declaration] ran [check_register_type]. *)
+    Primred.add_retroknowledge env (Retroknowledge.Register_type (prm, kn))
+  in
+  env, st
 
 let check_quality_mask env qmask lincheck =
   let open Sorts.Quality in
@@ -305,6 +414,48 @@ let lookup_module mp env =
 
 let mk_mtb sign delta = Mod_declarations.make_module_type sign delta
 
+(** A module [X] at path [mp], a field of a structure whose delta resolver
+    is [res], has a resolver of its own, [mod_delta X], and so has each module
+    nested in it. The environment registers the constants and inductives of
+    each module under that module's own resolver ([Modops.add_structure]),
+    and the alias check of [check_structure_field] sees only that one; but a
+    module alias and a functor application substitute them through the whole
+    resolver of a module that contains them ([check_mexpr]). [res] could thus
+    give one of them a canonical name that no check has compared it with, and
+    make two declarations convertible that are not.
+
+    coqc adds each closed module's resolver to the enclosing one
+    ([add_module] and [end_module] in kernel/safe_typing.ml), so the two
+    mostly give the same canonical names. They can still differ in an honest
+    file: in [S with Module X := M] ([check_with_mod] in
+    kernel/mod_typing.ml), the entries that the resolver of [S] had for the
+    names of [X] override those of [M], and a field of [M] converts with the
+    canonical name that [S] gives it. So a name that [res] resolves
+    differently from the resolver of the module that declares it is checked
+    as an alias of [res]'s canonical name, by the check every other alias
+    gets, in [env], which holds [X] and everything declared before it. A
+    functor is skipped: the names of its body are bound, and its resolver is
+    not added to the enclosing one. *)
+let check_nested_resolver env res mp mb =
+  let rec check_body mp mb = match mod_type mb with
+    | MoreFunctor _ -> ()
+    | NoFunctor struc -> List.iter (check_field mp (mod_delta mb)) struc
+  and check_field mp own (lab, field) = match field with
+    | SFBconst cb ->
+      let kn = KerName.make mp lab in
+      let can = Mod_subst.kn_of_delta res kn in
+      if not (KerName.equal can (Mod_subst.kn_of_delta own kn)) then
+        Subtyping.check_constant_alias env (Constant.make kn can) cb
+    | SFBmind mib ->
+      let kn = KerName.make mp lab in
+      let can = Mod_subst.kn_of_delta res kn in
+      if not (KerName.equal can (Mod_subst.kn_of_delta own kn)) then
+        Subtyping.check_inductive_alias env (MutInd.make kn can) mib
+    | SFBmodule mb -> check_body (MPdot (mp, lab)) mb
+    | SFBmodtype _ | SFBrules _ -> ()
+  in
+  check_body mp mb
+
 let rec collect_constants_without_body sign mp accu =
   let collect_field s lab = function
   | SFBconst cb ->
@@ -317,13 +468,84 @@ let rec collect_constants_without_body sign mp accu =
   | NoFunctor struc ->
      List.fold_left (fun s (lab,mb) -> collect_field s lab mb) accu struc
 
-let rec check_mexpr env opac mse mp_mse res = match mse with
+(* The Axioms section of the summary folds over the final environment, which
+   holds a sealed module's interface and not its implementation, so an axiom
+   declared inside [Module M : T] is invisible to it.
+   [register_opacified_constant] above recovers one that a sealed constant's
+   own body names, but a helper that also lives in the implementation has a
+   body, and the fold over its uses keeps only bodyless constants, so the
+   axioms behind such a helper are lost (dispatch://BET-245). The walk below
+   records every axiom declared in an implementation the environment does
+   not hold, whether or not a proof reaches it, which is what the fold does
+   for the axioms it can see.
+
+   It reports an axiom where it is declared, which for a functor's field is
+   the module each application makes ([App.in_f]), the name the environment
+   fold and [Print Assumptions] both use. Upstream rocq-prover/rocq#22623
+   makes the other choice and reports [F.in_f]; keeping ours is deliberate,
+   for the two joins in the BET grader (TrueJudge.lean, grade.py).
+
+   Where it reads the implementation, it names each axiom as
+   [Print Assumptions] names it, so that both joins match. What an
+   expression leaves assumed is read at the end, by [Mod_impl], over the
+   final environment, which holds every functor an application names,
+   wherever it is declared:
+   [Module M : T := E] is read through E, and a functor application, which
+   the walk records where it passes it ([Check_stat.record_application]),
+   through its functor's body. The application's axioms are listed under
+   its name, [R.x] for [R := F A] or [R : T := F A], visible or sealed,
+   whether a proof reaches them or not. This covers an application inside
+   a seal, behind a helper with a body, and a seal a functor body declares.
+   What [Mod_impl] reads, types included, what it lists for a functor that
+   has no body, and where it stops and refuses the summary instead, is
+   written in mod_impl.ml.
+
+   Where a sealed implementation reaches a sibling's axiom through an
+   [Include], an alias or an ascription of it, the two accounts name one
+   axiom twice: the walk reports it where it is declared, while
+   [Print Assumptions] names the path the proof wrote. That pair fails both
+   joins closed, as it does without this walk, where the axiom goes
+   unreported instead. *)
+let rec record_sealed_axioms ~hidden mp mb =
+  match mod_type mb, mod_expr mb with
+  | MoreFunctor _, _ ->
+    (* A functor: its fields are named through its applications, see above. *)
+    ()
+  | NoFunctor _, Struct (_, impl) ->
+    (* [Module M : T. ... End M]: a structure of its own, which the
+       environment replaces with T, so all of it is hidden. *)
+    record_sealed_structure ~hidden:true mp impl
+  | NoFunctor _, Algebraic (MENoFunctor (MEapply _)) ->
+    (* [Module R := F A] and [Module R : T := F A], read at the end, see
+       above. *)
+    Check_stat.record_application mp mb
+  | NoFunctor _, Algebraic _ ->
+    (* [Module M := N] and [Module M : T := N]: what N declares is listed
+       where N is. *)
+    ()
+  | NoFunctor struc, (Abstract | FullStruct) ->
+    (* The type is all there is of this module ([Declare Module M : T] or a
+       plain [Module M]), and the environment holds it unless an enclosing
+       implementation hides it. *)
+    record_sealed_structure ~hidden mp struc
+
+and record_sealed_structure ~hidden mp struc =
+  let record_field (lab, field) = match field with
+  | SFBconst cb ->
+    if hidden && not (Declareops.constant_has_body cb) then
+      Check_stat.record_axiom (Constant.make2 mp lab)
+  | SFBmodule msb -> record_sealed_axioms ~hidden (MPdot (mp, lab)) msb
+  | SFBmind _ | SFBrules _ | SFBmodtype _ -> ()
+  in
+  List.iter record_field struc
+
+let rec check_mexpr env mse mp_mse res = match mse with
   | MEident mp ->
     let mb = lookup_module mp env in
     let mb = Modops.strengthen_and_subst_module_body mp mb mp_mse false in
     mod_type mb, mod_delta mb
   | MEapply (f,mp) ->
-    let sign, delta = check_mexpr env opac f mp_mse res in
+    let sign, delta = check_mexpr env f mp_mse res in
     let farg_id, farg_b, fbody_b = Modops.destr_functor sign in
     let state = (Environ.universes env, Conversion.checked_universes) in
     let _ : UGraph.t = Subtyping.check_subtypes state env mp (MPbound farg_id) farg_b in
@@ -337,24 +559,88 @@ let rec check_mexpr env opac mse mp_mse res = match mse with
     Modops.subst_signature subst mp_mse fbody_b, Mod_subst.subst_codom_delta_resolver subst delta
   | MEwith _ -> CErrors.user_err Pp.(str "Unsupported 'with' constraint in module implementation")
 
-let rec check_mexpression env opac sign mbtyp mp_mse res = match sign with
+let rec check_mexpression env sign mbtyp mp_mse res = match sign with
   | MEMoreFunctor body ->
     let arg_id, mtb, mbtyp = Modops.destr_functor mbtyp in
     let env' = Modops.add_module_parameter arg_id mtb env in
-    let body, delta = check_mexpression env' opac body mbtyp mp_mse res in
+    let body, delta = check_mexpression env' body mbtyp mp_mse res in
     MoreFunctor(arg_id,mtb,body), delta
-  | MENoFunctor me -> check_mexpr env opac me mp_mse res
+  | MENoFunctor me -> check_mexpr env me mp_mse res
 
-let rec check_module env opac mp mb opacify =
-  Flags.if_verbose Feedback.msg_notice (str "  checking module: " ++ str (ModPath.to_string mp));
-  let env = Modops.add_retroknowledge (mod_retroknowledge mb) env in
-  let delta_mb = mod_delta mb in
-  let opac =
-    check_signature env opac (mod_type mb) mp delta_mb opacify
+(* coqc gives a label to one field of a structure at most, in each of two
+   namespaces ([Safe_typing.add_field]). The objects are the constants, the
+   rewrite rule blocks, and the types and constructors of each inductive
+   block ([Safe_typing.labels_of_mib]). The modules are the modules and the
+   module types. Each field that coqc adds to a structure is tested there,
+   the fields of an [Include] one by one, and a module or a module type
+   when it starts ([Safe_typing.start_mod_modtype]). A [with] constraint
+   replaces a field in place ([Mod_typing.split_struc]), and a functor
+   application or a module alias keeps the labels of the structure it
+   copies. So no file that coqc writes repeats a label in a namespace.
+
+   The environment keeps the last field with a label
+   ([Environ.add_constant_key], [Modops.add_structure]). So a second field
+   can replace a field that the fields between them were checked against.
+   With [Axiom ax : False], then [proof : False := ax], then a second
+   [ax : unit := tt], no constant is left without a body, and [proof] is a
+   closed proof of False. In the same way, a parameter can take a primitive
+   type registration ([check_register_type]), and a definition with its
+   label can then replace it. The label maps of
+   [Mod_impl.fields_of_structure], which the -o summary reads, keep the last
+   field too, and this check protects them as well.
+
+   [check_signature] runs this check on every structure that it reads: the
+   type of a module, a module type, a functor body and a [Struct]
+   implementation, and so the root of a library. The label of an inductive
+   block is one of its objects too: the environment keys the block by it,
+   and coqc makes it the name of the block's first type
+   ([Safe_typing.check_mind]). As in coqc, the labels of one block are
+   tested against the earlier fields, not against each other. A second
+   module with a label fails before this check, on the assertion of
+   [Environ.shallow_add_module], when [compile_structure] adds it. *)
+let check_labels mp struc =
+  let refuse l kinds =
+    CErrors.user_err
+      (ModPath.print mp ++ str " declares the label " ++ Id.print l ++
+       str " twice among its " ++ str kinds ++ str ".")
   in
-  let optsign, opac = match Mod_declarations.mod_expr mb with
+  let add_object l objects =
+    if Id.Set.mem l objects then
+      refuse l "constants, inductive types, constructors and rewrite rules"
+    else Id.Set.add l objects
+  in
+  let fold (objects, modules) (l, field) = match field with
+    | SFBconst _ | SFBrules _ -> add_object l objects, modules
+    | SFBmind mib ->
+      let add_packet labels mip =
+        Array.fold_right Id.Set.add mip.mind_consnames
+          (Id.Set.add mip.mind_typename labels)
+      in
+      let labels = Array.fold_left add_packet (Id.Set.singleton l) mib.mind_packets in
+      Id.Set.fold add_object labels objects, modules
+    | SFBmodule _ | SFBmodtype _ ->
+      if Id.Set.mem l modules then refuse l "modules and module types";
+      objects, Id.Set.add l modules
+  in
+  let (_ : Id.Set.t * Id.Set.t) =
+    List.fold_left fold (Id.Set.empty, Id.Set.empty) struc
+  in
+  ()
+
+(* [check_module] returns the registrations in force after the module with
+   the state: those in force before it and those it made, which coqc puts in
+   force after it too ([Safe_typing.end_module]). *)
+let rec check_module env st mp mb =
+  Flags.if_verbose Feedback.msg_notice (str "  checking module: " ++ str (ModPath.to_string mp));
+  let delta_mb = mod_delta mb in
+  let check_type st = check_signature env st (mod_type mb) mp delta_mb in
+  let retro, st = match Mod_declarations.mod_expr mb with
+    | FullStruct -> check_type st
+    | Struct _ | Algebraic _ | Abstract -> without_constant_registrations check_type st
+  in
+  let env = Environ.set_retroknowledge env retro in
+  let optsign, retro, st = match Mod_declarations.mod_expr mb with
     | Struct (reso, sign_struct) ->
-      let opacify = collect_constants_without_body (mod_type mb) mp opacify in
       (* TODO: a bit wasteful, we recheck the types of parameters twice *)
       let sign_struct = Modops.annotate_struct_body sign_struct (mod_type mb) in
       (* The implementation is checked in its own right, hence its bytecode is
@@ -362,10 +648,10 @@ let rec check_module env opac mp mb opacify =
       let vmtab, sign_struct =
         compile_signature env (Environ.vm_library env) mp reso sign_struct in
       let env = Environ.set_vm_library vmtab env in
-      let opac = check_signature env opac sign_struct mp reso opacify in
-      Some (sign_struct, reso), opac
-    | Algebraic me -> Some (check_mexpression env opac me (mod_type mb) mp delta_mb), opac
-    | Abstract|FullStruct -> None, opac
+      let retro, st = check_signature env st sign_struct mp reso in
+      Some (sign_struct, reso), retro, st
+    | Algebraic me -> Some (check_mexpression env me (mod_type mb) mp delta_mb), retro, st
+    | Abstract|FullStruct -> None, retro, st
   in
   let () = match optsign with
   | None -> ()
@@ -377,20 +663,22 @@ let rec check_module env opac mp mb opacify =
     let _ : UGraph.t = Subtyping.check_subtypes state env mp mp mtb2 in
     ()
   in
-  opac
+  retro, st
 
 and check_module_type env mp mty =
   Flags.if_verbose Feedback.msg_notice (str "  checking module type: " ++ str (ModPath.to_string @@ mp));
-  let _ : _ Cmap.t =
-    check_signature env Cmap.empty (mod_type mty) mp (mod_delta mty) Cset.empty in
+  let (_ : Retroknowledge.retroknowledge), (_ : check_state) =
+    check_signature env empty_state (mod_type mty) mp (mod_delta mty) in
   ()
 
-and check_structure_field env opac mp lab res opacify = function
+and check_structure_field env st mp lab res = function
   | SFBconst cb ->
       let kn = KerName.make mp lab in
       let kn = Mod_subst.constant_of_delta_kn res kn in
       let () = Check_stat.record_constant kn cb in
-      check_constant_declaration env opac kn cb (Cset.mem kn opacify)
+      let env', st = check_constant_declaration env st kn cb in
+      let () = Subtyping.check_constant_alias env kn cb in
+      env', st
   | SFBmind mib ->
       let kn = KerName.make mp lab in
       let kn = Mod_subst.mind_of_delta_kn res kn in
@@ -398,33 +686,181 @@ and check_structure_field env opac mp lab res opacify = function
         let indices_matter = (Environ.typing_flags env).indices_matter in
         Check_stat.record_inductive ~indices_matter kn mib
       in
-      CheckInductive.check_inductive env kn mib, opac
+      let retro = Mindmap_env.find_opt kn (fst st.st_retro) in
+      let st = match retro with
+      | None -> st
+      | Some _ ->
+        let (ind_retro, cst_retro) = st.st_retro in
+        let st = { st_retro = (Mindmap_env.remove kn ind_retro, cst_retro) } in
+        st
+      in
+      let env' = CheckInductive.check_inductive env kn mib retro in
+      let () = Subtyping.check_inductive_alias env kn mib in
+      (* [check_inductive] checked the registration, which the types of
+         primitive operators may name. *)
+      let env' = match retro with
+      | None -> env'
+      | Some (i, CPrimitives.PIE prm) ->
+        Primred.add_retroknowledge env' (Retroknowledge.Register_ind (prm, (kn, i)))
+      in
+      env', st
   | SFBmodule msb ->
       let mp = MPdot(mp, lab) in
-      let opac = check_module env opac mp msb opacify in
-      Modops.add_module mp msb env, opac
+      let retro, st = check_module env st mp msb in
+      let env = Modops.add_module mp msb env in
+      let () = check_nested_resolver env res mp msb in
+      Environ.set_retroknowledge env retro, st
   | SFBmodtype mty ->
       let mp = MPdot (mp, lab) in
       let () = check_module_type env mp mty in
-      add_modtype mp mty env, opac
+      add_modtype mp mty env, st
   | SFBrules rrb ->
       check_rewrite_rules_body env lab rrb;
-      Environ.add_rewrite_rules rrb.rewrules_rules env, opac
+      Environ.add_rewrite_rules rrb.rewrules_rules env, st
 
-and check_signature env opac sign mp_mse res opacify = match sign with
+(* The registrations in force after the signature, and the state. A functor
+   makes none ([without_constant_registrations]). *)
+and check_signature env st sign mp_mse res = match sign with
   | MoreFunctor (arg_id, mtb, body) ->
       let () = check_module_type env (MPbound arg_id) mtb in
       let env' = Modops.add_module_parameter arg_id mtb env in
-      let opac = check_signature env' opac body mp_mse res Cset.empty in
-      opac
-  | NoFunctor struc ->
-      let (_:env), opac = List.fold_left (fun (env, opac) (lab,mb) ->
-        check_structure_field env opac mp_mse lab res opacify mb) (env, opac) struc
+      let (_ : Retroknowledge.retroknowledge), st =
+        without_constant_registrations (fun st -> check_signature env' st body mp_mse res) st
       in
-      opac
+      Environ.retroknowledge env, st
+  | NoFunctor struc ->
+      let () = check_labels mp_mse struc in
+      let env, st = List.fold_left (fun (env, st) (lab,mb) ->
+        check_structure_field env st mp_mse lab res mb) (env, st) struc
+      in
+      Environ.retroknowledge env, st
 
-let check_module env opac mp mb =
+let rec collect_module_opaques env opac mp mb opacify =
+  let opac = collect_signature_opaques env opac (mod_type mb) mp (mod_delta mb) opacify in
+  match mod_expr mb with
+  | Struct (reso, struc) ->
+    let opacify = collect_constants_without_body (mod_type mb) mp opacify in
+    let struc = Modops.annotate_struct_body struc (mod_type mb) in
+    collect_signature_opaques env opac struc mp reso opacify
+  | Abstract | Algebraic _ | FullStruct -> opac
+
+and collect_signature_opaques env opac sign mp res opacify = match sign with
+  | MoreFunctor (arg_id, mtb, body) ->
+    let env = Modops.add_module_parameter arg_id mtb env in
+    collect_signature_opaques env opac body mp res Cset.empty
+  | NoFunctor struc ->
+    let fold (env, opac) (lab, field) = match field with
+    | SFBconst cb ->
+      let kn = Mod_subst.constant_of_delta_kn res (KerName.make mp lab) in
+      let opac =
+        if not (Cset.mem kn opacify) then opac
+        else match cb.const_body with
+        | Def body -> register_opacified_constant env opac kn body
+        | OpaqueDef o ->
+          (* A cook in this process, counted as [cook] counts its own. *)
+          CheckWorkers.note_cook ();
+          register_opacified_constant env opac kn (fst (!indirect_accessor o))
+        | Undef _ | Primitive _ | Symbol _ -> opac
+      in
+      Environ.add_constant kn cb env, opac
+    | SFBmodule mb ->
+      let mp = MPdot (mp, lab) in
+      let opac = collect_module_opaques env opac mp mb opacify in
+      Modops.add_module mp mb env, opac
+    | SFBmodtype mtb -> Environ.add_modtype (MPdot (mp, lab)) mtb env, opac
+    | SFBmind mib ->
+      let kn = Mod_subst.mind_of_delta_kn res (KerName.make mp lab) in
+      Environ.add_mind kn mib env, opac
+    | SFBrules _ -> env, opac
+    in
+    snd (List.fold_left fold (env, opac) struc)
+
+let eq_prim_ind (type a b) (p : a CPrimitives.prim_ind) (q : b CPrimitives.prim_ind) =
+  String.equal (CPrimitives.prim_ind_to_string p) (CPrimitives.prim_ind_to_string q)
+
+(* The registrations of [retro], checked as far as they can be before the
+   library, and [env] with the registrations of inductive types of earlier
+   libraries in force, which coqc has in force when it declares the
+   primitive operators that name them. *)
+let get_retroknowlege env retro =
+  let fold (env', imap, cmap, extind) = function
+  | Retroknowledge.Register_ind (prm, (ind, i)) ->
+    (* Tolerate redeclarations because the kernel allows it somehow *)
+    let check_prm map = match Mindmap_env.find_opt ind map with
+    | None -> ()
+    | Some (_, CPrimitives.PIE prm') ->
+      if not (eq_prim_ind prm prm') then
+        CErrors.user_err Pp.(str "Inconsistent primitive registration for inductive " ++ MutInd.print ind ++ str ".")
+    in
+    let () = check_prm imap in
+    let () = check_prm extind in
+    (* It is allowed to register inductives coming from another library, so we have
+       to account for that. *)
+    if Environ.mem_mind ind env then
+      let spec = Inductive.lookup_mind_specif env (ind, i) in
+      let () = Safe_typing.check_register_ind (ind, i) prm spec in
+      let env' = Primred.add_retroknowledge env' (Retroknowledge.Register_ind (prm, (ind, i))) in
+      (env', imap, cmap, Mindmap_env.add ind (i, CPrimitives.PIE prm) extind)
+    else
+      (env', Mindmap_env.add ind (i, CPrimitives.PIE prm) imap, cmap, extind)
+  | Retroknowledge.Register_type (prm, cst) ->
+    let () =
+      if Cmap_env.mem cst cmap then
+        raise (BadConstant (cst, str "is registered twice as a primitive type."))
+    in
+    (* coqc registers the constant that [Primitive] declares, in this
+       library, and names it as declared, with no other canonical name
+       ([Safe_typing.add_constant]). [check_constant_declaration] checks the
+       declaration that the user name has in this library, while
+       [Safe_typing.import] puts the registration in force with the
+       canonical name, which conversion compares. *)
+    let () =
+      if Environ.mem_constant cst env then
+        raise (bad_registration cst prm (str "an earlier library declares it"))
+    in
+    let () =
+      let canonical = Constant.canonical cst in
+      if not (KerName.equal (Constant.user cst) canonical) then
+        raise (bad_registration cst prm
+                 (str "the registration gives it another canonical name, " ++
+                  KerName.print canonical))
+    in
+    (env', imap, Cmap_env.add cst (CPrimitives.PTE prm) cmap, extind)
+  in
+  let (env, imap, cmap, _) =
+    List.fold_left fold (env, Mindmap_env.empty, Cmap_env.empty, Mindmap_env.empty) retro
+  in
+  env, (imap, cmap)
+
+(* A checked library goes through this after its check, and an admitted one
+   instead of it under -o ([CheckLibrary.check_one_lib]), so the walk above
+   runs for both, and an admitted library's sealed axioms are recorded as a
+   checked one's are. What the walk collects is read only by the summary of
+   -o ([Check_stat.pr_axioms]), so without a summary
+   ([Check_stat.summary_enabled]) nothing is collected, and the main process
+   reads no opaque body for it. *)
+let collect_module_opaques env opac mp mb =
+  if not (Check_stat.summary_enabled ()) then opac
+  else begin
+    record_sealed_axioms ~hidden:false mp mb;
+    collect_module_opaques env opac mp mb Cset.empty
+  end
+
+let check_module env opac retro mp mb =
+  let env, retro = get_retroknowlege env retro in
+  let st = { st_retro = retro } in
+  let (_ : Retroknowledge.retroknowledge), { st_retro = (imap, cmap) } = check_module env st mp mb in
+  let () = match Mindmap_env.choose_opt imap, Cmap_env.choose_opt cmap with
+  | None, None -> ()
+  | Some (ind, _), (None | Some _) ->
+    CErrors.user_err Pp.(str "Retroknowledge registration for unknown inductive " ++ MutInd.print ind ++ str ".")
+  | None, Some (cst, _) ->
+    CErrors.user_err Pp.(str "Retroknowledge registration for unknown constant " ++ Constant.print cst ++ str ".")
+  in
+  collect_module_opaques env opac mp mb
+
+let check_module env opac retro mp mb =
   NewProfile.profile "check_module"
     ~args:(fun () -> [("name", `String (ModPath.to_string mp))])
-    (fun () -> check_module env opac mp mb Cset.empty)
+    (fun () -> check_module env opac retro mp mb)
     ()

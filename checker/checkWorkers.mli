@@ -24,8 +24,10 @@
     of the queue: the jobs of one library are next to each other there,
     so a batch holds whole libraries, the libraries next to it go to
     other workers, and one process parses each table once for the checks.
-    The worker of [validate_tables] reads every table once more, before
-    the walk, so that a malformed one stops the run early, as in stock.
+    The worker of [validate_tables] reads every table once more, from the
+    start of the walk or, when the walk runs while the libraries are read,
+    from the end of that, so that a malformed one stops the run early, as
+    in stock.
 
     A worker lives for at most a time budget (see [set_budget]): the
     longer a worker lives, the more of the heap it shares with the main
@@ -98,11 +100,31 @@ val defer_table : Names.DirPath.t -> (unit -> unit) -> unit
     takes them together with this one. After [validate_tables] handed the
     tables to a worker, it only opens the group. *)
 
+val expect_validator : unit -> unit
+(** Say that [validate_tables] will be called, after checks have started:
+    from now on [defer_table] queues no task, as after [validate_tables],
+    and one worker slot is kept for the validator until it starts. *)
+
+val set_cost_hints : (string * float) list -> unit
+(** [set_cost_hints [(lib, seconds); ...]]: the expected cost of each
+    library's checks, by its full name. With workers, the queued checks of
+    costlier libraries are dealt first, and a worker runs them first in its
+    batch. Costs decide only that order: which checks run, and what is
+    accepted, do not depend on them. A library without a cost costs 0. *)
+
+val debugging : unit -> bool
+(** Whether the checker-workers debug output is on. *)
+
+val capture_available : unit -> bool
+(** Whether a worker can now be given the two files its output is kept
+    in until it is printed. *)
+
 val validate_tables : (Names.DirPath.t * (unit -> unit)) list -> unit
 (** [validate_tables tables] starts one worker that runs each read, in
     the order given, which is the order stock parses the tables while it
     interns the libraries; so a malformed table stops the run near where it
-    stops stock. Called before the libraries are checked. It reads every
+    stops stock. Called before the libraries are checked, or when the walk
+    runs while they are read, once they are all read. It reads every
     table once more than the checks do, keeps none, has no time budget and
     is never asked to release. Without workers it does nothing: the tables
     were parsed when the libraries were interned. *)
@@ -114,10 +136,10 @@ val validator_progress : unit -> unit
 
 val note_cook : unit -> unit
 (** Called by the cook of an opaque body ([Mod_checking]): counts it when
-    it runs outside a worker, so in the main process. With [-j] that is a
-    sealed module's constant, whose cooked body the main process needs,
-    and a check that the main process ran itself because it could not
-    fork. The count is printed by [-d checker-workers]. *)
+    it runs outside a worker, so in the main process. With [-j] that is,
+    under -o, a sealed module's constant, whose cooked body the summary
+    needs, and a check that the main process ran itself because it could
+    not fork. The count is printed by [-d checker-workers]. *)
 
 val note_table_read : bytes:int -> unit
 (** Counts one table of opaque proofs read and parsed by this process, and
@@ -163,6 +185,23 @@ val print_held_output : unit -> unit
 
 val drop_held_output : unit -> unit
 (** Forget it, without printing it. *)
+
+val start_holding : unit -> unit
+(** From now on, hold what the walk prints, for when the walk runs before
+    the intern has ended: the main process's messages printed between
+    [hold_on] and [hold_off], and the output of every worker, in order. *)
+
+val hold_on : unit -> unit
+(** Hold the main process's messages from now on, until [hold_off]. *)
+
+val hold_off : unit -> unit
+(** Print the main process's messages again; what was held stays held. *)
+
+val release_held : unit -> unit
+(** Print everything held, in order, and stop holding. *)
+
+val drop_held : unit -> unit
+(** Forget everything held, without printing it, and stop holding. *)
 
 val pr_batch : batch -> Pp.t
 (** The opaque proofs of a batch, in stock's words: "N opaque proofs (the

@@ -678,7 +678,6 @@ let unmerge_name_map = {
   nmap_rules = unmerge_rules;
   nmap_constr = unmerge_constr;
   nmap_delta = unmerge_delta;
-  nmap_retro = unmerge_retro;
 }
 
 let unmerge_structure struc =
@@ -688,6 +687,11 @@ let unmerging () = enabled () && not (KerName.Map.is_empty !merged)
 
 let unmerge_exported struc =
   if not (unmerging ()) then struc else unmerge_structure struc
+
+(* Since rocq#21716 a module body carries no retroknowledge: the library's
+   registrations are written beside its structure, and undone the same way. *)
+let unmerge_retroknowledge retro =
+  if not (unmerging ()) then retro else List.Smart.map unmerge_retro retro
 
 (* ------------------------------------------------------------------ *)
 (* The load-time step.                                                 *)
@@ -714,7 +718,13 @@ let as_loaded mib =
    distinction the second's matches can see. Merging them gives False --
    `Private Inductive pos := mk : nat -> pos.` with `Axiom pos_irr : forall
    n m, mk n = mk m.` on one side, and a match on the other. eq_mib still
-   compares them, for the comparator; the refusal is here. *)
+   compares them, and the refusal is here.
+
+   The declaration comparison of rocqchk -compare (checker/check_compare.ml)
+   does not call eq_mib; only its test-only cross-check does. Under
+   -merge-inductives, the merges made while it loads the answer and the
+   challenge still decide by eq_mib, in [merge], which [Safe_typing.import]
+   calls. *)
 let mergeable mib =
   Option.is_empty mib.mind_private
   && (match mib.mind_universes with Monomorphic -> true | Polymorphic _ -> false)
@@ -842,6 +852,18 @@ let apply_earlier_merges mp mb =
     Mod_declarations.subst_module Mod_declarations.subst_codom
       !global_subst mp mb
 
+(* Test-only: what [merge] reports at its one call of [eq_mib]. The default
+   does nothing; rocqchk's cross-check of its comparator installs one
+   (checker/check_compare.ml). It is given the verdict after [eq_mib]
+   computes it and returns nothing, and [merge] acts on that verdict
+   afterwards, so an observer cannot change it: it can only stop the run. *)
+let eq_mib_observer :
+  (KerName.t -> mutual_inductive_body -> mutual_inductive_body ->
+   (umap, diff) result -> unit) ref =
+  ref (fun _ _ _ _ -> ())
+
+let set_eq_mib_observer f = eq_mib_observer := f
+
 (* A library the checker loads without checking it -- named by -admit, or
    reached as a dependency of a -norec library -- DOES take part in merges,
    as source and as target. This is the grader's ordinary shape: it lists
@@ -900,7 +922,9 @@ let merge env mp univs mb =
                  block never merges, whichever side it is on -- so that
                  weakening either of them cannot quietly allow one. *)
               if not (Option.is_empty cmib.mind_private) then first rest else
-              (match eq_mib empty_umap !envr mib' cmib with
+              let verdict = eq_mib empty_umap !envr mib' cmib in
+              let () = !eq_mib_observer kn mib' cmib verdict in
+              (match verdict with
                | Error _ -> first rest
                | Ok umap ->
                  let pairs = umap_pairs umap in

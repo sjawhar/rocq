@@ -59,8 +59,12 @@ module Deltamap = struct
 
   let find_mp mp reso = ModPath.Map.find mp reso.mmap
   let find_kn kn reso = KerName.Map.find kn reso.kmap
-  let mem_mp mp reso = ModPath.Map.mem mp reso.mmap
   let fold_kn f reso i = KerName.Map.fold f reso.kmap i
+  (** the hints of [reso] rewritten by [f]; [reso] itself when [f] returns
+      each hint unchanged *)
+  let map_kn f reso =
+    let kmap = KerName.Map.Smart.map f reso.kmap in
+    if kmap == reso.kmap then reso else { reso with kmap }
   let fold fmp fkn reso accu =
     ModPath.Map.fold fmp reso.mmap (KerName.Map.fold fkn reso.kmap accu)
   let join map1 map2 = fold add_mp add_kn map1 map2
@@ -248,6 +252,15 @@ let map_kn_delta_resolver ?(fc = fun c -> c) f resolver =
   Deltamap.fold mp_id kn_map resolver
     (empty_delta_resolver (Deltamap.root resolver))
 
+(* rocqchk does not trust the term an [Inline] hint of a file carries, see
+   checker/safe_checking.ml. *)
+let drop_inline_bodies resolver =
+  let drop = function
+    | Inline (lev, Some _) -> Inline (lev, None)
+    | Inline (_, None) | Equiv _ as hint -> hint
+  in
+  Deltamap.map_kn drop resolver
+
 let map_mbid_flat mbid mp resolve =
   let () = assert (ModPath.equal mp (Deltamap.root resolve)) in
   Umap.add_mbi mbid resolve Umap.empty
@@ -260,11 +273,6 @@ let map_mbid mbid mp resolve = Flat (map_mbid_flat mbid mp resolve)
 
 let map_mp mp1 mp2 resolve = Flat (map_mp_flat mp1 mp2 resolve)
 
-let mp_in_delta mp = Deltamap.mem_mp mp
-
-let mp_of_delta resolve mp =
- try Deltamap.find_mp mp resolve with Not_found -> mp
-
 let find_prefix resolve mp =
   let rec sub_mp = function
     | MPdot(mp,l) as mp_sup ->
@@ -273,6 +281,11 @@ let find_prefix resolve mp =
     | p -> Deltamap.find_mp p resolve
   in
   try sub_mp mp with Not_found -> mp
+
+(* TODO: remove the indirection at some point *)
+let mp_of_delta = find_prefix
+
+let mp_is_alias resolve mp = not (ModPath.equal mp (find_prefix resolve mp))
 
 (** Applying a resolver to a kernel name *)
 
@@ -692,7 +705,7 @@ let update_delta_resolver resolver1 resolver2 =
   in
   let kn_apply_rslv kkey hint1 rslv =
     let hint = match hint1 with
-      | Equiv kequ -> solve_delta_kn resolver2 kequ
+      | Equiv kequ -> Equiv (kn_of_delta resolver2 kequ)
       | Inline (_,Some _) -> hint1
       | Inline (_,None) ->
         (try Deltamap.find_kn kkey resolver2 with Not_found -> hint1)

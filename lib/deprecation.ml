@@ -32,7 +32,12 @@ let get_generic_cat since =
   match CString.Map.find_opt since !since_cats with
   | Some c -> c
   | None ->
-    let c = CWarnings.create_category ~from:[depr_cat] ~name:("deprecated-since-"^since) () in
+    let name = "deprecated-since-"^since in
+    (* A user warning may have made this category first. *)
+    let c = match CWarnings.get_category name with
+      | There c -> c
+      | NotThere | OtherType -> CWarnings.create_category ~from:[depr_cat] ~name ()
+    in
     since_cats := CString.Map.add since c !since_cats;
     c
 
@@ -68,11 +73,17 @@ let create_warning_with_qf ?default ~object_name ~warning_name_if_no_since ~pp_q
         match CString.Map.find_opt since !warnings with
         | Some w -> w
         | None ->
-          let generic_cat = get_generic_cat since in
-          let w = CWarnings.create_warning ?default ~from:[main_cat; generic_cat]
-              ~name:(warning_name_if_no_since ^ "-since-" ^ since) ()
+          let name = warning_name_if_no_since ^ "-since-" ^ since in
+          (* A user category may have this name: then the warning is given
+             under the name with no since. *)
+          let w = match CWarnings.get_warning name with
+            | There w -> CWarnings.create_in w pp
+            | OtherType -> main_w
+            | NotThere ->
+              let generic_cat = get_generic_cat since in
+              let w = CWarnings.create_warning ?default ~from:[main_cat; generic_cat] ~name () in
+              CWarnings.create_in w pp
           in
-          let w = CWarnings.create_in w pp in
           warnings := CString.Map.add since w !warnings;
           w
     in

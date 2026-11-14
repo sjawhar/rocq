@@ -206,6 +206,64 @@ let set_worker_budget s =
   | _ ->
     fatal_error (str "Option -worker-budget expects a number of seconds, got " ++ qstring s ++ str ".") 1
 
+(* "<library> <seconds>" per line; a later line for a library replaces an
+   earlier one. Costs only order the workers' checks, so nothing about the
+   file can stop the check: a malformed line is skipped, and anything but a
+   regular file of at most [max_cost_hints_bytes] that can be read to its
+   end is ignored whole, with a warning. The bound is on the bytes read,
+   not on the size the file reports. *)
+let max_cost_hints_bytes = 16 * 1024 * 1024
+
+let set_cost_hints f =
+  let ignored why =
+    Feedback.msg_warning (str "Ignoring the cost hints " ++ qstring f ++ str " (" ++
+                          str why ++ str "); the checks are dealt without them.")
+  in
+  let parse line =
+    let fields = List.filter (fun s -> s <> "")
+        (String.split_on_char ' ' (String.map (fun c -> if c = '\t' then ' ' else c) line)) in
+    match fields with
+    | [lib; s] ->
+      (match float_of_string_opt s with
+       | Some c when c >= 0. && Float.is_finite c -> Some (lib, c)
+       | _ -> None)
+    | _ -> None
+  in
+  (* At most [max_cost_hints_bytes + 1] bytes, so that a source reporting
+     a wrong size, or growing, cannot make the read unbounded. *)
+  let read_bounded ch =
+    let buf = Buffer.create 65536 in
+    let chunk = Bytes.create 65536 in
+    let rec go () =
+      let want = min (Bytes.length chunk) (max_cost_hints_bytes + 1 - Buffer.length buf) in
+      if want <= 0 then Error "too large"
+      else match input ch chunk 0 want with
+        | 0 -> Ok (Buffer.contents buf)
+        | n -> Buffer.add_subbytes buf chunk 0 n; go ()
+    in
+    go ()
+  in
+  (* Opened without blocking, and its kind read from the open descriptor:
+     whatever the path names when it is opened, a FIFO cannot block the
+     check and only a regular file is read. *)
+  match Unix.openfile f [Unix.O_RDONLY; Unix.O_NONBLOCK; Unix.O_CLOEXEC] 0 with
+  | exception Unix.Unix_error (e, _, _) -> ignored (Unix.error_message e)
+  | fd ->
+    let contents =
+      match (Unix.fstat fd).Unix.st_kind with
+      | exception Unix.Unix_error (e, _, _) -> Unix.close fd; Error (Unix.error_message e)
+      | Unix.S_REG ->
+        Unix.clear_nonblock fd;
+        let ch = Unix.in_channel_of_descr fd in
+        set_binary_mode_in ch true;
+        Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
+            try read_bounded ch with Sys_error e -> Error e)
+      | _ -> Unix.close fd; Error "not a regular file"
+    in
+    match contents with
+    | Error why -> ignored why
+    | Ok s -> CheckWorkers.set_cost_hints (List.filter_map parse (String.split_on_char '\n' s))
+
 let make_senv () =
   let senv = Safe_typing.empty_environment in
   let senv = Safe_typing.set_impredicative_set !impredicative_set senv in
@@ -231,7 +289,7 @@ let add_compile s =
     between coqtop and coqc. *)
 
 let compile_files senv =
-  CheckLibrary.recheck_library senv
+  CheckLibrary.recheck_library ~output_context:!Check_stat.output_context senv
     ~norec:(List.rev !norec_list)
     ~admit:(List.rev !admit_list)
     ~check:(List.rev !compile_list)
@@ -268,6 +326,8 @@ let print_usage_channel co command =
 \n  -worker-budget s            with -j, a worker process stops after s seconds\
 \n                              (default is 20) and its remaining checks are given\
 \n                              to another one; this bounds the memory it uses\
+\n  -cost-hints f               with -j, deal first the checks of the libraries that f\
+\n                              says cost most (\"<library> <seconds>\" per line)\
 \n  -statement-report f         print, for each statement named in f, whether its model\
 \n                              constant has its trusted constant's type and the axioms its\
 \n                              closure uses\
@@ -530,6 +590,9 @@ let parse_args argv =
     | "-worker-budget" :: s :: rem -> set_worker_budget s; parse rem
     | "-worker-budget" :: [] -> usage 1
 
+    | "-cost-hints" :: f :: rem -> set_cost_hints f; parse rem
+    | "-cost-hints" :: [] -> usage 1
+
     | "-statement-report" :: f :: rem ->
         (* Read now, so that a malformed file stops the run before any
            library is loaded. *)
@@ -619,6 +682,12 @@ let exit_code = function
   | CheckWorkers.WorkerFailed _ -> 1
   | e -> CErrors.exit_code e
 
+(* The error [e] ends the run: its backtrace with -d misc, its text, then its
+   exit code. *)
+let fatal_exn e =
+  if CDebug.(get_flag misc) then Printexc.print_backtrace stderr;
+  fatal_error (explain_exn e) (exit_code e)
+
 (* A worker reports its error as [run] does, then exits with the same
    code, which the main process passes on. *)
 let () = CheckWorkers.set_error_printer (fun e ->
@@ -629,9 +698,7 @@ let run senv =
   try
     let senv = compile_files senv in
     flush_all(); senv
-  with e ->
-    if CDebug.(get_flag misc) then Printexc.print_backtrace stderr;
-    fatal_error (explain_exn e) (exit_code e)
+  with e -> fatal_exn e
 
 (* The report is evidence beside the verdict, never the verdict: a report
    that cannot be completed is left without its end marker, which a reader
@@ -651,7 +718,9 @@ let print_statement_report env requests =
    a run that could not complete -- a challenge file whose sha256 differs, a
    pre-checked library the two sides disagree on, a theorem the challenge
    does not hold -- exits non-zero and writes no verdict file. A verdict,
-   whatever it says, leaves the exit status at 0. *)
+   whatever it says, leaves the exit status at 0, except with -o: the context
+   summary is printed after the verdict file is written, and a summary the
+   walk of mod_impl.ml could not complete makes the run exit 1. *)
 let run_compare env =
   match !compare_config with
   | None -> ()
@@ -745,9 +814,7 @@ let run_compare env =
                 !user_includes)
       in
       Check_compare.run t env CheckLibrary.indirect_accessor (make_senv ()) ~answer_deps
-    with e ->
-      if CDebug.(get_flag misc) then Printexc.print_backtrace stderr;
-      fatal_error (explain_exn e) (exit_code e)
+    with e -> fatal_exn e
 
 
 let main () =
@@ -757,5 +824,7 @@ let main () =
   let env = Safe_typing.env_of_safe_env senv in
   Option.iter (print_statement_report env) !statement_report;
   run_compare env;
-  Check_stat.stats env opac;
+  (* A summary the walk of mod_impl.ml could not complete is refused with a
+     user error, reported as a check's error is. *)
+  (try Check_stat.stats env opac with e -> fatal_exn e);
   exit 0

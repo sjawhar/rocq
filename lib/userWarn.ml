@@ -35,13 +35,17 @@ let make_warn ~note ?cats () =
 
 let user_warn_cat = CWarnings.CoreCategories.user_warn
 
+(* "default" and "none" only go in the warning's name. CWarnings puts a
+   warning that is on by default in "default" itself and refuses it as a
+   parent, and "none" is a keyword of the warning flags, never a category. *)
 let get_generic_cat cat =
-  match CWarnings.get_category cat with
-  | There c -> c
-  | NotThere ->
-    let c = CWarnings.create_category ~from:[user_warn_cat] ~name:cat () in
-    c
-  | OtherType -> CErrors.user_err Pp.(str "Cannot use " ++ str cat ++ str " as a category name.")
+  match cat with
+  | "default" | "none" -> None
+  | _ ->
+    match CWarnings.get_category cat with
+    | There c -> Some c
+    | NotThere -> Some (CWarnings.create_category ~from:[user_warn_cat] ~name:cat ())
+    | OtherType -> CErrors.user_err Pp.(str "Cannot use " ++ str cat ++ str " as a category name.")
 
 let create_warning ?default ~warning_name_if_no_cats () =
   let main_cat, main_w = CWarnings.create_hybrid ?default ~name:warning_name_if_no_cats ~from:[user_warn_cat] () in
@@ -54,10 +58,20 @@ let create_warning ?default ~warning_name_if_no_cats () =
         | Some w -> w
         | None ->
            let l = String.split_on_char ',' cats in
-           let generic_cats = List.map get_generic_cat l in
-           let w = CWarnings.create_warning ?default ~from:(main_cat :: generic_cats)
-               ~name:(String.concat "-" (warning_name_if_no_cats :: l)) () in
-           let w = CWarnings.create_in w Pp.strbrk in
+           let name = String.concat "-" (warning_name_if_no_cats :: l) in
+           (* Each category is checked first, so a category that names a
+              plain warning is refused whatever the name. *)
+           let generic_cats = List.filter_map get_generic_cat l in
+           (* The name may be taken: by the warning of another list, such as
+              "a,b" for "a b", which is then shared, or by a category, and
+              then the warning is given without its categories. *)
+           let w = match CWarnings.get_warning name with
+             | There w -> CWarnings.create_in w Pp.strbrk
+             | OtherType -> main_w
+             | NotThere ->
+               let w = CWarnings.create_warning ?default ~from:(main_cat :: generic_cats) ~name () in
+               CWarnings.create_in w Pp.strbrk
+           in
            warnings := CString.Map.add cats w !warnings;
            w
     in

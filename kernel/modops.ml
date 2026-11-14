@@ -39,11 +39,14 @@ type signature_mismatch_error =
   | NotConvertibleTypeField of env * types * types
   | CumulativeStatusExpected of bool
   | PolymorphicStatusExpected of bool
+  | TemplateStatusExpected of bool
+  | PrivateStatusExpected of bool option
   | NotSameConstructorNamesField of Id.t array * Id.t array
   | NotSameInductiveNameInBlockField of Id.t * Id.t
-  | FiniteInductiveFieldExpected of bool
+  | FiniteInductiveFieldExpected of recursivity_kind
   | InductiveNumbersFieldExpected of { got : int; expected : int }
   | InductiveParams of { env : Environ.env; got : rel_context; expected : rel_context }
+  | InductiveUniformParams of { got : int; expected : int }
   | RecordFieldExpected of bool
   | RecordProjectionsExpected of { expected : Name.t list; got : Name.t list }
   | NotEqualInductiveAliases of MutInd.t * MutInd.t
@@ -193,8 +196,7 @@ and add_module mp mb linkinfo env =
   match mod_type mb with
   | NoFunctor struc ->
     let delta = get_global_delta mb in
-    add_retroknowledge (mod_retroknowledge mb)
-      (add_structure mp struc delta linkinfo env)
+    add_structure mp struc delta linkinfo env
   | MoreFunctor _ -> env
 
 let add_linked_module mp mb linkinfo env =
@@ -225,7 +227,7 @@ let strengthen_const mp_from l cb resolver =
 let rec strengthen_module mp mb = match mod_type mb with
 | NoFunctor struc ->
   let delta_mb = get_global_delta mb in
-  if mp_in_delta mp delta_mb then mb
+  if mp_is_alias delta_mb mp then mb (* already strengthened *)
   else
     let reso, struc' = strengthen_signature mp struc delta_mb in
     let reso = add_mp_delta_resolver mp mp (add_delta_resolver delta_mb reso) in
@@ -256,12 +258,29 @@ let strengthen mtb mp = match mod_type mtb with
 | NoFunctor struc ->
   let delta_mtb = get_global_delta mtb in
   (* Has mtb already been strengthened ? *)
-  if mp_in_delta mp delta_mtb then mtb
+  if mp_is_alias delta_mtb mp then mtb
   else
     let reso', struc' = strengthen_signature mp struc delta_mtb in
     let reso' = add_delta_resolver delta_mtb (add_mp_delta_resolver mp mp reso') in
     strengthen_module_type struc' reso' mtb
 | MoreFunctor _ -> mtb
+
+(** Aliasing of a module depending on the nature of the target.
+
+    [Module M := P] makes [M] another name for [P], so the resolver records the
+    full equivalence [M ↦ P].
+
+    [Include P] within a module [M] must never record an equivalence keyed on
+    [M]. [M] is not [P], it receives the fields of [P] but may be extended with
+    further fields later on which should not be aliased with [M] at the risk
+    of inconsistency. We must further refine the situation in two cases.
+    If [P] is a ground module, paths [P.l] are valid and aliasing can refer to
+    them. If [P] is a functor application, it is a transient object which does
+    not exist in the environment. Aliasing cannot refer to the source fields,
+    i.e. we adopt a generative semantics. *)
+type aliasing =
+| AliasDef (** Case [Module M := P] *)
+| AliasIncl of bool (** Case [Include P], the boolean is true when [P] ground *)
 
 (** {6 Strengthening a module for [Module M := M'] or [Include M] } *)
 
@@ -269,13 +288,13 @@ let rec strengthen_and_subst_module mb subst mp_from mp_to =
   match mod_type mb with
   | NoFunctor struc ->
     let delta_mb = get_global_delta mb in
-    let mb_is_an_alias = mp_in_delta mp_from delta_mb in
+    let mb_is_an_alias = mp_is_alias delta_mb mp_from in
     if mb_is_an_alias then
       subst_module subst_dom_codom subst mp_from mb
     else
       let reso',struc' =
         strengthen_and_subst_struct struc subst
-          mp_from mp_to false false delta_mb
+          mp_from mp_to false AliasDef delta_mb
       in
       (* Don't forget to add the original resolver up to substitution *)
       let reso' = add_delta_resolver (subst_dom_delta_resolver subst delta_mb) (add_mp_delta_resolver mp_to mp_from reso') in
@@ -285,6 +304,29 @@ let rec strengthen_and_subst_module mb subst mp_from mp_to =
     subst_module subst_dom_codom subst mp_from mb
 
 and strengthen_and_subst_struct struc subst mp_from mp_to alias incl reso =
+  (* Relate the field [l] of the copy to the field of the source. *)
+  let include_field accu l = match incl with
+  | AliasDef ->
+    (* Already a consequence of the alias [mp_from ↦ mp_to] *)
+    accu
+  | AliasIncl ground ->
+    (* Add per-field aliases as the parent module doesn't have the global one *)
+    let kn_from = KerName.make mp_from l in
+    let kn_to = KerName.make mp_to l in
+    let kn_canonical = kn_of_delta reso kn_from in
+    if ground then
+      (* Pick the canonical name of the actual object [kn_from]. *)
+      if KerName.equal kn_to kn_canonical then
+        (* This only happens for Include Self and will fail later with a duplicate label error. *)
+        accu
+      else add_kn_delta_resolver kn_to kn_canonical accu
+    else
+      (* [kn_from] is a transient name that only exists locally *)
+      let kn_canonical = subst_kn subst kn_canonical in
+      (* TODO: we should have a more robust check *)
+      if KerName.equal kn_to kn_canonical then accu
+      else add_kn_delta_resolver kn_to kn_canonical accu
+  in
   let strengthen_and_subst_field reso' item = match item with
     | (l,SFBconst cb) ->
         let cb' = subst_const_body subst cb in
@@ -293,41 +335,17 @@ and strengthen_and_subst_struct struc subst mp_from mp_to alias incl reso =
           else strengthen_const mp_from l cb' reso
         in
         let item' = if cb' == cb then item else (l, SFBconst cb') in
-        if incl then
-          (* If we are performing an inclusion we need to add
-             the fact that the constant mp_to.l is \Delta-equivalent
-             to reso(mp_from.l) *)
-          let kn_from = KerName.make mp_from l in
-          let kn_to = KerName.make mp_to l in
-          let kn_canonical = kn_of_delta reso kn_from in
-          add_kn_delta_resolver kn_to kn_canonical reso', item'
-        else
-          (* In this case the fact that the constant mp_to.l is
-             \Delta-equivalent to resolver(mp_from.l) is already known
-             because reso' contains mp_to maps to reso(mp_from) *)
-          reso', item'
+        include_field reso' l, item'
     | (l,SFBmind mib) ->
         let mib' = subst_mind_body subst mib in
         let item' = if mib' == mib then item else (l, SFBmind mib') in
         (* Same as constant *)
-        if incl then
-          let kn_from = KerName.make mp_from l in
-          let kn_to = KerName.make mp_to l in
-          let kn_canonical = kn_of_delta reso kn_from in
-          add_kn_delta_resolver kn_to kn_canonical reso', item'
-        else
-          reso', item'
+        include_field reso' l, item'
     | (l, SFBrules rrb) ->
         let rrb' = subst_rewrite_rules subst rrb in
         let item' = if rrb' == rrb then item else (l, SFBrules rrb') in
         (* Same as constant *)
-        if incl then
-          let kn_from = KerName.make mp_from l in
-          let kn_to = KerName.make mp_to l in
-          let kn_canonical = kn_of_delta reso kn_from in
-          add_kn_delta_resolver kn_to kn_canonical reso', item'
-        else
-          reso', item'
+        include_field reso' l, item'
     | (l,SFBmodule mb) ->
         let mp_from' = MPdot (mp_from,l) in
         let mp_to' = MPdot (mp_to,l) in
@@ -357,6 +375,19 @@ and strengthen_and_subst_struct struc subst mp_from mp_to alias incl reso =
   in
   List.Smart.fold_left_map strengthen_and_subst_field (empty_delta_resolver mp_to) struc
 
+(** [include_applied_structure mp_from struc reso mp] includes into [mp] the
+    result of a functor application. Nothing is strengthened, as there is no module
+    at [mp_from], the functor's path. *)
+let include_applied_structure mp_from struc reso mp =
+  let subst =
+    let subst = map_mp mp_from mp (empty_delta_resolver mp) in
+    map_mp mp_from mp (subst_dom_codom_delta_resolver subst reso)
+  in
+  let reso', struc' =
+    strengthen_and_subst_struct struc subst mp_from mp true (AliasIncl false) reso
+  in
+  struc', reso'
+
 (** Let P be a module path when we write:
      "Module M:=P." or "Module M. Include P. End M."
     We need to perform two operations to compute the body of M.
@@ -376,23 +407,28 @@ and strengthen_and_subst_struct struc subst mp_from mp_to alias incl reso =
 let strengthen_and_subst_module_body mp_from mb mp include_b = match mod_type mb with
   | NoFunctor struc ->
     let delta_mb = get_global_delta mb in
-    let mb_is_an_alias = mp_in_delta mp_from delta_mb in
+    let mb_is_an_alias = mp_is_alias delta_mb mp_from in
     (* if mb.mod_mp is an alias then the strengthening is useless
        (i.e. it is already done)*)
     let mp_alias = mp_of_delta delta_mb mp_from in
     let subst_resolver = map_mp mp_from mp (empty_delta_resolver mp) in
     let new_resolver =
-      add_mp_delta_resolver mp mp_alias
-        (subst_dom_delta_resolver subst_resolver delta_mb)
+      let dom = subst_dom_delta_resolver subst_resolver delta_mb in
+      if ModPath.equal mp mp_alias then
+        (* This only happens for Include Self and will fail later with a duplicate label error. *)
+        dom
+      else add_mp_delta_resolver mp mp_alias dom
     in
     let subst = map_mp mp_from mp new_resolver in
     let reso',struc' =
       strengthen_and_subst_struct struc subst
-        mp_from mp mb_is_an_alias include_b delta_mb
+        mp_from mp mb_is_an_alias (if include_b then AliasIncl true else AliasDef) delta_mb
     in
     let reso' = if include_b then reso' else add_delta_resolver new_resolver reso' in
     strengthen_module_body ~src:mp_from (NoFunctor struc') reso' mb
   | MoreFunctor _ ->
+    (* Functor inclusion is handled by [Mod_typing]. *)
+    let () = assert (not include_b) in
     let subst = map_mp mp_from mp (empty_delta_resolver mp) in
     Mod_declarations.subst_module subst_dom_codom subst mp_from mb
 

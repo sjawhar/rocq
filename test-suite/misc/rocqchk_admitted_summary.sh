@@ -8,6 +8,8 @@
 set -eu
 export PATH="$BIN:$PATH"
 
+. misc/rocqchk_summary_common.bash
+
 d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
 
@@ -21,11 +23,6 @@ EOF
 echo 'Require Lib. Definition use : 1 = 2 := Lib.Seal.tgt.' > "$d/Use.v"
 rocq c -native-compiler no -R "$d" "" "$d/Lib.v"
 rocq c -native-compiler no -R "$d" "" "$d/Use.v"
-
-# Print one summary section: its "* <title>" line and the lines under it, up to
-# the next "* " bullet. awk's index() takes the title literally, slashes and
-# parentheses included.
-section() { awk -v h="* $1" 'index($0, h) == 1 { p = 1; print; next } p && /^\* / { exit } p { print }' "$2"; }
 
 rocqchk -o -silent -R "$d" "" -admit Lib Use > "$d/admitted.log" 2>&1
 section 'Constants/Inductives relying on unsafe (co)fixpoints' "$d/admitted.log" \

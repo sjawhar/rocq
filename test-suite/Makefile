@@ -101,6 +101,9 @@ coqchk := $(BIN)rocqchk -R prerequisite TestSuite
 # Every coqchk the suite runs also cooks each opaque body the stock way and
 # fails unless that equals the shared cook (checker/checkLibrary.ml).
 export ROCQCHK_COOK_CROSS_CHECK := 1
+# Every rocqchk the suite runs also compares its inductive block pairs by
+# Indmerge.eq_mib and fails unless both agree (checker/check_compare.ml).
+export ROCQCHK_INDMERGE_CROSS_CHECK := 1
 coqdoc := $(BIN)rocq doc
 coqtop := $(BIN)rocq repl -q -test-mode -R prerequisite TestSuite
 
@@ -228,10 +231,14 @@ ifeq ($(TIMED),)
 all: run
 	$(MAKE) report
 else
+# /bin/sh has no pipefail: keep the status of "make run" in a file so that
+# tee cannot hide a failure, and fail if that status cannot be read back.
 all:
-	$(MAKE) run | tee time-of-build.log
+	rm -f time-of-build-status.log
+	{ $(MAKE) run; echo $$? > time-of-build-status.log; } | tee time-of-build.log
 	python ../tools/make-one-time-file.py --real time-of-build.log
 	$(MAKE) report
+	status=`cat time-of-build-status.log` && test -n "$$status" && exit "$$status"
 endif
 endif
 
@@ -348,6 +355,13 @@ unit-tests/src/utest.cmi: unit-tests/src/utest.mli
 	$(SHOW) 'OCAMLC  $<'
 	$(HIDE)$(OCAMLC) -package ounit2 -c $<
 
+# A test that fails under Utest.run_tests still exits 0, and the last line
+# of its log reads "... Error!", which "make report" finds. Fail here too,
+# so that "make unit-tests" and "make run" do not succeed with a failed test.
+unit-tests:
+	$(HIDE)failed=`grep -lsF 'Error!' /dev/null $(UNIT_LOGFILES)`; \
+	if [ -n "$$failed" ]; then printf 'FAILED    %s\n' $$failed >&2; exit 1; fi
+
 unit-tests: $(UNIT_LOGFILES)
 
 
@@ -377,7 +391,7 @@ $(addsuffix .log,$(wildcard prerequisite/*.v)): %.v.log: %.v
 	  $(call WITH_TIMER,$@,$(coqc) "$<" $(call get_coq_prog_args,"$<") 2>&1); R=$$?; times; \
 	  if [ $$R != 0 ]; then \
 	    echo $(log_failure); \
-	    echo "    $< ... could not be prepared" ; \
+	    echo "    $< ... Error! (could not be prepared)" ; \
 	    $(FAIL); \
 	  else \
 	    echo $(log_success); \
@@ -607,8 +621,9 @@ $(addsuffix .log,$(wildcard complexity/*.v)): %.v.log: %.v $(PREREQUISITELOG)
 	$(HIDE){ \
 	  echo $(call log_intro,$<); \
 	  true "extract effective user time"; \
-	  res=`$(call WITH_TIMER,$@,$(coqc_interactive) "$<" $(call get_coq_prog_args,"$<") 2>&1) | sed -n -e "s/Finished .*transaction in .*(\([0-9]*\.[0-9]*\)u.*)/\1/p" | head -1 | sed "s/\r//g"`; \
-	  R=$$?; times; \
+	  out=`$(call WITH_TIMER,$@,$(coqc_interactive) "$<" $(call get_coq_prog_args,"$<") 2>&1)`; \
+	  R=$$?; printf '%s\n' "$$out"; times; \
+	  res=`printf '%s\n' "$$out" | sed -n -e "s/Finished .*transaction in .*(\([0-9]*\.[0-9]*\)u.*)/\1/p" | head -1 | sed "s/\r//g"`; \
 	  if [ $$R != 0 ]; then \
 	    echo $(log_failure); \
 	    echo "    $< ... Error! (should be accepted)" ; \

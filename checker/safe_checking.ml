@@ -10,8 +10,51 @@
 
 open Environ
 
-let env_of_library senv clib =
+(* A delta resolver of a file can carry an [Inline (lev, Some t)] hint. A
+   substitution through it puts [t] in place of the constant the hint is
+   keyed at ([Mod_subst.subst_mps_flat]), under binders and without lifting,
+   and no check reads [t]: the alias checks go through
+   [Mod_subst.kn_of_delta], which skips the hint, and [Values] accepts any
+   term. rocqchk substitutes through the resolvers of the file and compares
+   the result without typing it again: a sealed module's expected signature
+   through its implementation's resolver ([Subtyping.check_subtypes] from
+   [Mod_checking.check_module]), a functor's body through its argument's
+   ([Mod_checking.check_mexpr]), a module alias through the aliased
+   module's, a functor's body through the resolver of the type of another
+   functor's parameter ([Subtyping.check_modtypes]). A forged [t] such as
+   [Rel 1], which the nearest binder captures, could make a field agree
+   with a declaration it does not agree with.
+
+   So before a library is checked or added to the environment, admitted or
+   not, each of its resolvers loses those terms: [Inline (lev, Some t)]
+   becomes [Inline (lev, None)], the hint coqc writes for a
+   [Parameter Inline], which no substitution inlines. coqc makes such a
+   term only in [Modops.inline_delta_resolver], which rocqchk never calls,
+   as the [Def] body of the constant the hint is keyed at; substituting
+   the resolver ([Mod_subst.subst_codom_delta_resolver]) can then give the
+   hint to a name that resolves to that constant. Inlining the term is
+   unfolding a definition that the environment holds. The terms rocqchk
+   substitutes are compared by conversion, which unfolds it, or walked for
+   what they use ([Check_closure]), which reaches the definition and then
+   its body, so an honest file gets the same verdict.
+
+   The substitutions an opaque proof records are left as they are: the
+   proof they give is typechecked in full
+   ([Mod_checking.check_constant_declaration]). *)
+let drop_inline_bodies clib =
+  let id x = x in
+  let drop = {
+    Mod_declarations.nmap_const = id;
+    nmap_mind = id;
+    nmap_rules = id;
+    nmap_constr = id;
+    nmap_delta = Mod_subst.drop_inline_bodies;
+  } in
   let mb = Safe_typing.module_of_library clib in
+  let mb' = Mod_declarations.map_module drop mb in
+  if mb' == mb then clib else Safe_typing.replace_module_of_library clib mb'
+
+let env_of_library senv clib =
   let env = Safe_typing.env_of_safe_env senv in
   let qualities, univs = Safe_typing.univs_of_library clib in
   let check_quality q =
@@ -20,8 +63,7 @@ let env_of_library senv clib =
   in
   let () = assert (Sorts.QVar.Set.for_all check_quality (fst qualities)) in
   let env = push_qualities ~rigid:true qualities env in
-  let env = push_context_set ~strict:true univs env in
-  Modops.add_retroknowledge (Mod_declarations.mod_retroknowledge mb) env
+  push_context_set ~strict:true univs env
 
 (* The checker does not read the [vmlibrary] segment of the file at all: it
    compiles the bytecode of every constant itself, from the declarations it is
@@ -35,8 +77,15 @@ let compile_vm_library env clib =
   vmtab, Safe_typing.replace_module_of_library clib mb
 
 let import senv opac clib digest =
+  let clib = drop_inline_bodies clib in
   let senv = Safe_typing.check_flags_for_library clib senv in
   let dp = Safe_typing.dirpath_of_library clib in
+  (* Not added to the environment the library is checked in: [check_module]
+     checks each registration against what it names, and puts it in force
+     once that is checked, at once for an inductive type of an earlier
+     library. [Safe_typing.import] adds them all to the environment it
+     returns. *)
+  let retro = Safe_typing.retroknowledge_of_library clib in
   let env = env_of_library senv clib in
   let vmtab, clib = compile_vm_library env clib in
   let env = Environ.set_vm_library vmtab env in
@@ -63,7 +112,7 @@ let import senv opac clib digest =
      Move a global relocation into the non-substituted table and the VM would
      keep the pre-merge name while the kernel checks the merged one. *)
   let mb = Indmerge.apply_earlier_merges (Names.ModPath.MPfile dp) mb in
-  let opac = Mod_checking.check_module env opac (Names.ModPath.MPfile dp) mb in
+  let opac = Mod_checking.check_module env opac retro (Names.ModPath.MPfile dp) mb in
   let vmtab = Vmlibrary.inject (Vmlibrary.export vmtab) in
   let (_,senv) = Safe_typing.import clib vmtab digest senv in senv, opac
 
@@ -80,6 +129,8 @@ let import senv opac clib digest : _ * _ =
    merging against it adds no trust, and the grader's invocation leaves our
    own statement library unchecked. *)
 let unsafe_import senv clib digest =
+  (* The libraries checked after it substitute through its resolvers too. *)
+  let clib = drop_inline_bodies clib in
   (* The library's own flags first, as [import] sets them: compiling the
      bytecode below adds the library's constants to the environment, and a
      [Symbol] among them is refused unless the environment allows rewrite
