@@ -7,8 +7,8 @@
 # Compiling such a library or definition, loading the library with Require
 # (safe) or Require, and using the definition or the deprecated object must
 # exit 0, give the warning and print no anomaly. A category that is the name
-# of a plain warning is refused with an error. Every case runs, and each
-# failure is named.
+# of a plain warning is refused with an error, also when the warning name is
+# taken. Every case runs, and each failure is named.
 
 export PATH=$BIN:$PATH
 
@@ -19,15 +19,17 @@ cd misc/safe-require-warn-default || exit 1
 failed=0
 fail() { echo "FAILURE: $*"; failed=1; }
 
-# compile <file> [<flags>...]: compile <file> within 120 s into <file>.real,
-# print its output, set [rc] and fail on any anomaly.
+# compile <file> [<flags>...]: compile <file> within 120 s, print its output,
+# set [rc] and fail on any anomaly. The output is kept in [out], a file named
+# after <file> and the flags.
 compile() {
   local f=$1
   shift
+  out=$f$(printf '%s' "$*" | tr -c 'a-z' '_').real
   rc=0
-  timeout 120 rocq c -R . Top "$@" "$f" > "$f.real" 2>&1 || rc=$?
-  cat "$f.real"
-  if grep -q Anomaly "$f.real"; then fail "$f${*:+ $*} raised an anomaly"; fi
+  timeout 120 rocq c -R . Top "$@" "$f" > "$out" 2>&1 || rc=$?
+  cat "$out"
+  if grep -q Anomaly "$out"; then fail "$f${*:+ $*} raised an anomaly"; fi
 }
 
 # run <file> <warning categories, or ""> [<flags>...]: <file> must compile,
@@ -38,8 +40,18 @@ run() {
   shift 2
   compile "$f" "$@"
   if [ "$rc" != 0 ]; then fail "$f${*:+ $*} exited with $rc"
-  elif [ -n "$cats" ] && ! grep -q -F "[$cats]" "$f.real"; then
+  elif [ -n "$cats" ] && ! grep -q -F "[$cats]" "$out"; then
     fail "$f${*:+ $*} did not give the warning [$cats]"
+  fi
+}
+
+# refuse <file> <plain warning>: <file> must stop with the error that a
+# category names <plain warning>.
+refuse() {
+  compile "$1"
+  if [ "$rc" = 0 ] || [ "$rc" -ge 124 ]; then fail "$1 exited with $rc, not an error"
+  elif ! grep -q -F "Cannot use $2 as a category name." "$out"; then
+    fail "$1 did not give the error"
   fi
 }
 
@@ -54,17 +66,31 @@ library() {
   run "$name.v" ""
   run "Safe$name.v" "$cats"
   run "Plain$name.v" "$cats"
-  # The grader's flags.
+  # -w none: every warning off.
   run "Safe$name.v" "" -w none
 }
 
-# definition <name> <cats> <warning categories>: a definition with this warn
-# attribute, used in its own file and by clients that require its library
-# with Require (safe) and with Require. A safe load gives no warning of a
-# definition.
+# refused <name> <plain warning> <line>...: a library of these lines, which
+# compiles, and whose Require (safe) and Require are refused because a
+# category names <plain warning>.
+refused() {
+  local name=$1 warning=$2
+  shift 2
+  printf '%s\n' "$@" > "$name.v"
+  echo "Require (safe) $name." > "Safe$name.v"
+  echo "Require $name." > "Plain$name.v"
+  run "$name.v" ""
+  refuse "Safe$name.v" "$warning"
+  refuse "Plain$name.v" "$warning"
+}
+
+# definition <name> <attribute cats> <warning categories>: a definition with
+# this warn attribute, used in its own file and by clients that require its
+# library with Require (safe) and with Require. A safe load gives no warning
+# of a definition.
 definition() {
-  local name=$1 cats=$3
-  printf '%s\n' "#[warn(note=\"n\", cats=\"$2\")] Definition d := 0." 'Check d.' > "$name.v"
+  local name=$1 attr_cats=$2 cats=$3
+  printf '%s\n' "#[warn(note=\"n\", cats=\"$attr_cats\")] Definition d := 0." 'Check d.' > "$name.v"
   printf '%s\n' "Require (safe) $name." "Check Top.$name.d." > "Safe$name.v"
   printf '%s\n' "Require $name." "Check Top.$name.d." > "Plain$name.v"
   run "$name.v" "$cats"
@@ -80,9 +106,13 @@ library LAll warn-library-file-all,warn-library-file,user-warn,default \
   'Attributes warn(note="n", cats="all").'
 library LMix warn-library-file-all-default-foo-none,foo,warn-library-file,user-warn,default \
   'Attributes warn(note="n", cats="default, none, all, foo").'
-# Two lists that give one warning name share the first one's warning.
+# Two lists that give one warning name share the first one's warning, and
+# each note is given.
 library LSameName warn-library-file-a-b,b,a,warn-library-file,user-warn,default \
   'Attributes warn(note="n1", cats="a,b").' 'Attributes warn(note="n2", cats="a b").'
+for f in SafeLSameName.v PlainLSameName.v; do
+  grep -q -F 'Warning: n2' "$f.real" || fail "$f did not give the note n2"
+done
 # The second warning's name is a category made by the first one: it is
 # given without its categories.
 library LCatName warn-library-file,user-warn,default \
@@ -111,17 +141,16 @@ printf '%s\n' 'Require LDepRef.' '#[deprecated(since="bet", note="x")] Definitio
 run SafeDepRef.v deprecated-reference,deprecated,default
 run PlainDepRef.v deprecated-reference,deprecated,default
 
-# A plain warning is not a category: requiring the library is refused.
-echo 'Attributes warn(note="n", cats="require-in-module").' > LWarning.v
-echo 'Require (safe) LWarning.' > SafeLWarning.v
-echo 'Require LWarning.' > PlainLWarning.v
-run LWarning.v ""
-for f in SafeLWarning.v PlainLWarning.v; do
-  compile "$f"
-  if [ "$rc" = 0 ] || [ "$rc" -ge 124 ]; then fail "$f exited with $rc, not an error"
-  elif ! grep -q -F 'Cannot use require-in-module as a category name.' "$f.real"; then
-    fail "$f did not give the error"
-  fi
-done
+# A plain warning is not a category: requiring the library is refused, also
+# when the warning name of the list is taken, by the warning of another list
+# or by a category.
+refused LWarning require-in-module 'Attributes warn(note="n", cats="require-in-module").'
+refused LAmbiguous ambiguous-paths \
+  'Attributes warn(note="n1", cats="ambiguous,paths").' 'Attributes warn(note="n2", cats="ambiguous paths").'
+printf '%s\n' '#[warn(note="n1", cats="warn-reference-ambiguous-paths")] Definition d1 := 0.' \
+  '#[warn(note="n2", cats="ambiguous paths")] Definition d2 := 0.' > DAmbiguous.v
+printf '%s\n' 'Require DAmbiguous.' 'Check Top.DAmbiguous.d1.' 'Check Top.DAmbiguous.d2.' > PlainDAmbiguous.v
+run DAmbiguous.v ""
+refuse PlainDAmbiguous.v ambiguous-paths
 
 exit "$failed"

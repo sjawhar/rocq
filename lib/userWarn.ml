@@ -59,6 +59,9 @@ let create_warning ?default ~warning_name_if_no_cats () =
         | None ->
            let l = String.split_on_char ',' cats in
            let name = String.concat "-" (warning_name_if_no_cats :: l) in
+           (* Each category is checked first, so a category that names a
+              plain warning is refused whatever the name. *)
+           let generic_cats = List.filter_map get_generic_cat l in
            (* The name may be taken: by the warning of another list, such as
               "a,b" for "a b", which is then shared, or by a category, and
               then the warning is given without its categories. *)
@@ -66,7 +69,6 @@ let create_warning ?default ~warning_name_if_no_cats () =
              | There w -> CWarnings.create_in w Pp.strbrk
              | OtherType -> main_w
              | NotThere ->
-               let generic_cats = List.filter_map get_generic_cat l in
                let w = CWarnings.create_warning ?default ~from:(main_cat :: generic_cats) ~name () in
                CWarnings.create_in w Pp.strbrk
            in
