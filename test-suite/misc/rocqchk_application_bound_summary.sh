@@ -85,12 +85,10 @@ done
 # lists <library> <name>: rocqchk -o accepts the library and its Axioms
 # section names exactly <name>.
 lists() {
-  local R=0 listed
-  timeout 120 "$BIN"rocqchk -silent -o -bytecode-compiler yes -Q "$d" Bound -norec "Bound.$1" \
-    > "$d/$1.log" 2>&1 || R=$?
-  listed=$(section 'Axioms' "$d/$1.log" | sed -n 's/^    //p')
-  if [ "$R" != 0 ] || [ "$listed" != "$2" ]; then
-    echo "rocqchk -o exited with $R on $1, or did not list exactly $2"
+  local listed
+  listed=$(axioms "$d/$1.log" -bytecode-compiler yes -Q "$d" Bound -norec "Bound.$1")
+  if [ "$listed" != "$2" ]; then
+    echo "rocqchk -o did not list exactly $2 on $1"
     cat "$d/$1.log"
     exit 1
   fi

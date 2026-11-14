@@ -24,7 +24,7 @@ $coqc -noinit -Q "$d/honest" FunctorLoop "$d/honest/Loop.v"
 cp "$d/honest/Loop.vo" "$d/forged/"
 ocaml "$D/forge.ml" "$d/forged/Loop.vo"
 
-axioms "$d/honest" "$d/honest.log" FunctorLoop Loop > "$d/honest-axioms"
+axioms "$d/honest.log" -Q "$d/honest" FunctorLoop -admit FunctorLoop.Loop > "$d/honest-axioms"
 if [ "$(cat "$d/honest-axioms")" != "FunctorLoop.Loop.R.ax" ]; then
   echo "the honest library does not list exactly FunctorLoop.Loop.R.ax"
   cat "$d/honest.log"
