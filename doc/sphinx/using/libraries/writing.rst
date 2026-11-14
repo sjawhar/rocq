@@ -92,7 +92,10 @@ notation, definition, axiom, theorem or file.
    is in ``default``, and ``none`` is a keyword of the :opt:`Warnings`
    option, not a category: naming one of them in :n:`cats` only changes
    the warning's name. Two lists that give one warning name, such as
-   ``a,b`` and ``a b``, share the warning of the first.
+   ``a,b`` and ``a b``, share the warning of the first. If the warning
+   name is already the name of a category, the warning is given under
+   the attribute's base warning name, such as ``warn-reference`` or
+   ``warn-library-file``, without its categories.
 
    This attribute is supported by the following commands:
    :cmd:`Notation`, :cmd:`Infix`, :cmd:`Definition`, :cmd:`Theorem`,
