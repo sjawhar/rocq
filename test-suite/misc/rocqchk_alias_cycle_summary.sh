@@ -26,7 +26,7 @@ $coqc -noinit -Q "$d/honest" AliasCycle "$d/honest/Cycle.v"
 cp "$d/honest/Cycle.vo" "$d/forged/"
 ocaml "$D/forge.ml" "$d/forged/Cycle.vo"
 
-axioms "$d/honest" "$d/honest.log" AliasCycle Cycle > "$d/honest-axioms"
+axioms "$d/honest.log" -Q "$d/honest" AliasCycle -admit AliasCycle.Cycle > "$d/honest-axioms"
 if [ -s "$d/honest-axioms" ]; then
   echo "the honest library has axioms"
   cat "$d/honest.log"

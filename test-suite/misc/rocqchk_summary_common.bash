@@ -20,22 +20,23 @@
 # index() takes the title literally, slashes and parentheses included.
 section() { awk -v h="* $1" 'index($0, h) == 1 { p = 1; print; next } p && /^\* / { exit } p { print }' "$2"; }
 
-# axioms <dir> <log> <root> <library>: rocqchk -o on <dir>, bound to <root>,
-# with <root>.<library> admitted, within a time limit, and its output in
-# <log>. Then print the names of the Axioms section, sorted. The caller keeps
-# the standard output, so a failure is said on the standard error.
+# axioms <log> <argument>...: rocqchk -silent -o <argument>..., within a
+# time limit, and its output in <log>. rocqchk must accept the library. Then
+# print the names of the Axioms section, sorted. The caller keeps the
+# standard output, so a failure is said on the standard error.
 axioms () {
-  local R=0
-  timeout 120 "$BIN"rocqchk -silent -o -Q "$1" "$3" -admit "$3.$4" > "$2" 2>&1 || R=$?
+  local log=$1 R=0
+  shift
+  timeout 120 "$BIN"rocqchk -silent -o "$@" > "$log" 2>&1 || R=$?
   if [ "$R" = 124 ]; then
-    echo "rocqchk -o did not end within 120 s on $1" >&2
+    echo "rocqchk -o did not end within 120 s: $*" >&2
     exit 1
   elif [ "$R" != 0 ]; then
-    echo "rocqchk -o exited with $R on $1" >&2
-    cat "$2" >&2
+    echo "rocqchk -o exited with $R: $*" >&2
+    cat "$log" >&2
     exit 1
   fi
-  section 'Axioms' "$2" | sed -n 's/^    //p' | LC_ALL=C sort
+  section 'Axioms' "$log" | sed -n 's/^    //p' | LC_ALL=C sort
 }
 
 # refusal <log> <argument>...: rocqchk -silent -o <argument>..., within a
