@@ -776,7 +776,13 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
 :-admit *module*: Do not check *module* and any of its dependencies,
   unless explicitly required.
 :-o: At exit, print a summary about the context. List the names of all
-  assumptions and variables (constants without a :term:`body`).
+  assumptions and variables (constants without a :term:`body`). The axioms
+  of a functor application are read in the functor's body, under the
+  application's name. Where that reading stops, at an application read
+  inside 64 nested applications, after 100000 applications, or at a shape
+  that only a crafted ``.vo`` holds, such as an alias cycle, no summary is
+  printed and ``rocqchk`` ends with an error (exit code 1), even on a library
+  it otherwise accepts.
 :-silent: Do not write progress information to the standard output.
 :-j *n*: Check opaque proofs in parallel, using up to *n* processes at the
   same time (the default is 1). The bodies of opaque constants are checked by

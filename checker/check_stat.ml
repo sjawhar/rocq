@@ -172,9 +172,10 @@ let record_axiom c =
    [Declare Module], where no implementation leads to it; at the end, over
    the final environment, which holds every functor an application names,
    the section asks [Mod_impl.application_axioms], which reads the functor's
-   body, or, where it cannot read that body, lists the constants without a
-   body of the application's type and of each functor's result type
-   (mod_impl.ml says where).
+   body, or, for a functor that has no body, lists the constants without a
+   body of the application's type and of each functor's result type. Where
+   the walk stops before it reads a body, it raises a user error and no
+   summary is printed (mod_impl.ml says where).
    [record_sealed_axioms] says why the walk records them. *)
 let applications = ref []
 
