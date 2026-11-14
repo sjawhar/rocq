@@ -27,7 +27,7 @@ cp "$src" "$d/"
 
 proofs="boom boom_opaque boom_ascribed boom_inner boom_sub boom_local
         boom_sealed_functor uses_r uses_r2 uses_r3 uses_r4 uses_r5 uses_r6
-        uses_r7 boom_higher boom_higher_sealed boom_expr boom_decl boom_deep
+        uses_r7 boom_higher boom_higher_sealed boom_expr boom_decl
         boom_decl_type"
 {
   echo "Require $lib."
@@ -36,21 +36,19 @@ proofs="boom boom_opaque boom_ascribed boom_inner boom_sub boom_local
 rocq c -native-compiler no -R "$d" "" "$d/$lib.v"
 rocq c -native-compiler no -R "$d" "" "$d/Use.v" > "$d/pa.log" 2>&1
 
-# The axiom under the 66 applications of SDeep: App, then 65 times M.
-deep=$lib.SDeep.App.$(printf 'M.%.0s' $(seq 65))a
 # Each axiom both accounts must name.
 assumed="$lib.S.App.in_f $lib.SOpaque.App.in_f $lib.SAscribed.App.in_g
          $lib.SNested.Inner.App.in_f $lib.SNested.Sub.App.in_g
          $lib.SLocal.App.in_h $lib.SSealedFunctor.App.in_k $lib.R6.hidden
          $lib.R7.e $lib.RH.M.M.g $lib.SHigher.R.M.M.g $lib.SExpr.App.in_f
-         $lib.SDecl.App.p $deep $lib.SDeclType.D.App.in_f"
+         $lib.SDecl.App.p $lib.SDeclType.D.App.in_f"
 # Each field a functor defines, and each functor's own name for an axiom of
 # its body: neither account names them.
 defined="$lib.R.e $lib.R2.e $lib.R3.e $lib.R4.e $lib.R5.Y.e $lib.R6.e
          $lib.SAscribed.App.use_f $lib.SNested.Sub.App.use_f
          $lib.SSealedFunctor.App.use_f $lib.F.in_f $lib.G.in_g $lib.K.in_k
          $lib.SLocal.H.in_h $lib.RH.M.use $lib.SHigher.R.M.use $lib.Gh.g
-         $lib.DF.p $lib.C0.a"
+         $lib.DF.p"
 
 # A line of Print Assumptions is "name : type"; for a long name the printer
 # puts the type on the next line, after "name :".

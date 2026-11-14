@@ -4,13 +4,12 @@
 # (checker/mod_impl.ml), and the applications in that body in turn. rocqchk
 # does not check an admitted library, so its functor's body can apply that
 # functor again, which coqc never writes: forge.ml makes F's body in the
-# honest Loop.v hold Grow := F Loc, whose argument is a module of each
-# application, a path that grows at each level, and Same := F X, whose
-# arguments are those of the application around it. Reading R := F A must
-# still end, keep R.ax, and list a bounded number of names, each R.ax under
-# some Grows, or under Same, where the walk stops and lists the parameters of
-# F's type instead of its body. The honest library is the control: it lists
-# R.ax alone.
+# honest Loop.v hold Grow := F Loc and Same := F X. In F's body read as
+# R := F A, F's own path names R, so the walk reads Grow, which comes first,
+# as R's expression F A applied to R.Loc as well: one argument more than F
+# takes. It cannot read that application, so rocqchk -o must end, and refuse
+# to print a summary, with an error that names it. The honest library is the
+# control: it lists R.ax alone.
 set -eu
 
 . misc/rocqchk_summary_common.bash
@@ -32,18 +31,10 @@ if [ "$(cat "$d/honest-axioms")" != "FunctorLoop.Loop.R.ax" ]; then
   exit 1
 fi
 
-axioms "$d/forged" "$d/forged.log" FunctorLoop Loop > "$d/axioms"
-if ! grep -qx 'FunctorLoop.Loop.R.ax' "$d/axioms"; then
-  echo "the forged library does not list FunctorLoop.Loop.R.ax"
+got=$(refusal "$d/forged.log" -Q "$d/forged" FunctorLoop -admit FunctorLoop.Loop)
+expected="the walk of the module implementations stopped at the application FunctorLoop.Loop.R.Grow := FunctorLoop.Loop.F FunctorLoop.Loop.A FunctorLoop.Loop.R.Loc, whose arguments do not fit the functor's parameters."
+if [ "$got" != "$expected" ]; then
+  echo "rocqchk -o refused the forged functor with another error"
   cat "$d/forged.log"
-  exit 1
-fi
-if grep -v -x 'FunctorLoop\.Loop\.R\(\.Grow\)*\(\.Same\)\?\.ax' "$d/axioms"; then
-  echo "the forged library lists a name other than R[.Grow...][.Same].ax"
-  exit 1
-fi
-n=$(wc -l < "$d/axioms")
-if [ "$n" -gt 200 ]; then
-  echo "the forged library lists $n names"
   exit 1
 fi

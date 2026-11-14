@@ -336,8 +336,9 @@ let rec collect_constants_without_body sign mp accu =
    its name, [R.x] for [R := F A] or [R : T := F A], visible or sealed,
    whether a proof reaches them or not. This covers an application inside
    a seal, behind a helper with a body, and a seal a functor body declares.
-   What [Mod_impl] reads, types included, and what it lists where it does
-   not read a functor's body, is written in mod_impl.ml.
+   What [Mod_impl] reads, types included, what it lists for a functor that
+   has no body, and where it stops and refuses the summary instead, is
+   written in mod_impl.ml.
 
    Where a sealed implementation reaches a sibling's axiom through an
    [Include], an alias or an ascription of it, the two accounts name one

@@ -1,8 +1,9 @@
 # Shared helpers of the fork's misc tests that read the summary of
 # rocqchk -o: rocqchk_admitted_summary.sh, rocqchk_sealed_axiom_summary.sh,
 # rocqchk_ascribed_axiom_summary.sh, rocqchk_application_axiom_summary.sh,
-# rocqchk_alias_cycle_summary.sh, rocqchk_functor_loop_summary.sh,
-# rocqchk_cook.sh and rocqchk_primitive_type.sh. Each sources it with
+# rocqchk_application_bound_summary.sh, rocqchk_alias_cycle_summary.sh,
+# rocqchk_functor_loop_summary.sh, rocqchk_cook.sh and
+# rocqchk_primitive_type.sh. Each sources it with
 #
 #   . misc/rocqchk_summary_common.bash
 #
@@ -35,4 +36,28 @@ axioms () {
     exit 1
   fi
   section 'Axioms' "$2" | sed -n 's/^    //p' | LC_ALL=C sort
+}
+
+# refusal <log> <argument>...: rocqchk -silent -o <argument>..., within a
+# time limit, and its output in <log>. rocqchk must refuse to print a
+# summary it could not complete (checker/mod_impl.ml): exit 1, no summary,
+# and the error below. Then print what the error says after its first
+# sentence. The caller keeps the standard output, so a failure is said on
+# the standard error.
+refusal () {
+  local log=$1 R=0 line
+  local error='Fatal Error: User error: The Axioms summary could not be completed: '
+  shift
+  timeout 120 "$BIN"rocqchk -silent -o "$@" > "$log" 2>&1 || R=$?
+  if [ "$R" = 124 ]; then
+    echo "rocqchk -o did not end within 120 s: $*" >&2
+    exit 1
+  fi
+  line=$(grep -m 1 -F "$error" "$log") || line=
+  if [ "$R" != 1 ] || [ -z "$line" ] || grep -q 'CONTEXT SUMMARY' "$log"; then
+    echo "rocqchk -o exited with $R and did not refuse the summary: $*" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+  printf '%s\n' "${line#"$error"}"
 }
