@@ -82,18 +82,6 @@ for lib in Deep Short Wide Inner; do
   fi
 done
 
-# lists <library> <name>: rocqchk -o accepts the library and its Axioms
-# section names exactly <name>.
-lists() {
-  local listed
-  listed=$(axioms "$d/$1.log" -bytecode-compiler yes -Q "$d" Bound -norec "Bound.$1")
-  if [ "$listed" != "$2" ]; then
-    echo "rocqchk -o did not list exactly $2 on $1"
-    cat "$d/$1.log"
-    exit 1
-  fi
-}
-
 n64=$(printf '.N%.0s' $(seq 64))
 expected="the walk of the module implementations stopped at the application Bound.Deep.R$n64 := Bound.Deep.F0 Bound.Deep.A, which is read inside 64 nested applications, the most it reads."
 got=$(refusal "$d/deep.log" -bytecode-compiler yes -Q "$d" Bound -norec Bound.Deep)
@@ -103,7 +91,8 @@ if [ "$got" != "$expected" ]; then
   exit 1
 fi
 
-lists Short "Bound.Short.R$(printf '.N%.0s' $(seq 63)).hidden"
+lists "$d/short.log" "Bound.Short.R$(printf '.N%.0s' $(seq 63)).hidden" \
+  -bytecode-compiler yes -Q "$d" Bound -norec Bound.Short
 
 got=$(refusal "$d/wide.log" -bytecode-compiler yes -Q "$d" Bound -norec Bound.Wide)
 if ! printf '%s\n' "$got" | grep -q -x -E 'the walk of the module implementations stopped at the application Bound\.Wide\.R(\.N[0-9])+ := Bound\.Wide\.F[0-4] Bound\.Wide\.A, after 100000 applications, the most it reads for one summary\.'; then
@@ -112,4 +101,4 @@ if ! printf '%s\n' "$got" | grep -q -x -E 'the walk of the module implementation
   exit 1
 fi
 
-lists Inner "Bound.Inner.Z.Q.Q.a"
+lists "$d/inner.log" Bound.Inner.Z.Q.Q.a -bytecode-compiler yes -Q "$d" Bound -norec Bound.Inner

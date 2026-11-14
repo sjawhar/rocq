@@ -24,12 +24,7 @@ $coqc -noinit -Q "$d/honest" FunctorLoop "$d/honest/Loop.v"
 cp "$d/honest/Loop.vo" "$d/forged/"
 ocaml "$D/forge.ml" "$d/forged/Loop.vo"
 
-axioms "$d/honest.log" -Q "$d/honest" FunctorLoop -admit FunctorLoop.Loop > "$d/honest-axioms"
-if [ "$(cat "$d/honest-axioms")" != "FunctorLoop.Loop.R.ax" ]; then
-  echo "the honest library does not list exactly FunctorLoop.Loop.R.ax"
-  cat "$d/honest.log"
-  exit 1
-fi
+lists "$d/honest.log" FunctorLoop.Loop.R.ax -Q "$d/honest" FunctorLoop -admit FunctorLoop.Loop
 
 got=$(refusal "$d/forged.log" -Q "$d/forged" FunctorLoop -admit FunctorLoop.Loop)
 expected="the walk of the module implementations stopped at the application FunctorLoop.Loop.R.Grow := FunctorLoop.Loop.F FunctorLoop.Loop.A FunctorLoop.Loop.R.Loc, whose arguments do not fit the functor's parameters."
