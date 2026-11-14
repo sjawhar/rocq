@@ -13,10 +13,11 @@
 
 val defines_constant : Environ.env -> Names.Constant.t -> bool
 (** Does the implementation give this constant a body? [false] where it
-    declares it as a parameter or an axiom, and where the walk cannot read
-    the implementation, so that a caller that reports assumed constants keeps
-    every name it is unsure of. A field of a functor application is read in
-    the functor's body. *)
+    declares it as a parameter or an axiom, and where no implementation
+    leads to it, so that a caller that reports assumed constants keeps every
+    name it is unsure of. A field of a functor application is read in the
+    functor's body. Raises a user error where the walk stops before it has
+    read an implementation it needs (mod_impl.ml says where). *)
 
 val application_axioms :
   Environ.env -> Names.ModPath.t -> Mod_declarations.module_body -> Names.Constant.t list
@@ -24,11 +25,13 @@ val application_axioms :
     body is the one given, and of the modules it implements under it, that
     have no body, named under the path: for [Module R := F A] or
     [Module R : T := F A], those F's body declares without one, which are R's
-    axioms under the names Print Assumptions prints for them. Where the walk
-    cannot read the body of an application, the constants without a body in
-    the application's type and in the result type of each functor it
-    followed to it, which can be more names than Print Assumptions prints. *)
+    axioms under the names Print Assumptions prints for them. For an
+    application of a functor that has no body, the constants without a body
+    in the application's type and in the result type of each functor it
+    followed to it, which can be more names than Print Assumptions prints.
+    Raises a user error where the walk stops before it has read a body it
+    needs (mod_impl.ml says where). *)
 
 val debug_counts : Environ.env -> unit
 (** With [-d checker-summary], print how many applications were read for
-    this environment, and how many were stopped. *)
+    this environment. *)

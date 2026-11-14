@@ -682,6 +682,12 @@ let exit_code = function
   | CheckWorkers.WorkerFailed _ -> 1
   | e -> CErrors.exit_code e
 
+(* The error [e] ends the run: its backtrace with -d misc, its text, then its
+   exit code. *)
+let fatal_exn e =
+  if CDebug.(get_flag misc) then Printexc.print_backtrace stderr;
+  fatal_error (explain_exn e) (exit_code e)
+
 (* A worker reports its error as [run] does, then exits with the same
    code, which the main process passes on. *)
 let () = CheckWorkers.set_error_printer (fun e ->
@@ -692,9 +698,7 @@ let run senv =
   try
     let senv = compile_files senv in
     flush_all(); senv
-  with e ->
-    if CDebug.(get_flag misc) then Printexc.print_backtrace stderr;
-    fatal_error (explain_exn e) (exit_code e)
+  with e -> fatal_exn e
 
 (* The report is evidence beside the verdict, never the verdict: a report
    that cannot be completed is left without its end marker, which a reader
@@ -714,7 +718,9 @@ let print_statement_report env requests =
    a run that could not complete -- a challenge file whose sha256 differs, a
    pre-checked library the two sides disagree on, a theorem the challenge
    does not hold -- exits non-zero and writes no verdict file. A verdict,
-   whatever it says, leaves the exit status at 0. *)
+   whatever it says, leaves the exit status at 0, except with -o: the context
+   summary is printed after the verdict file is written, and a summary the
+   walk of mod_impl.ml could not complete makes the run exit 1. *)
 let run_compare env =
   match !compare_config with
   | None -> ()
@@ -808,9 +814,7 @@ let run_compare env =
                 !user_includes)
       in
       Check_compare.run t env CheckLibrary.indirect_accessor (make_senv ()) ~answer_deps
-    with e ->
-      if CDebug.(get_flag misc) then Printexc.print_backtrace stderr;
-      fatal_error (explain_exn e) (exit_code e)
+    with e -> fatal_exn e
 
 
 let main () =
@@ -820,5 +824,7 @@ let main () =
   let env = Safe_typing.env_of_safe_env senv in
   Option.iter (print_statement_report env) !statement_report;
   run_compare env;
-  Check_stat.stats env opac;
+  (* A summary the walk of mod_impl.ml could not complete is refused with a
+     user error, reported as a check's error is. *)
+  (try Check_stat.stats env opac with e -> fatal_exn e);
   exit 0
