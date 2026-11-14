@@ -2,8 +2,8 @@
 # rocqchk -o: rocqchk_admitted_summary.sh, rocqchk_sealed_axiom_summary.sh,
 # rocqchk_ascribed_axiom_summary.sh, rocqchk_application_axiom_summary.sh,
 # rocqchk_application_bound_summary.sh, rocqchk_alias_cycle_summary.sh,
-# rocqchk_functor_loop_summary.sh, rocqchk_cook.sh and
-# rocqchk_primitive_type.sh. Each sources it with
+# rocqchk_functor_loop_summary.sh, rocqchk_walk_stop_summary.sh,
+# rocqchk_cook.sh and rocqchk_primitive_type.sh. Each sources it with
 #
 #   . misc/rocqchk_summary_common.bash
 #
@@ -21,9 +21,10 @@
 section() { awk -v h="* $1" 'index($0, h) == 1 { p = 1; print; next } p && /^\* / { exit } p { print }' "$2"; }
 
 # axioms <log> <argument>...: rocqchk -silent -o <argument>..., within a
-# time limit, and its output in <log>. rocqchk must accept the library. Then
-# print the names of the Axioms section, sorted. The caller keeps the
-# standard output, so a failure is said on the standard error.
+# time limit, and its output in <log>. rocqchk must accept the library and
+# print an Axioms section. Then print the names of that section, sorted. The
+# caller keeps the standard output, so a failure is said on the standard
+# error.
 axioms () {
   local log=$1 R=0
   shift
@@ -35,8 +36,27 @@ axioms () {
     echo "rocqchk -o exited with $R: $*" >&2
     cat "$log" >&2
     exit 1
+  elif ! grep -q '^\* Axioms' "$log"; then
+    echo "rocqchk -o printed no Axioms section: $*" >&2
+    cat "$log" >&2
+    exit 1
   fi
   section 'Axioms' "$log" | sed -n 's/^    //p' | LC_ALL=C sort
+}
+
+# lists <log> <expected> <argument>...: axioms <log> <argument>..., whose
+# names must be exactly <expected>, one per line, sorted as axioms sorts
+# them. A failure is said on the standard error, with the log.
+lists () {
+  local log=$1 expected=$2 listed
+  shift 2
+  listed=$(axioms "$log" "$@") || exit 1
+  if [ "$listed" != "$expected" ]; then
+    echo "rocqchk -o did not list exactly the expected names: $*" >&2
+    printf 'expected:\n%s\nlisted:\n%s\n' "$expected" "$listed" >&2
+    cat "$log" >&2
+    exit 1
+  fi
 }
 
 # refusal <log> <argument>...: rocqchk -silent -o <argument>..., within a

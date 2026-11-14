@@ -778,11 +778,16 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
 :-o: At exit, print a summary about the context. List the names of all
   assumptions and variables (constants without a :term:`body`). The axioms
   of a functor application are read in the functor's body, under the
-  application's name. Where that reading stops, at an application read
-  inside 64 nested applications, after 100000 applications, or at a shape
-  that only a crafted ``.vo`` holds, such as an alias cycle, no summary is
-  printed and ``rocqchk`` ends with an error (exit code 1), even on a library
-  it otherwise accepts.
+  application's name. That reading stops at an application read inside 64
+  nested applications, and where it would take more than 100000 steps:
+  each functor it resolves, through aliases, partial applications and
+  functors defined by expressions, costs one step, and one more for each
+  name in its path after the library or functor parameter it starts from
+  (``Lib.F`` costs two steps, ``Lib.M.F`` three).
+  A library can reach these two bounds; every other stop needs a crafted
+  ``.vo``, such as one that holds an alias cycle. Where the reading stops,
+  no summary is printed and ``rocqchk`` ends with an error (exit code 1),
+  even on a library it otherwise accepts.
 :-silent: Do not write progress information to the standard output.
 :-j *n*: Check opaque proofs in parallel, using up to *n* processes at the
   same time (the default is 1). The bodies of opaque constants are checked by
