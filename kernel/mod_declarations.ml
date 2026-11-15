@@ -39,8 +39,7 @@ and 'a generic_module_body =
     mod_type : module_signature; (** expanded type *)
     mod_type_alg : module_expression option; (** algebraic type *)
     mod_delta : Mod_subst.delta_resolver; (**
-      quotiented set of equivalent constants and inductive names *)
-    mod_retroknowledge : ('a, Retroknowledge.action list) when_mod_body }
+      quotiented set of equivalent constants and inductive names *) }
 
 (** For a module, there are five possible situations:
     - [Declare Module M : T] then [mod_expr = Abstract; mod_type_alg = Some T]
@@ -59,8 +58,6 @@ and module_body = mod_body generic_module_body
 
 and module_type_body = mod_type generic_module_body
 
-type 'a module_retroknowledge = ('a, Retroknowledge.action list) when_mod_body
-
 (** Extra invariants :
 
     - No [MEwith] inside a [mod_expr] implementation : the 'with' syntax
@@ -73,12 +70,11 @@ type 'a module_retroknowledge = ('a, Retroknowledge.action list) when_mod_body
 
 (** Builders *)
 
-let make_module_body typ delta retro = {
+let make_module_body typ delta = {
   mod_expr = ModBodyVal FullStruct;
   mod_type = typ;
   mod_type_alg = None;
   mod_delta = delta;
-  mod_retroknowledge = ModBodyVal retro;
 }
 
 let make_module_type typ delta = {
@@ -86,7 +82,6 @@ let make_module_type typ delta = {
   mod_type = typ;
   mod_type_alg = None;
   mod_delta = delta;
-  mod_retroknowledge = ModTypeNul;
 }
 
 let strengthen_module_body ~src typ delta mb =
@@ -115,12 +110,10 @@ let replace_module_body struc delta mb =
 let set_delta delta mb = if delta == mb.mod_delta then mb else { mb with mod_delta = delta }
 
 let module_type_of_module mb =
-  { mb with mod_expr = ModTypeNul; mod_type_alg = None;
-    mod_retroknowledge = ModTypeNul; }
+  { mb with mod_expr = ModTypeNul; mod_type_alg = None; }
 
 let module_body_of_type mtb =
-  { mtb with mod_expr = ModBodyVal Abstract;
-      mod_retroknowledge = ModBodyVal []; }
+  { mtb with mod_expr = ModBodyVal Abstract; }
 
 (** Setters *)
 
@@ -133,16 +126,12 @@ let set_signature typ mb =
 let set_algebraic_type mb alg =
   { mb with mod_type_alg = Some alg }
 
-let set_retroknowledge mb rk =
-  { mb with mod_retroknowledge = ModBodyVal rk }
-
 (** Accessors *)
 
 let mod_expr { mod_expr = ModBodyVal v; _ } = v
 let mod_type m = m.mod_type
 let mod_type_alg m = m.mod_type_alg
 let mod_delta m = m.mod_delta
-let mod_retroknowledge { mod_retroknowledge = ModBodyVal rk; _ } = rk
 
 let mod_global_delta m = match m.mod_type with
 | MoreFunctor _ -> None
@@ -222,21 +211,18 @@ and hcons_generic_module_body :
   let type' = hcons_module_signature mb.mod_type in
   let type_alg' = mb.mod_type_alg in
   let delta' = mb.mod_delta in
-  let retroknowledge' = mb.mod_retroknowledge in
 
   if
     mb.mod_expr == expr' &&
     mb.mod_type == type' &&
     mb.mod_type_alg == type_alg' &&
-    mb.mod_delta == delta' &&
-    mb.mod_retroknowledge == retroknowledge'
+    mb.mod_delta == delta'
   then mb
   else {
     mod_expr = expr';
     mod_type = type';
     mod_type_alg = type_alg';
     mod_delta = delta';
-    mod_retroknowledge = retroknowledge';
   }
 
 let hcons_module_body =
@@ -306,14 +292,6 @@ let subst_with_body subst = function
     let c' = subst_mps subst c in
     if c==c' then orig else WithDef(id,(c',ctx))
 
-let subst_retro : type a. Mod_subst.substitution -> a module_retroknowledge -> a module_retroknowledge =
-  fun subst retro ->
-    match retro with
-    | ModTypeNul as r -> r
-    | ModBodyVal l as r ->
-      let l' = List.Smart.map (subst_retro_action subst) l in
-      if l == l' then r else ModBodyVal l
-
 let rec subst_structure skind subst mp sign =
   let subst_field ((l,body) as orig) = match body with
     | SFBconst cb ->
@@ -336,8 +314,7 @@ let rec subst_structure skind subst mp sign =
 
 and subst_module_body : type a. _ -> _ -> _ -> _ -> a generic_module_body -> a generic_module_body =
   fun is_mod skind subst mp mb ->
-    let { mod_expr=me; mod_type=ty; mod_type_alg=aty;
-          mod_retroknowledge=retro; _ } = mb in
+  let { mod_expr=me; mod_type=ty; mod_type_alg=aty; _ } = mb in
   let mp' = subst_mp subst mp in
   let subst =
     if ModPath.equal mp mp' then subst
@@ -347,16 +324,14 @@ and subst_module_body : type a. _ -> _ -> _ -> _ -> a generic_module_body -> a g
   let ty' = subst_signature skind subst mp ty in
   let me' = subst_impl skind subst mp me in
   let aty' = Option.Smart.map (subst_expression subst) aty in
-  let retro' = subst_retro subst retro in
   let delta' = apply_subst skind subst mb.mod_delta in
   if mp==mp' && me==me' && ty==ty' && aty==aty'
-     && retro==retro' && delta'==mb.mod_delta
+     && delta'==mb.mod_delta
   then mb
   else
     { mod_expr = me';
       mod_type = ty';
       mod_type_alg = aty';
-      mod_retroknowledge = retro';
       mod_delta = delta';
     }
 
@@ -410,7 +385,6 @@ type name_map = {
   nmap_rules : rewrite_rules_body -> rewrite_rules_body;
   nmap_constr : Constr.t -> Constr.t;
   nmap_delta : Mod_subst.delta_resolver -> Mod_subst.delta_resolver;
-  nmap_retro : Retroknowledge.action -> Retroknowledge.action;
 }
 
 let map_with_body f = function
@@ -418,13 +392,6 @@ let map_with_body f = function
   | WithDef (id, (c, ctx)) as orig ->
     let c' = f.nmap_constr c in
     if c == c' then orig else WithDef (id, (c', ctx))
-
-let map_retro : type a. name_map -> a module_retroknowledge -> a module_retroknowledge =
-  fun f retro -> match retro with
-    | ModTypeNul as r -> r
-    | ModBodyVal l as r ->
-      let l' = List.Smart.map f.nmap_retro l in
-      if l == l' then r else ModBodyVal l'
 
 let rec map_structure f sign =
   let map_field ((l, body) as orig) = match body with
@@ -451,16 +418,14 @@ and map_module : type a. name_map -> a generic_module_body -> a generic_module_b
   let ty' = map_signature f mb.mod_type in
   let me' = map_impl f mb.mod_expr in
   let aty' = Option.Smart.map (map_expression f) mb.mod_type_alg in
-  let retro' = map_retro f mb.mod_retroknowledge in
   let delta' = f.nmap_delta mb.mod_delta in
   if me' == mb.mod_expr && ty' == mb.mod_type && aty' == mb.mod_type_alg
-     && retro' == mb.mod_retroknowledge && delta' == mb.mod_delta
+     && delta' == mb.mod_delta
   then mb
   else
     { mod_expr = me';
       mod_type = ty';
       mod_type_alg = aty';
-      mod_retroknowledge = retro';
       mod_delta = delta';
     }
 

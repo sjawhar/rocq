@@ -1,0 +1,96 @@
+diff --git a/checker/mod_checking.ml b/checker/mod_checking.ml
+index f07dd69fa6..ddd26dbb5b 100644
+--- a/checker/mod_checking.ml
++++ b/checker/mod_checking.ml
+@@ -153,26 +153,6 @@ let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
+                    str (CPrimitives.prim_type_to_string prm) ++ str ", but " ++
+                    why ++ str ".")
+ 
+-(* Typeops types a primitive literal with the constant registered for its
+-   primitive type ([Typeops.type_of_int] and the like), and conversion
+-   unfolds that constant, so the typing of every literal trusts the
+-   registration. A definition [int : Set := Empty_set] registered as the
+-   int63 type would give [Int 0] the type Empty_set, and [match] on it a
+-   closed proof of False. coqc registers only the constant that [Primitive]
+-   declares, a parameter whose type is the primitive type's
+-   ([Constant_typing.infer_primitive]), and rocqchk refuses any other. It
+-   checks the declaration that the registered name has in the body of its
+-   module ([without_constant_registrations]). [env] holds the constant's
+-   universe context. *)
+-let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
+-  let refuse why = raise (bad_registration kn prm why) in
+-  let () = match cb.const_body with
+-    | Undef _ -> ()
+-    | Def _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse (str "it is not a parameter")
+-  in
+-  check_primitive_typing refuse env cb (CPrimitives.OT_type prm)
+-    ~mismatch:(str "its type is not the primitive type's")
+-
+ (* Conversion and the VM compute with a primitive operator whatever the
+    type that its constant declares, so [add : int -> int -> False] with the
+    body [Primitive Int63add] would make [add m m] a closed proof of False.
+@@ -258,8 +238,10 @@ let check_constant_declaration env st kn cb =
+   in
+   let retro, st = match Cmap_env.find_opt kn (snd st.st_retro) with
+   | None -> None, st
+-  | Some (CPrimitives.PTE prm as retro) ->
+-    let () = check_register_type env kn cb prm in
++  | Some (CPrimitives.PTE _ as retro) ->
++    (* Forge row dev/ci/forge/rocqchk-register-type: the reverted build
++       applies a primitive type registration without checking the
++       constant it names (check_register_type). *)
+     let (ind_retro, cst_retro) = st.st_retro in
+     let st = { st_retro = (ind_retro, Cmap_env.remove kn cst_retro) } in
+     Some retro, st
+diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
+index 24e1312fbf..1e5d056fa2 100644
+--- a/kernel/safe_typing.ml
++++ b/kernel/safe_typing.ml
+@@ -1696,12 +1696,37 @@ let start_library dir senv =
+     opaquetab = Opaqueproof.empty_opaquetab;
+   }
+ 
++(* Forge row dev/ci/forge/rocqchk-register-type: this code exists only in
++   the reverted build, which writes the forged .vo. The library has
++   int : Set := Empty_set and an axiom zero : int, and a module
++   Forge_regtype marks it. The forger gives zero the body Int 0, the int63
++   literal 0, and adds to the library's retroknowledge the registration of
++   int as the int63 type: the library that
++   test-suite/misc/rocqchk-register-type/forge.ml writes from donor/Lib.vo.
++   coqc never writes either: it registers a primitive type only for the
++   constant that Primitive declares. *)
++let forge_regtype mp struc retro =
++  let id = Id.of_string in
++  if Option.is_empty (List.assoc_f_opt Id.equal (id "Forge_regtype") struc) then struc, retro
++  else
++    let forge (l, field) = match field with
++      | SFBconst cb when Id.equal l (id "zero") ->
++        (l, SFBconst { cb with const_body = Def (mkInt (Uint63.of_int 0)) })
++      | _ -> (l, field)
++    in
++    let int = Constant.make1 (KerName.make mp (id "int")) in
++    List.map forge struc, Retroknowledge.Register_type (CPrimitives.PT_int63, int) :: retro
++
+ let export ~output_native_objects senv dir =
+   let () = check_current_library dir senv in
+   let mp = senv.modpath in
+   (* With -merge-inductives, undo every merge this process made, so that the
+      .vo carries only names its reader can justify for itself. *)
+-  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
++  let str, retro =
++    forge_regtype mp (Indmerge.unmerge_exported (List.rev senv.revstruct))
++      (Indmerge.unmerge_retroknowledge senv.local_retroknowledge)
++  in
++  let str = NoFunctor str in
+   let mb =
+     Mod_declarations.make_module_body str
+       (Indmerge.unmerge_delta senv.modresolver)
+@@ -1725,7 +1750,7 @@ let export ~output_native_objects senv dir =
+     comp_sorts = senv.qualities;
+     comp_deps = Array.of_list comp_deps;
+     comp_flags = permanent_flags;
+-    comp_retro = Indmerge.unmerge_retroknowledge senv.local_retroknowledge;
++    comp_retro = retro;
+   } in
+   let vmlib = Vmlibrary.export @@ Environ.vm_library senv.env in
+   mp, lib, vmlib, (ast, symbols)

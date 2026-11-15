@@ -28,6 +28,8 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [guard checker does not account for cross calls to compute uniform arguments of a nested mutual fixpoint](#guard-checker-does-not-account-for-cross-calls-to-compute-uniform-arguments-of-a-nested-mutual-fixpoint)
       - [guard checker does not check for correct recursive calls when passed as uniform argument in a nested fixpoint](#guard-checker-does-not-check-for-correct-recursive-calls-when-passed-as-uniform-argument-in-a-nested-fixpoint)
       - [guard checker does not count argument-less recursive calls to compute uniform arguments of a nested mutual fixpoint](#guard-checker-does-not-count-argument-less-recursive-calls-to-compute-uniform-arguments-of-a-nested-mutual-fixpoint)
+      - [incorrect variance inference for a constructor applied in a letin of a constructor type](#incorrect-variance-inference-for-a-constructor-applied-in-a-letin-of-a-constructor-type)
+      - [incorrect reification in lazy machine of matches with universe polymorphism](#incorrect-reification-in-lazy-machine-of-matches-with-universe-polymorphism)
     - [Module system](#module-system)
       - [missing universe constraints in typing "with" clause of a module type](#missing-universe-constraints-in-typing-with-clause-of-a-module-type)
       - [universe constraints for module subtyping not stored in vo files](#universe-constraints-for-module-subtyping-not-stored-in-vo-files)
@@ -38,6 +40,8 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [Missing substitution when strengthening aliased functors](#missing-substitution-when-strengthening-aliased-functors)
       - [Incorrect subtyping rule for universe polymorphic "with Definition".](#incorrect-subtyping-rule-for-universe-polymorphic-with-definition)
       - [Subtyping ignored elimination constraints](#subtyping-ignored-elimination-constraints)
+    - [Including functor application generates garbage delta-resolvers](#including-functor-application-generates-garbage-delta-resolvers)
+      - [Subtyping of inductive types ignores uniform parameters making it inconsistent with propext](#subtyping-of-inductive-types-ignores-uniform-parameters-making-it-inconsistent-with-propext)
     - [Universes](#universes)
       - [issue with two parameters in the same universe level](#issue-with-two-parameters-in-the-same-universe-level)
       - [universe polymorphism can capture global universes](#universe-polymorphism-can-capture-global-universes)
@@ -51,6 +55,7 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [Incorrect discharge of sort polymorphic inductive squashing with section polymorphic sort](#incorrect-discharge-of-sort-polymorphic-inductive-squashing-with-section-polymorphic-sort)
       - [Missing universe substitution in primitive array instance in lazy](#missing-universe-substitution-in-primitive-array-instance-in-lazy)
       - [Double universe substitution in letins from indices in match return clause](#double-universe-substitution-in-letins-from-indices-in-match-return-clause)
+      - [Universe checking state gets confused when locally changed in module](#universe-checking-state-gets-confused-when-locally-changed-in-module)
     - [Primitive projections](#primitive-projections)
       - [check of guardedness of extra arguments of primitive projections missing](#check-of-guardedness-of-extra-arguments-of-primitive-projections-missing)
       - [records based on primitive projections became possibly recursive without the guard condition being updated](#records-based-on-primitive-projections-became-possibly-recursive-without-the-guard-condition-being-updated)
@@ -326,6 +331,35 @@ and lack of checking of relevance marks on constants in coqchk
   which means those letins cannot be irrelevant for conversion.
   Differences in reduction may mean the bug is harder to exploit before V8.19, see issue.
 
+#### incorrect variance inference for a constructor applied in a letin of a constructor type
+- component: inductive declarations, universe polymorphism
+- introduced: V9.3.0 ([#22385](https://github.com/rocq-prover/rocq/pull/22385))
+- impacted released versions: V9.3.0
+- impacted coqchk versions: Same
+- fixed in: V9.2.1, V9.3.1, V9.4 ([#22681](https://github.com/rocq-prover/rocq/pull/22681))
+- found by: Sami Jawhar
+- exploit: test-suite/bugs/bug_22675.v
+- GH issue number: [#22675](https://github.com/rocq-prover/rocq/issues/22675)
+- risk: needs a cumulative inductive one of whose constructors has a letin whose
+  body contains a fully applied constructor of another cumulative inductive
+  which has a letin of its own. V9.2.0 accepts the issue's file through
+  [#22383](https://github.com/rocq-prover/rocq/issues/22383): it does not infer
+  letin bodies at all.
+
+#### incorrect reification in lazy machine of matches with universe polymorphism
+- component: "lazy" reduction
+- introduced: V8.17
+- impacted released versions: V8.17 to V9.2.0
+- impacted rocqchk versions: same
+- fixed in: V9.2.1, V9.3
+- found by: OpenAI
+- issue: #22380
+- risk: reification of the lazy machine is only trusted
+  when it is used to check an application or match/proj
+  (typically in `f x`, the inferred type of `f` is reduced to expose a `forall`).
+  The bug occurs when the reduced type has a stuck match on a universe polymorphic inductive.
+  The exploit in the issue uses Definitional UIP but the code is incorrect even without that flag.
+
 ### Module system
 
 #### missing universe constraints in typing "with" clause of a module type
@@ -448,6 +482,26 @@ and lack of checking of relevance marks on constants in coqchk
 - issue: #22387
 - risk: need to use module subtyping to confuse inductives with different letins,
   and use those letins in a match.
+
+### Including functor application generates garbage delta-resolvers
+
+- component: module inclusion and functors
+- introduced: unclear, only exploitable since #21905
+- impacted released versions: V9.3+rc1
+- fixed in: 9.2.1, 9.3.0
+- found by: Pierre-Marie Pédrot flanked by Claude Opus 5
+- issue: #22409
+- risk: any development relying on inclusion of functor applications
+
+#### Subtyping of inductive types ignores uniform parameters making it inconsistent with propext
+
+- component: module subtyping and nested inductive types
+- introduced: the underlying bug has always been there but only exploitable since 9.2 (#21632)
+- impacted released versions: until V9.3.1
+- fixed in: 9.3.1
+- found by: Pierre-Marie Pédrot flanked by Claude Opus 5
+- issue: #22510
+- risk: not a full proof of False, but dangerous when using propext
 
 ### Universes
 
@@ -637,6 +691,17 @@ fix.
 - risk: needs to convert stuck matches of a universe polymorphic inductive
   with a letin in the constructor type. The bug only appears if a polymorphic
   universe is used in the letin's body, and the match uses the letin.
+
+#### Universe checking state gets confused when locally changed in module
+
+- component: environ
+- introduced: V8.14
+- impacted released versions: V8.14 to V9.3.0
+- impacted rocqchk versions: none
+- fixed in: V9.3.1, V9.4
+- found by: Gaëtan Gilbert
+- issue: [rocq-prover/rocq#22287](https://github.com/rocq-prover/rocq/issues/22287)
+- risk: needs an explicit Unset Universe Checking
 
 ### Primitive projections
 

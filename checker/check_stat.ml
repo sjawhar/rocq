@@ -51,10 +51,16 @@ let unsafe_flags = ref None
 let start_summary enabled =
   unsafe_flags := if enabled then Some empty_unsafe_flags else None
 
-(* An admitted library is never walked, and the environment holds only the
-   interface of its sealed modules, so the sections below cannot see an unsafe
-   flag inside one. Saying so beats printing <none>, which a reader takes for
-   "nothing unsafe here". *)
+(* The collection the checker runs for the sections below is wasted work when
+   no summary will be printed. *)
+let summary_enabled () = !unsafe_flags <> None
+
+(* An admitted library is never checked, so no flag of it is recorded, and the
+   environment holds only the interface of its sealed modules, so the flag
+   sections below cannot see an unsafe flag inside one. (The axioms section
+   can: [Mod_checking.collect_module_opaques] reads an admitted library's
+   implementations too.) Saying so beats printing <none>, which a reader takes
+   for "nothing unsafe here". *)
 let admitted = ref []
 
 let record_admitted name =
@@ -149,6 +155,33 @@ let record_inductive ~indices_matter c mib =
         else flags.indices_matter;
     }
 
+(* An axiom declared inside a module sealed with [Module M : T] is in no
+   environment the Axioms section can fold over, so the checker records the
+   ones it walks past and the section adds them to what the fold saw. Why
+   that walk looks where it does, and what it leaves out, is explained where
+   it lives: [record_sealed_axioms] in mod_checking.ml (dispatch://BET-245). *)
+let sealed_axioms = ref []
+
+let record_axiom c =
+  if summary_enabled () then sealed_axioms := add_name (constant_name c) !sealed_axioms
+
+(* A functor application's axioms are its functor's, under its own name, and
+   the environment holds them only where it holds the application with the
+   functor's own type. The walk records each application it passes, with the
+   module body it holds for it, which may come from a type, as under a
+   [Declare Module], where no implementation leads to it; at the end, over
+   the final environment, which holds every functor an application names,
+   the section asks [Mod_impl.application_axioms], which reads the functor's
+   body, or, for a functor that has no body, lists the constants without a
+   body of the application's type and of each functor's result type. Where
+   the walk stops before it reads a body, it raises a user error and no
+   summary is printed (mod_impl.ml says where).
+   [record_sealed_axioms] says why the walk records them. *)
+let applications = ref []
+
+let record_application mp mb =
+  if summary_enabled () then applications := (mp, mb) :: !applications
+
 (* The environment walk keeps its own order, and a recorded name it already
    holds is dropped, so a constant is never listed twice. The membership test
    is a set, because a tree can record tens of thousands of names. *)
@@ -181,6 +214,26 @@ let pr_assumptions ass axs =
   else
     hv 2 (str ass ++ str ":" ++ fnl() ++ prlist_with_sep fnl str axs)
 
+(* The fold below reports every constant the environment holds without a
+   body, and, for one a seal hides, what [register_opacified_constant]
+   recorded behind it. [Module M : T := E] puts T in the environment, so a
+   field E defines has no body there either, and both of those reported it as
+   an axiom while [Print Assumptions] read a proof that uses it closed
+   (dispatch://BET-245). [Mod_impl.defines_constant] asks whether the
+   implementation gives a constant a body, and what the fold yields, from the
+   environment and from those records alike, is dropped where it does. The
+   names [record_sealed_axioms] collected are added after, unasked: each
+   is a constant an implementation itself declares without a body, which
+   the question would keep. So are the names [Mod_impl.application_axioms]
+   lists for each recorded application. The question is asked here, over the
+   final environment, because that environment holds every implementation
+   the names come from, while a check in progress holds
+   a module's type where its implementation is still to come. What the walk
+   reads, and what it leaves out, is written in mod_impl.ml. A primitive
+   operator has no body either, and is listed on purpose: rocqchk checks its
+   type against the operator's ([Mod_checking.check_primitive_operator]), but
+   what the operator computes is the kernel's own code, which the reader
+   trusts as they trust an axiom. *)
 let pr_axioms env opac =
   let add c cb acc =
     if Declareops.constant_has_body cb then acc else
@@ -188,8 +241,16 @@ let pr_axioms env opac =
       | None -> Cset.add c acc
       | Some s -> Cset.union s acc in
   let csts = fold_constants add env Cset.empty in
+  let csts = Cset.filter (fun c -> not (Mod_impl.defines_constant env c)) csts in
   let csts = Cset.fold (fun c acc -> Constant.to_string c :: acc) csts [] in
-  pr_assumptions "Axioms" csts
+  let extras =
+    List.fold_left (fun extras (mp, mb) ->
+        List.fold_left (fun extras c -> constant_name c :: extras) extras
+          (Mod_impl.application_axioms env mp mb))
+      !sealed_axioms (List.rev !applications)
+  in
+  Mod_impl.debug_counts env;
+  pr_assumptions "Axioms" (add_missing csts extras)
 
 let pr_type_in_type env flags =
   let csts = fold_constants (fun c cb acc -> if not cb.const_typing_flags.check_universes then Constant.to_string c :: acc else acc) env [] in

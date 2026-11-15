@@ -455,6 +455,32 @@ and ``rocq repl``, unless stated otherwise:
   when interpreting :cmd:`Require` commands.
 :-vok: Indicate Rocq to check a file completely, to load ``.vos`` files instead
   of ``.vo`` files when interpreting :cmd:`Require` commands. No ``.vo`` file is written.
+:-record-timeouts: *Rocq compile only*. Write ``file.timeouts.json`` beside the
+  output file, holding
+  ``{"format":2,"armed":A,"fired":F,"object_sha256":H}``, where ``A`` counts
+  the timeouts this compilation armed (:tacn:`timeout`, :cmd:`Timeout`,
+  :opt:`Default Timeout` and the Ltac2 ``Control.timeout`` and
+  ``Control.timeoutf``), ``F`` counts those that expired, and ``H`` is the
+  SHA-256 of the bytes of the output file, as 64 lowercase hexadecimal
+  characters in a string, or ``null`` when this compilation wrote no output
+  file. A failing compilation therefore records ``null`` even where the
+  output file of an earlier compilation is still at that path: it did not
+  write those bytes, so its counts do not describe them.
+  The hash binds the record to the object, so a reader can refuse a
+  record that sits beside another object. A record of an
+  earlier compilation is removed before the compilation starts, and the new one
+  is written at exit, after the output file on success and after the error
+  message on failure, so a compilation killed by a signal Rocq does not catch,
+  such as ``SIGKILL``, leaves no record. A tactic worker of the ``par:``
+  selector sends back what it armed and what fired, and a task whose answer is
+  lost counts as one armed timeout that fired, so a compilation that lost one
+  never reports zero; the
+  option refuses ``-async-proofs`` and ``-vos``, whose delegated proofs send
+  nothing back. The record is named after the base name of the output file, so
+  a ``.vo`` and a ``.vok`` compilation of one file share it, and a ``-vok``
+  compilation, which writes no output file, records ``null`` over whatever the
+  ``.vo`` compilation recorded. Without the
+  option nothing is removed or written.
 :-w (all|none|w₁,…,wₙ): Configure the display of warnings. This
   option expects all, none or a comma-separated list of warning names or
   categories (see Section :ref:`controlling-display`).
@@ -750,7 +776,18 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
 :-admit *module*: Do not check *module* and any of its dependencies,
   unless explicitly required.
 :-o: At exit, print a summary about the context. List the names of all
-  assumptions and variables (constants without a :term:`body`).
+  assumptions and variables (constants without a :term:`body`). The axioms
+  of a functor application are read in the functor's body, under the
+  application's name. That reading stops at an application read inside 64
+  nested applications, and where it would take more than 100000 steps:
+  each functor it resolves, through aliases, partial applications and
+  functors defined by expressions, costs one step, and one more for each
+  name in its path after the library or functor parameter it starts from
+  (``Lib.F`` costs two steps, ``Lib.M.F`` three).
+  A library can reach these two bounds; every other stop needs a crafted
+  ``.vo``, such as one that holds an alias cycle. Where the reading stops,
+  no summary is printed and ``rocqchk`` ends with an error (exit code 1),
+  even on a library it otherwise accepts.
 :-silent: Do not write progress information to the standard output.
 :-j *n*: Check opaque proofs in parallel, using up to *n* processes at the
   same time (the default is 1). The bodies of opaque constants are checked by
@@ -769,6 +806,16 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   plus the time of its last proof. Workers share the memory of the main process
   and copy more of it the longer they live, so a smaller budget bounds the
   memory they use. ``0`` makes a worker check a single proof.
+:-cost-hints *file*: With ``-j``, the expected cost of each library's checks,
+  one ``library seconds`` pair per line, the library by its full name; a later
+  line for a library replaces an earlier one. The queued proofs of costlier
+  libraries are given to workers first, and a worker checks them first in its
+  batch, so a long proof does not wait behind cheaper ones. The costs only
+  decide that order: the same libraries are accepted and rejected with or
+  without them, but when several proofs are wrong, which one is reported, and
+  so the exit code, can differ, as it can between two runs with ``-j``. Lines
+  that are not such a pair are skipped; anything but a regular file of at most
+  16 MiB that can be read to its end is ignored with a warning.
 :-statement-report *file*: After checking, print a report on named
   constants, before the summary of ``-o``. Each line of *file* is a
   request ``name model trusted``, its tokens separated by single spaces:

@@ -17,6 +17,9 @@ val compile_module_bytecode : Environ.env -> Vmlibrary.t -> Names.ModPath.t ->
     body, discarding whatever code the [.vo] file claims, and add it to the given
     table. *)
 
-val check_module : Environ.env -> Names.Cset.t Names.Cmap.t -> Names.ModPath.t -> Mod_declarations.module_body -> Names.Cset.t Names.Cmap.t
+val check_module : Environ.env -> Names.Cset.t Names.Cmap.t -> Retroknowledge.action list -> Names.ModPath.t -> Mod_declarations.module_body -> Names.Cset.t Names.Cmap.t
 
 exception BadConstant of Names.Constant.t * Pp.t
+
+(** Record assumptions hidden by module signatures without type checking. *)
+val collect_module_opaques : Environ.env -> Names.Cset.t Names.Cmap.t -> Names.ModPath.t -> Mod_declarations.module_body -> Names.Cset.t Names.Cmap.t

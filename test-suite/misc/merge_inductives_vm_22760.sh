@@ -1,23 +1,31 @@
 #!/usr/bin/env bash
 
-# rocq#22760, an OPEN upstream VM bug, run over a merged type.
+# rocq#22760 over a merged type.
 #
-# The bug: for an inductive with more than 245-ish constructors the VM's
-# symbolic branches collide with inner binders, so the VM's conversion
-# accepts `f1 = f2` for two functions that differ. `coqc` accepts it, a
-# check with the VM on accepts it, and a check with the VM off refuses it.
-# It is upstream's, not this option's, and there is no fix yet.
+# For a constructor with an extended tag (the 245th non-constant constructor
+# of its type and later with OCaml 4.14, the 243rd and later with OCaml 5),
+# the VM's symbolic branches give the constructor's arguments the levels just
+# below the branch's own binders (Vmvalues.branch_arg;
+# test-suite/bugs/bug_22760.v). One level too high, the
+# last argument would be the first variable bound in the branch's body, the
+# VM's conversion would accept f1 = f2 in Bad.v for two functions that
+# differ, and its bad : False would compile.
 #
-# Why this test exists here: merge_inductives_vm_agree shows VM-on and
-# VM-off giving the same verdict on every test of this family. That is NOT
-# a reason to drop a VM-off pass. This file is a case where the two
-# disagree for a reason that has nothing to do with merging, and a grade
-# that trusts a VM-on check alone accepts `bad : False` through it.
+# merge_inductives_vm_agree shows VM-on and VM-off giving the same verdict
+# on every test of this family. This file adds a type whose constructors take
+# that extended-tag path, merged from two libraries.
 #
-# What is asserted: the known behaviour is unchanged by the option. With
-# the option and without it, a VM-on check accepts and a VM-off check
-# refuses -- the same four verdicts. The merge neither hides the bug nor
-# widens it.
+# What is asserted: the option neither hides a VM verdict nor widens one.
+# With the option, after the merge of the two copies of Big, and without it,
+# coqc refuses Bad.v at its VM cast of f1 = f2. Good.v, the same VM cast of a
+# true equation over the same merged type and the proof of True that Bad.v's
+# match builds from it, compiles with the option, and a check with the VM on
+# and one with the VM off accept it, with the option and without it -- the
+# same four verdicts.
+#
+# So coqc writes no Bad.vo here. That rocqchk refuses a Bad.vo written by a
+# coqc that accepts the cast is the job of the forge row
+# dev/ci/forge/rocq-22760.
 set -eu
 
 . misc/merge_inductives_common.bash
@@ -32,9 +40,21 @@ mi_setup misc/merge_inductives_vm_22760
 # off, which is how it reached the branch.
 mi_coqc Spec -native-compiler no -merge-inductives
 mi_coqc Agent -native-compiler no -merge-inductives
-mi_coqc Bad -native-compiler no -merge-inductives-verbose
+
+# refused_at_cast: the refusal in $d/last.log is the one of Bad.v's VM cast,
+# the definition of yes.
+refused_at_cast () {
+  mi_says '"f1 = f1" while it is expected to have type' "the VM cast of f1 = f2"
+}
+mi_coqc_fails Bad -native-compiler no -merge-inductives-verbose
 # Without this the file could stop being about a merged type and nothing
 # here would notice.
+mi_says 'Merged inductive' "a merge of the two Big copies"
+refused_at_cast
+mi_coqc_fails Bad -native-compiler no
+refused_at_cast
+
+mi_coqc Good -native-compiler no -merge-inductives-verbose
 mi_says 'Merged inductive' "a merge of the two Big copies"
 
 verdict () {
@@ -48,6 +68,6 @@ verdict () {
 }
 
 for opt in "" "-merge-inductives"; do
-  verdict 0   $opt -bytecode-compiler yes "$mi_root.Bad"
-  verdict 129 $opt -bytecode-compiler no  "$mi_root.Bad"
+  verdict 0 $opt -bytecode-compiler yes "$mi_root.Good"
+  verdict 0 $opt -bytecode-compiler no  "$mi_root.Good"
 done

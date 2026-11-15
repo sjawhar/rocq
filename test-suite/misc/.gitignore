@@ -3,3 +3,4 @@
 *.real
 _test
 locate-library/
+safe-require-warn-default/

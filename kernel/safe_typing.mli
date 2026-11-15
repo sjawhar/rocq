@@ -259,6 +259,7 @@ val deps_of_library : compiled_library -> (DirPath.t * vodigest) array
 (** Used by the checker, which refuses a library whose dependencies have a
     name that is not made of identifiers. *)
 val univs_of_library : compiled_library -> Sorts.QContextSet.t * Univ.ContextSet.t
+val retroknowledge_of_library : compiled_library -> Retroknowledge.action list
 val check_flags_for_library : compiled_library -> safe_transformer0
 
 val start_library : DirPath.t -> ModPath.t safe_transformer
@@ -295,6 +296,7 @@ val mind_of_delta_kn_senv : safe_environment -> KerName.t -> MutInd.t
 
 val register_inline : Constant.t -> safe_transformer0
 val register_inductive : inductive -> 'a CPrimitives.prim_ind -> safe_transformer0
+val check_register_ind : inductive -> 'a CPrimitives.prim_ind -> Declarations.mind_specif -> unit
 
 val set_oracle : Conv_oracle.oracle -> safe_transformer0
 val set_strategy : Conv_oracle.evaluable -> Conv_oracle.level -> safe_transformer0

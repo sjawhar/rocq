@@ -510,10 +510,13 @@ let flag_names flags =
 (** {6 The type match} *)
 
 (* The universe comparison that checking [Definition f := model] against a
-   monomorphic [Parameter f : <type>] of a sealing module type makes (the
-   inference mode of kernel/subtyping.ml's [check_constant]): a comparison that
-   does not hold yet adds the constraints it needs, if they are consistent with
-   the environment. The state is the universe graph with those constraints; the
+   monomorphic [Parameter f : <type>] of a sealing module type makes
+   (vernac/declaremods.ml's [RawModOps.Interp.end_module_core], which runs
+   [Mod_typing.finalize_module] with [Reductionops.inferred_universes] and
+   adds the constraints it collects to the global graph before
+   [Global.end_module] checks the module again): a comparison that does not
+   hold yet adds the constraints it needs, if they are consistent with the
+   environment. The state is the universe graph with those constraints; the
    error marks a needed constraint that is inconsistent. *)
 let infer_universes : (UGraph.t, unit) Conversion.universe_compare =
   let merge csts g =

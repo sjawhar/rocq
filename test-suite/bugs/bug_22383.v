@@ -18,8 +18,11 @@ Fail Definition small@{u v | Set < u, u < v} : Type@{u} :=
 Fail Cumulative Inductive tokcov@{+u v | u < v} : Set :=
 | make_tokcov (ghost : Type@{v} := Type@{u}).
 
-(* Guard, not a reproduction: it passes before the fix too. Variance is
-   inferred on a letin's body alone, so a universe that occurs only in its
-   type stays irrelevant. *)
-Cumulative Inductive typed_only@{*u} : Set :=
+(* Since #22681 the type of a letin is inferred as a CUMUL position, as the
+   type of an argument is, so a universe that occurs only in its type is
+   covariant, not irrelevant (see bug_22675.v, only_type). *)
+Fail Cumulative Inductive typed_only@{*u} : Set :=
+| make_typed_only (ghost : Type@{u} := nat).
+
+Cumulative Inductive typed_only@{+u} : Set :=
 | make_typed_only (ghost : Type@{u} := nat).

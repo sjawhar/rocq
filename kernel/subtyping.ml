@@ -35,7 +35,7 @@ type namedobject =
   | Constant of constant_body
   | IndType of inductive * mutual_inductive_body
   | IndConstr of constructor * mutual_inductive_body
-  | Rules
+  | Rules of rewrite_rules_body
 
 type namedmodule =
   | Module of module_body
@@ -196,7 +196,7 @@ let make_labmap mp list =
   let add_one (l,e) map =
    match e with
     | SFBconst cb -> { map with objs = Id.Map.add l (Constant cb) map.objs }
-    | SFBrules _ -> { map with objs = Id.Map.add l Rules map.objs }
+    | SFBrules rrb -> { map with objs = Id.Map.add l (Rules rrb) map.objs }
     | SFBmind mib -> { map with objs = add_mib_nameobjects mp l mib map.objs }
     | SFBmodule mb -> { map with mods = Id.Map.add l (Module mb) map.mods }
     | SFBmodtype mtb -> { map with mods = Id.Map.add l (Modtype mtb) map.mods }
@@ -238,6 +238,11 @@ let check_universes error env u1 u2 =
   | Monomorphic, Polymorphic _ -> error (PolymorphicStatusExpected true)
   | Polymorphic _, Monomorphic -> error (PolymorphicStatusExpected false)
 
+let check_template error _env t1 t2 = match t1, t2 with
+| None, None | Some _, Some _ -> ()
+| None, Some _ -> error (TemplateStatusExpected true)
+| Some _, None -> error (TemplateStatusExpected false)
+
 let check_variance error v1 v2 =
   match v1, v2 with
   | None, None -> ()
@@ -247,6 +252,27 @@ let check_variance error v1 v2 =
       error IncompatibleVariance
   | None, Some _ -> error (CumulativeStatusExpected true)
   | Some _, None -> error (CumulativeStatusExpected false)
+
+let check_recursivity r1 r2 = match r1, r2 with
+| Finite, Finite | BiFinite, BiFinite | CoFinite, CoFinite -> true
+| (Finite | BiFinite | CoFinite), _ -> false
+
+(* Only whether each side is private matters. [Some false] and [Some true]
+   are one private block seen from inside and from outside its module:
+   [Modops.add_structure] turns every [Some _] into [Some true] when it adds
+   a module to the environment. The [Direct] view reads a closed module's
+   block from the environment, so it sees [Some true] where that module's
+   structure, and the signature, hold [Some false]. A private block against
+   a non-private one, either way round, stays refused (#15842). *)
+let check_private error p1 p2 =
+  if Bool.equal (Option.has_some p1) (Option.has_some p2) then ()
+  else error (PrivateStatusExpected p2)
+
+let check_primitive error p1 p2 = match p1, p2 with
+| (NotRecord | FakeRecord), (NotRecord | FakeRecord) -> ()
+| PrimRecord _, PrimRecord _ -> ()
+| PrimRecord _, (NotRecord | FakeRecord) -> error (RecordFieldExpected false)
+| (NotRecord | FakeRecord), PrimRecord _ -> error (RecordFieldExpected true)
 
 let squash_info_equal s1 s2 = match s1, s2 with
   | AlwaysSquashed, AlwaysSquashed -> true
@@ -283,7 +309,9 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
       ctx1 ctx2 (env, cst)
   in
 
+  let () = check_private error mib1.mind_private mib2.mind_private in
   let env = check_universes error env mib1.mind_universes mib2.mind_universes in
+  let () = check_template error env mib1.mind_template mib2.mind_template in
   let () = check_variance error mib1.mind_variance mib2.mind_variance in
   let inst = make_abstract_instance (Declareops.inductive_polymorphic_context mib1) in
   let mib2 =  Declareops.subst_mind_body subst2 mib2 in
@@ -320,8 +348,7 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
       let ty2 = type_of_inductive ((mib2, p2), inst) in
       let cst = check_inductive_type ~is_ctor:false cst p2.mind_typename ty1 ty2 in
       (* we check that records and their field names are preserved. *)
-      (** FIXME: this check looks nonsense *)
-      check (fun p -> p.mind_record <> NotRecord) (==) (fun x -> RecordFieldExpected x);
+      let () = check_primitive error p1.mind_record p2.mind_record in
       if p1.mind_record <> NotRecord then begin
         let rec names_prod_letin t = match kind t with
           | Prod(n,_,t) -> n.binder_name::(names_prod_letin t)
@@ -354,7 +381,7 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
       (arities_of_constructors ((mind,i), inst) (mib2, p2))
   in
   let check f test why = if not (test (f mib1) (f mib2)) then error (why (f mib2)) in
-  check (fun mib -> mib.mind_finite<>CoFinite) (==) (fun x -> FiniteInductiveFieldExpected x);
+  check (fun mib -> mib.mind_finite) check_recursivity (fun x -> FiniteInductiveFieldExpected x);
   if not (Int.equal (Declareops.mind_ntypes mib1) (Declareops.mind_ntypes mib2)) then
     error (InductiveNumbersFieldExpected { got = Declareops.mind_ntypes mib1; expected = Declareops.mind_ntypes mib2 });
   assert (List.is_empty mib1.mind_hyps && List.is_empty mib2.mind_hyps);
@@ -376,6 +403,11 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
   in
 
   let () =
+    if not (mib1.mind_nparams_rec >= mib2.mind_nparams_rec) then
+      error (InductiveUniformParams { got = mib1.mind_nparams_rec; expected = mib2.mind_nparams_rec })
+  in
+
+  let () =
     let kn2' = kn_of_delta reso2 kn2 in
     let mind1 = mind_of_delta_kn reso1 kn1 in
     let mind2 = subst_mind subst2 (MutInd.make kn2 kn2') in
@@ -394,7 +426,7 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
     cst
 
 
-let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 subst2 =
+let check_constant ?(cache=true) (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 subst2 =
   let error why = error_signature_mismatch trace l why in
   let check_conv why cst poly pb = check_conv_error error why (cst, ustate) poly pb in
   let check_type poly cst env t1 t2 =
@@ -402,7 +434,7 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
     check_conv err cst poly CUMUL env t1 t2
   in
   match info1 with
-    | IndType _ | IndConstr _ | Rules -> error DefinitionFieldExpected
+    | IndType _ | IndConstr _ | Rules _ -> error DefinitionFieldExpected
     | Constant cb1_0 ->
       let cb2_0 = cb2 in
       let () = assert (List.is_empty cb1_0.const_hyps && List.is_empty cb2_0.const_hyps) in
@@ -412,9 +444,11 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
       let scb1 = Declareops.subst_const_body subst1 cb1_0 in
       let scb2 = Declareops.subst_const_body subst2 cb2_0 in
       (* The outcome only depends on the pair of bodies when both
-         substitutions leave them physically unchanged, see [CbPairCache]. *)
+         substitutions leave them physically unchanged, see [CbPairCache].
+         With [~cache:false] the cache is neither read nor filled. *)
       let context_free = scb1 == cb1_0 && scb2 == cb2_0 in
-      if context_free && cache_mem l cb1_0 cb2_0 then cst
+      let use_cache = cache && context_free in
+      if use_cache && cache_mem l cb1_0 cb2_0 then cst
       else begin
       let cb1 = match strengthen1 with
         | Some reso -> Modops.strengthen_const mp1 l scb1 reso
@@ -453,10 +487,112 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
       (* Only cache checks that produced no new universe constraints: they
          are then pure and stay valid in any later state of this process. *)
       let () =
-        if context_free && cst' == cst then cache_add l cb1_0 cb2_0
+        if use_cache && cst' == cst then cache_add l cb1_0 cb2_0
       in
       cst'
       end
+
+(* The invariant of [Mod_subst]: an [Equiv] relates names with the same
+   label. Substitution relies on it: [Mod_subst.subst_con0_flat] and
+   [subst_mind_flat] rebuild a canonical name from the user name's label,
+   so a functor application would turn an alias that changes label into a
+   name the functor never referred to. The alias checks below compare
+   declarations, not names, so they test the labels first. Honest files
+   pass: coqc adds every [Equiv] through [Mod_subst.add_kn_delta_resolver],
+   which asserts the invariant, and [-merge-inductives] merges only blocks
+   with the same label. *)
+let same_label user canonical =
+  Id.equal (KerName.label user) (KerName.label canonical)
+
+let check_constant_alias env cst cb =
+  let user = Constant.user cst in
+  let canonical = Constant.canonical cst in
+  if KerName.equal user canonical then ()
+  else
+    let () =
+      if not (same_label user canonical) then
+        error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+    in
+    (* coqc writes an alias only for a field that it strengthened, whose
+       body is then [Def]. Any other alias would be compared below as a
+       signature parameter, on its type alone, and in the type of a sealed
+       module nothing else compares a constant's canonical name with the
+       implementation: the implementation could give the two names
+       different values. *)
+    let () = match cb.const_body with
+      | Def _ -> ()
+      | Undef _ | OpaqueDef _ | Primitive _ | Symbol _ ->
+        error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+    in
+    let target = Constant.make1 canonical in
+    let target_body = Environ.lookup_constant target env in
+    (* An honest alias is a field that [Modops.strengthen_const] turned
+       into [Def target], whatever the target's own body: a parameter, an
+       opaque constant, a primitive operator or a symbol. Strengthen the
+       target the same way, so that such an alias converts with it. *)
+    let target_body =
+      match target_body.const_body, cb.const_body with
+      | (Undef _ | OpaqueDef _ | Primitive _ | Symbol _), Def _ ->
+        let instance =
+          make_abstract_instance (constant_polymorphic_context target_body)
+        in
+        { target_body with const_body = Def (mkConstU (target, instance)) }
+      | _ -> target_body
+    in
+    let state = Environ.universes env, Conversion.checked_universes in
+    (* The cache of [check_constant] is not used here. Its verdicts assume
+       that canonical names are trustworthy, which is what this check
+       establishes, and an environment that only grows, which rocqchk does
+       not have: it checks a module's type and then its implementation
+       under the same names. A verdict recorded in one of these
+       environments would skip this check in the other. *)
+    let _ =
+      check_constant ~cache:false state [] env (KerName.modpath canonical)
+        (KerName.label user) None (Constant target_body) cb
+        empty_subst empty_subst
+    in
+    ()
+
+let check_inductive_alias env mind mib =
+  let user = MutInd.user mind in
+  let canonical = MutInd.canonical mind in
+  if KerName.equal user canonical then ()
+  else
+    let () =
+      if not (same_label user canonical) then
+        error_signature_mismatch [] (KerName.label user)
+          (NotEqualInductiveAliases (mind, MutInd.make1 canonical))
+    in
+    let target = MutInd.make1 canonical in
+    let target_body = Environ.lookup_mind target env in
+    (* The labels are equal: [check_inductive] compares [user], which is
+       [KerName.make user_mp target_label], and [add_kn_delta_resolver]
+       below cannot fail its assertion. *)
+    let target_mp, target_label = KerName.repr canonical in
+    let user_mp = KerName.modpath user in
+    let target_resolver = empty_delta_resolver target_mp in
+    let user_resolver =
+      add_kn_delta_resolver user canonical (empty_delta_resolver user_mp)
+    in
+    let state = Environ.universes env, Conversion.checked_universes in
+    let _ =
+      check_inductive state [] env target_mp target_label
+        (IndType ((target, 0), target_body)) user_mp mib empty_subst empty_subst
+        target_resolver user_resolver
+    in
+    ()
+
+(* A rewrite-rule block of the signature is accepted only when the
+   implementation has a block with the same label that is equal to it once
+   both sides are substituted, see [Declareops.eq_rewrite_rules_body]. *)
+let check_rewrite_rules trace l info1 rrb2 subst1 subst2 =
+  match info1 with
+  | Some (Rules rrb1)
+    when Declareops.eq_rewrite_rules_body
+        (Declareops.subst_rewrite_rules subst1 rrb1)
+        (Declareops.subst_rewrite_rules subst2 rrb2) -> ()
+  | Some (Constant _ | IndType _ | IndConstr _ | Rules _) | None ->
+    error_signature_mismatch trace l NoRewriteRulesSubtyping
 
 let rec check_modules state trace env mp1 msb1 mp2 msb2 subst1 subst2 =
   let mty1 = module_type_of_module msb1 in
@@ -474,8 +610,10 @@ and check_signatures (cst, ustate) trace env mp1 sig1 dir mp2 sig2 subst1 subst2
         | SFBmind mib2 ->
             check_inductive (cst, ustate) trace env mp1 l (get_obj env mp1 view l)
               mp2 mib2 subst1 subst2 reso1 reso2
-        | SFBrules _ ->
-            error_signature_mismatch trace l NoRewriteRulesSubtyping
+        | SFBrules rrb2 ->
+            let info1 = Id.Map.find_opt l (Lazy.force view.sv_map).objs in
+            let () = check_rewrite_rules trace l info1 rrb2 subst1 subst2 in
+            cst
         | SFBmodule msb2 ->
             let mp1' = MPdot (mp1, l) in
             let mp2' = MPdot (mp2, l) in

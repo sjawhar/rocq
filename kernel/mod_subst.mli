@@ -40,6 +40,12 @@ val map_kn_delta_resolver :
   ?fc:(Constr.t -> Constr.t) ->
   (KerName.t -> KerName.t) -> delta_resolver -> delta_resolver
 
+(** [drop_inline_bodies reso] turns each [Inline (lev, Some t)] hint into
+    [Inline (lev, None)], the hint of a [Parameter Inline]: a substitution
+    through the result keeps the constant where one through [reso] puts
+    [t]. It returns [reso] itself when no hint carries a term. *)
+val drop_inline_bodies : delta_resolver -> delta_resolver
+
 (** [add_inline_delta_resolver kn v reso] assumes that root(reso) ⊆ modpath(kn). *)
 val add_inline_delta_resolver :
   KerName.t -> (int * constr UVars.univ_abstracted option) -> delta_resolver -> delta_resolver
@@ -58,6 +64,12 @@ val upcast_delta_resolver : ModPath.t -> delta_resolver -> delta_resolver
 val mp_of_delta : delta_resolver -> ModPath.t -> ModPath.t
 val kn_of_delta : delta_resolver -> KerName.t -> KerName.t
 
+(** [mp_is_alias reso mp] tells whether [reso] makes [mp] equivalent to some
+    other modpath. Note that both this and [mp_of_delta] take prefixes into
+    account: a module is equivalent to another one as soon as one of its
+    ancestors is. *)
+val mp_is_alias : delta_resolver -> ModPath.t -> bool
+
 (** Build a constant whose canonical part is obtained via a resolver *)
 
 val constant_of_delta_kn : delta_resolver -> KerName.t -> Constant.t
@@ -68,10 +80,6 @@ val mind_of_delta_kn : delta_resolver -> KerName.t -> MutInd.t
 
 (** Extract the set of inlined constant in the resolver *)
 val inline_of_delta : int option -> delta_resolver -> (int * KerName.t) list
-
-(** Does a [delta_resolver] contains a [mp]? *)
-
-val mp_in_delta : ModPath.t -> delta_resolver -> bool
 
 (** {6 Substitution} *)
 
