@@ -262,6 +262,11 @@ printf '%s\n' "$bad" 'Qed.' > "$workdir/loaded_bad.v"
 skips load_kept "Load \"$workdir/loaded_bad\"." 'Print Assumptions discarded_bad.'
 says load_kept "$unchecked_proof" option set inline
 
+# A rollback that discards a well-typed proof keeps the ill-typed one the
+# restored state holds: its check must not run, and the skip still applies.
+skips reset_keeps_bad "$bad" 'Qed.' "$good" 'Qed.' 'Reset kept_good.' 'Print Assumptions discarded_bad.'
+says reset_keeps_bad "$unchecked_proof" option set inline
+
 # (j) neither a proof worker nor an interactive session is a document rocq
 # compile builds, and only such a document checks what it discards. With
 # -async-proofs on the Qed is delegated, and the worker restores the state it
