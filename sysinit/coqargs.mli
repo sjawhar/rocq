@@ -40,9 +40,9 @@ type injection_command =
       does not cause a warning, similarly to above. *)
   | WarnSkipQedTypecheckIgnored
   (** Used so that "-w -skip-qed-typecheck-ignored" silences the message a
-      toplevel gives for "-skip-qed-typecheck", similarly to above: the
-      toplevel forces the check on before it reads anything, which is before
-      the injections that -w sets. *)
+      toplevel and "rocq compile -vok" give for "-skip-qed-typecheck",
+      similarly to above: they force the check on before they read anything,
+      which is before the injections that -w sets. *)
 
 type coqargs_logic_config = {
   impredicative_set : bool;

@@ -37,13 +37,15 @@ val init_toploop : Coqargs.t -> Stm.AsyncOpts.stm_opt -> Coqargs.injection_comma
 
 (** [typecheck_every_qed opts injections] calls
     {!Opaques.force_qed_typecheck}, and adds to [injections] the warning that
-    [-skip-qed-typecheck] has no effect when it is on: a toplevel writes no
-    library, so nothing it reads ever reaches [rocqchk], and under [-batch]
-    its exit status says whether the files it was given go through. It warns
+    [-skip-qed-typecheck] has no effect when it is on. It is for a command
+    that writes no library, a toplevel or [rocq compile -vok]: nothing such a
+    command reads ever reaches [rocqchk], so its exit status, under [-batch]
+    for a toplevel, is the whole verdict on the files it was given. It warns
     rather than refuses because a project passes that option to every command
-    through its [_CoqProject], an editor among them. Call it before
-    {!init_toploop}, so that the rc file and the files [-l] loads are read
-    under the force, and the warning under the [-w] of the command line. *)
+    through its [_CoqProject], an editor and [make vok] among them. Call it
+    before the command creates its document, so that the rc file and the
+    files [-l] loads are read under the force, and the warning under the [-w]
+    of the command line. *)
 val typecheck_every_qed :
   Coqargs.t -> Coqargs.injection_command list -> Coqargs.injection_command list
 

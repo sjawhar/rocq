@@ -164,10 +164,13 @@ says scoped 'bad has an opaque proof not checked by the kernel.' option set inli
 skips after_succeed "$good" 'Succeed Qed.' 'Qed.' \
   'Lemma bad : False.' 'Proof. exact_no_check I. Qed.'
 
-# A control that keeps the effect of the command never sets the force, so the
-# skip still applies under it. Time prints a duration and Redirect takes the
+# Time, Instructions, Profile, Timeout and Redirect keep the effect of the
+# command and never set the force, so the skip still applies under them.
+# Time, Instructions and Profile print a measure and Redirect takes the
 # output away, so these read the status alone.
 skips time_bad "$bad" 'Time Qed.'
+skips instructions_bad "$bad" 'Instructions Qed.'
+skips profile_bad "$bad" 'Profile Qed.'
 skips timeout_bad "$bad" 'Timeout 600 Qed.'
 skips redirect_bad "$bad" "Redirect \"$workdir/redirect_bad/redirected\" Qed."
 
@@ -205,6 +208,11 @@ rolls_back reset_module_bad 'Module M.' "$bad" 'Qed.' 'End M.' 'Reset M.'
 bad2='Lemma discarded_bad2 : True.
 Proof. exact_no_check 0.'
 rolls_back reset_three "$good" 'Qed.' "$bad" 'Qed.' "$bad2" 'Qed.' 'Reset kept_good.'
+
+# Reset kept_good gives discarded_bad the handle of kept_good, and Reset m1
+# brings kept_good back under it: the check of discarded_bad must still run.
+rolls_back reset_reused_handle_bad 'Definition m0 := 0.' "$good" 'Qed.' \
+  'Definition m1 := 0.' 'Reset kept_good.' "$bad" 'Qed.' 'Reset m1.'
 
 # The stm closes a proof nested in another by discarding its declaration and
 # declaring it again, so the check of such a proof runs at its Qed, even here
@@ -263,8 +271,12 @@ extra=(-async-proofs on -async-proofs-j 1)
 skips async_bad "$bad" 'Qed.'
 # The stm runs some commands under a resilience that drops their error, so the
 # error of a check a rollback ran is raised again before the document ends.
-# Without the skip this file stops at End S, with "Open proofs remain", so
-# only the status is the same in every arm.
+# The stm applies that resilience only with -async-proofs on, so this case
+# needs it, and sets it itself: without it, Reset stops the file, and the
+# case never reaches the raise in Opaques.Summary.join. Without the skip this
+# file stops at End S, with "Open proofs remain", so only the status is the
+# same in every arm.
+extra=(-async-proofs on -async-proofs-j 1)
 same_status resilient_reset_bad 1 'Section S.' 'Variable n : nat.' "$bad" 'Qed.' \
   'Reset discarded_bad.' 'Definition x := 0.' 'End S.'
 says resilient_reset_bad "$kernel_error" option set inline
@@ -272,23 +284,27 @@ extra=(-worker-id qed_rollback)
 rolls_back worker_id_reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
 
 # (k) -vok writes no library, so nothing it processes reaches rocqchk and its
-# exit status is the whole verdict: it typechecks every Qed proof. The option
-# is refused with it, and the check is forced on for the whole document, the
-# files it loads first included, whatever the flag says, so no arm compiles an
-# ill-typed proof, with the proof delegated to a worker or not.
+# exit status is the whole verdict: it typechecks every Qed proof. As in a
+# toplevel, the check is forced on for the whole process, the files it loads
+# first included, whatever the flag says, and the option only warns. So no arm
+# compiles an ill-typed proof, with the proof delegated to a worker or not,
+# and every arm compiles a well-typed one.
 extra=(-vok)
 same_status vok_bad 1 "$bad" 'Qed.'
-says vok_bad "$kernel_error" plain set inline
-says vok_bad 'cannot be used with -skip-qed-typecheck' option
+says vok_bad "$kernel_error" plain option set inline
+says vok_bad 'has no effect here' option
+same_status vok_good 0 "$good" 'Qed.'
+says vok_good 'has no effect here' option
 extra=(-vok -async-proofs on -async-proofs-j 1)
 same_status vok_async_bad 1 "$bad" 'Qed.'
-says vok_async_bad 'cannot be used with -skip-qed-typecheck' option
+says vok_async_bad 'has no effect here' option
 # -l loads its file before the first line of the case, so the arm that sets
-# the flag there reaches it with the skip off: only the -set arm would skip.
+# the flag there reaches it with the skip off: only the option arm and the
+# -set arm would skip.
 extra=(-vok -l "$workdir/loaded_bad.v")
 same_status vok_load_bad 1 'Definition after_load := 0.'
-says vok_load_bad "$kernel_error" plain set
-says vok_load_bad 'cannot be used with -skip-qed-typecheck' option
+says vok_load_bad "$kernel_error" plain option set
+says vok_load_bad 'has no effect here' option
 extra=()
 
 # (l) a toplevel writes no library either, and under -batch its exit status
