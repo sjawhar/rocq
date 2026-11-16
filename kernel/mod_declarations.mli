@@ -96,10 +96,6 @@ val set_signature : module_signature -> 'a generic_module_body -> 'a generic_mod
 
 (** {6 Substitution} *)
 
-val set_delta : Mod_subst.delta_resolver ->
-  'a generic_module_body -> 'a generic_module_body
-(** Replace the delta resolver, keeping everything else. *)
-
 type subst_kind
 val subst_dom : subst_kind
 val subst_codom : subst_kind
@@ -121,9 +117,8 @@ val subst_modtype : subst_kind -> substitution ->
 (** {6 Rewriting the names a module body mentions}
 
     The traversal [subst_module] makes, driven by plain functions instead of
-    a module substitution, for a rewrite a substitution cannot express:
-    [-merge-inductives] undoing its own merges before a library is written
-    out. Every field [subst_module] visits is visited here too. *)
+    a module substitution, for a rewrite a substitution cannot express.
+    Every field [subst_module] visits is visited here too. *)
 
 type name_map = {
   nmap_const : constant_body -> constant_body;
@@ -134,7 +129,6 @@ type name_map = {
   nmap_delta : Mod_subst.delta_resolver -> Mod_subst.delta_resolver;
 }
 
-val map_structure : name_map -> structure_body -> structure_body
 val map_module : name_map -> module_body -> module_body
 
 (** {6 Hashconsing} *)
