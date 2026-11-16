@@ -260,8 +260,9 @@ let set_option (opt,v) =
 
 let warn_skip_qed_typecheck_ignored =
   CWarnings.create ~name:"skip-qed-typecheck-ignored"
-    Pp.(fun () -> strbrk "A toplevel typechecks the opaque proofs it reads, \
-                          so -skip-qed-typecheck has no effect here.")
+    Pp.(fun () -> strbrk "-skip-qed-typecheck has no effect here: this command \
+                          writes no library for rocqchk to check, so it \
+                          typechecks every opaque proof.")
 
 let handle_injection ~intern = let open Coqargs in function
   | RequireInjection {lib;prefix;export;allow_failure} ->

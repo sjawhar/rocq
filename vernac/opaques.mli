@@ -20,27 +20,18 @@ val skip_qed_typecheck : bool ref
 (** [start_document ~check_discarded_proofs] drops what the document before
     it recorded and says whether this one records the kernel check of the
     proofs it declares under {!skip_qed_typecheck}, which {!Summary.unfreeze}
-    runs when a rollback discards one. [Stm.new_doc] calls it, before
-    anything else of the document, with [true] for a document [rocq compile]
-    builds, whose exit status is the verdict the skip must not change, and
-    [false] for an interactive document, which a proof worker's is too. *)
+    runs when a rollback discards one. Call it before the document restores
+    any state. *)
 val start_document : check_discarded_proofs:bool -> unit
 
 (** [with_qed_typecheck_forced f] runs [f] with the kernel's check of a Qed
     proof forced on, whatever {!skip_qed_typecheck} and the [Skip Qed
-    Typecheck] flag say. A command control that observes the error or the
-    result of the command it wraps and then discards its effect ([Fail],
-    [Succeed]) runs the command under it: the skip would otherwise turn the
-    error [Qed] raises on an ill-typed proof into a success, which changes
-    the verdict of the enclosing control, and the proof it discards reaches
-    no [.vo] for [rocqchk] to check. [rocq compile -vok] runs its whole
-    document under it, for the same reason: it writes no [.vo]. *)
+    Typecheck] flag say. The force lasts while [f] runs: when [f] returns or
+    raises, the force is as it was before. *)
 val with_qed_typecheck_forced : (unit -> 'a) -> 'a
 
-(** [force_qed_typecheck ()] forces that check on for good, for every proof
-    declared after it. [Coqtop.typecheck_every_qed] calls it before a
-    toplevel reads anything, for the same reason: a toplevel writes no [.vo]
-    either. *)
+(** [force_qed_typecheck ()] forces that check on for good: for every proof
+    declared after it, until the process ends. *)
 val force_qed_typecheck : unit -> unit
 
 val declare_defined_opaque : ?feedback_id:Stateid.t -> poly:bool ->
@@ -57,9 +48,6 @@ val set_opaque_disk : Opaqueproof.opaque_handle -> Opaqueproof.opaque_proofterm 
 val get_current_opaque : Opaqueproof.opaque_handle -> (Opaqueproof.opaque_proofterm * bool) option
 val get_current_constraints : Opaqueproof.opaque_handle -> Univ.ContextSet.t option
 
-(** Also drops the records of the checks {!Summary.unfreeze} runs, which hold
-    the proofs the kernel did not type: the caller is about to write them to
-    a library, where [rocqchk] reads them. *)
 val dump : ?except:Future.UUIDSet.t -> unit -> opaque_disk * Opaqueproof.opaque_handle Future.UUIDMap.t
 
 (** Rewrite every stored proof term of a dumped table ([-merge-inductives]
