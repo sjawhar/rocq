@@ -205,8 +205,11 @@ let under_one_control ~loc ~with_local_state control f =
   | ControlTimeout {remaining} -> with_timeout ~timeout:remaining f
   (* [Fail] and [Succeed] observe the error or the result of the command and
      then discard its effect, so they run it under
-     [Opaques.with_qed_typecheck_forced]. The five controls above keep the
-     effect of the command. *)
+     [Opaques.with_qed_typecheck_forced]: the skip would otherwise turn the
+     error [Qed] raises on an ill-typed proof into a success, which changes
+     the verdict of the control, and the proof they discard reaches no [.vo]
+     for [rocqchk] to check. The controls above keep the effect of the
+     command. *)
   | ControlFail {st} ->
     with_fail ~loc ~with_local_state st (fun () -> Opaques.with_qed_typecheck_forced f)
   | ControlSucceed {st} ->

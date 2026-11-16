@@ -245,16 +245,22 @@ When the proof is completed, you can exit proof mode with commands such as
    skipped, such as :cmd:`Reset`, discards it in the same way, and typechecks
    it at that command: the error :cmd:`Qed` raises without the flag is raised
    there. This does not hold for a proof delegated to a proof worker
-   (``-async-proofs on``): such a proof is discarded without a check, with
-   the flag or without it.
+   (``-async-proofs on``) or processed lazily (``-async-proofs lazy``): such
+   a proof is discarded without a check, with the flag or without it.
    A proof nested in another (:flag:`Nested Proofs Allowed`) is typechecked
    at its :cmd:`Qed` even with this flag on, because closing it discards its
-   declaration and declares it again.
+   declaration and declares it again. This does not hold when the outer proof
+   is delegated to a proof worker (``-async-proofs on``): the nested proof is
+   then kept in the :file:`.vo` file without a check, and ``rocqchk`` checks
+   it, as it checks any proof kept without a check.
    ``rocq compile -vok``, ``rocq repl`` and ``coqidetop``, the ``rocqide``
    toplevel, write no file for ``rocqchk`` to check, so they typecheck every
-   opaque proof and this flag has no effect there. Given the
-   ``-skip-qed-typecheck`` option, which does the same as this flag,
-   ``-vok`` stops with an error; a toplevel warns and goes on.
+   opaque proof. Given the ``-skip-qed-typecheck`` option, which does the
+   same as this flag, they warn that it has no effect and go on. In
+   ``coqidetop`` with ``-async-proofs on`` and this flag on, the proof worker
+   does not typecheck a proof delegated to it, and the main process
+   typechecks it only when the document is joined or the proof is needed, so
+   the editor can show such a proof as accepted until then.
 
    .. warning:: A library compiled with this flag on can contain an ill-typed
       proof, for instance one built with ``exact_no_check``, until ``rocqchk``
