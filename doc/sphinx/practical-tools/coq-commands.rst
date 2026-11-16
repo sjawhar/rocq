@@ -493,27 +493,13 @@ and ``rocq repl``, unless stated otherwise:
   typechecks every opaque proof regardless of this option.
   :cmd:`Print Assumptions` reports each constant whose proof was not
   typechecked. Subproofs declared by :tacn:`abstract` are still typechecked
-  when the tactic runs, and so is a proof declared under :cmd:`Fail` or
-  :cmd:`Succeed`, as the :flag:`Skip Qed Typecheck` flag describes.
-  A proof that a command rolling the document back discards, such as
-  :cmd:`Reset`, is typechecked at that command for the same reason, when
-  ``rocq compile`` is building a file. This does not hold for a proof
-  delegated to a proof worker (``-async-proofs on``) or processed lazily
-  (``-async-proofs lazy``): such a proof is discarded without a check, with
-  this option or without it.
-  A proof nested in another (:flag:`Nested Proofs Allowed`) is typechecked
-  at its :cmd:`Qed` even with this option, because closing it discards its
-  declaration and declares it again. This does not hold when the outer proof
-  is delegated to a proof worker (``-async-proofs on``): the nested proof is
-  then kept in the :file:`.vo` file without a check, and ``rocqchk`` checks
-  it, as it checks any proof kept without a check.
-  ``rocq compile -vok``, ``rocq repl`` and ``coqidetop`` write no file for
-  ``rocqchk`` to check, so they typecheck every opaque proof and warn that
-  this option has no effect. In ``coqidetop`` with ``-async-proofs on`` and
-  this option, the proof worker does not typecheck a proof delegated to it,
-  and the main process typechecks it only when the document is joined or the
-  proof is needed, so the editor can show such a proof as accepted until
-  then.
+  when the tactic runs. This option does the same as the
+  :flag:`Skip Qed Typecheck` flag, so every exception that the flag lists
+  applies to it too: a proof declared under :cmd:`Fail` or :cmd:`Succeed`,
+  a proof that a rollback such as :cmd:`Reset` discards, a proof delegated
+  to a proof worker or nested in another, and ``rocq compile -vok``,
+  ``rocq repl`` and ``coqidetop``, which write no file for ``rocqchk`` to
+  check.
 
   .. warning:: A library compiled with this option can contain an ill-typed
      proof, for instance one built with ``exact_no_check``, until ``rocqchk``

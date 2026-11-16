@@ -249,8 +249,8 @@ When the proof is completed, you can exit proof mode with commands such as
    a proof is discarded without a check, with the flag or without it.
    A proof nested in another (:flag:`Nested Proofs Allowed`) is typechecked
    at its :cmd:`Qed` even with this flag on, because closing it discards its
-   declaration and declares it again. This does not hold when the outer proof
-   is delegated to a proof worker (``-async-proofs on``): the nested proof is
+   declaration and declares it again. This does not hold when the nested
+   proof itself is delegated to a proof worker (``-async-proofs on``): it is
    then kept in the :file:`.vo` file without a check, and ``rocqchk`` checks
    it, as it checks any proof kept without a check.
    ``rocq compile -vok``, ``rocq repl`` and ``coqidetop``, the ``rocqide``

@@ -91,13 +91,8 @@ let compile opts stm_options injections copts ~echo ~f_in ~f_out =
       Stm.reset_task_queue ();
       ()
 
-(* -vok writes no library, so nothing it processes ever reaches rocqchk and
-   its exit status is the whole verdict: it typechecks every opaque proof,
-   those of the files it loads first included. As a toplevel does, it forces
-   the check on for the whole process, whatever the flag, which a file can set
-   at any point, says, and warns that -skip-qed-typecheck has no effect. It
-   warns rather than refuses because a project passes that option to every
-   command through its _CoqProject, and "make vok" passes it to -vok. *)
+(* -vok writes no library for rocqchk to check, so it typechecks every opaque
+   proof, see Coqtop.typecheck_every_qed. *)
 let compile opts stm_opts copts injections ~echo ~f_in ~f_out =
   let injections =
     if copts.compilation_mode = BuildVok
