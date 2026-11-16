@@ -93,18 +93,19 @@ let compile opts stm_options injections copts ~echo ~f_in ~f_out =
 
 (* -vok writes no library, so nothing it processes ever reaches rocqchk and
    its exit status is the whole verdict: it typechecks every opaque proof,
-   those of the files it loads first included. The option is refused with it,
-   and the check is forced on for the whole document instead, whatever the
-   flag, which a file can set at any point, says. *)
+   those of the files it loads first included. As a toplevel does, it forces
+   the check on for the whole process, whatever the flag, which a file can set
+   at any point, says, and warns that -skip-qed-typecheck has no effect. It
+   warns rather than refuses because a project passes that option to every
+   command through its _CoqProject, and "make vok" passes it to -vok. *)
 let compile opts stm_opts copts injections ~echo ~f_in ~f_out =
-  let vok = copts.compilation_mode = BuildVok in
-  if vok && opts.config.skip_qed_typecheck then
-    CErrors.user_err Pp.(str
-      "-vok typechecks the opaque proofs of the file, \
-       so it cannot be used with -skip-qed-typecheck.");
-  let compile () = compile opts stm_opts injections copts ~echo ~f_in ~f_out in
+  let injections =
+    if copts.compilation_mode = BuildVok
+    then Coqtop.typecheck_every_qed opts injections
+    else injections
+  in
   ignore(CoqworkmgrApi.get 1);
-  if vok then Opaques.with_qed_typecheck_forced compile else compile ();
+  compile opts stm_opts injections copts ~echo ~f_in ~f_out;
   CoqworkmgrApi.giveback 1
 
 let compile_file opts stm_opts copts injections (f_in, echo) =
