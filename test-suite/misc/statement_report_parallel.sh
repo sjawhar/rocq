@@ -14,8 +14,8 @@
 # nothing is recorded, and nothing is written.
 #
 #  (a) A.v, a plain library: an axiom that opaque proofs use through other
-#      opaque proofs. With -d checker-workers too, whose debug line gives
-#      the same two numbers.
+#      opaque proofs. With -d checker-workers too, which prints what -j 1
+#      prints, with no line of its own about the records.
 #  (b) B.v: opaque proofs in a section. Their cooking information abstracts
 #      a hypothesis whose type names an opaque proof of A, and a Let whose
 #      body is an axiom, which only the cooked body names. A is loaded
@@ -65,6 +65,12 @@
 #      lowers the cap of the records of all processes to 1 byte: the main
 #      process gives up at the first segment it would append, and the
 #      report reads every body. The report of -j 1, with H = 0 and M > 0.
+#  (m) (a) with -compare, whose comparison reads opaque bodies through the
+#      accessor that keeps, in the main process, each table the report
+#      read: nothing is recorded, so the counts are not written, and -j 3
+#      prints the report and the verdict of -j 1. The challenge is a copy
+#      of A.vo, and the config pins it and the prelude, as the norec case
+#      of misc/compare.sh does.
 set -eu
 : "${BIN:=$(dirname "$(command -v rocq)")/}"
 export PATH="$BIN:$PATH"
@@ -315,15 +321,16 @@ report() {
 report a -Q "$d/lib" SRPar -norec SRPar.A
 has a-j1 'axiom via SRPar.A.ax'
 has a-j1 'statement typed SRPar.A.uses_ax SRPar.A.via match 1 1'
-# The debug line, which -d checker-workers prints after the report, gives
-# the numbers the run wrote; that option also turns the default path off.
+# -d checker-workers also turns the default path off. The run prints the
+# report, the summary, the output and the exit code of -j 1, and among its
+# debug lines none about the records, which the counts alone give.
 run a-d3 3 -d checker-workers -statement-report "$d/a.req" -Q "$d/lib" SRPar -norec SRPar.A
 same a-j1 a-d3 0 "(a) -j 3 -d checker-workers"
 counts a-d3
 [ "$hits" -gt 0 ] || { cat "$d/a-d3.err" >&2; fail "(a) -j 3 -d checker-workers: no body taken from the records"; }
-tr -s ' \n\t' ' ' < "$d/a-d3.err" |
-  grep -qF "[checker-workers] statement report: $hits opaque bodies from records, $reads read" \
-  || { cat "$d/a-d3.err" >&2; fail "(a) -j 3 -d checker-workers: no debug line of the report"; }
+if tr -s ' \n\t' ' ' < "$d/a-d3.err" | grep -qF '[checker-workers] statement report'; then
+  cat "$d/a-d3.err" >&2; fail "(a) -j 3 -d checker-workers: a debug line about the records"
+fi
 
 # (b)
 report b -Q "$d/lib" SRPar -norec SRPar.B
@@ -477,5 +484,41 @@ same d-j1 l-j3 0 "(l) -j 3 with the records capped at 1 byte"
 counts l-j3
 [ "$hits" = 0 ] || { cat "$d/l-j3.err" >&2; fail "(l) -j 3 with the records capped at 1 byte: $hits bodies taken from the records"; }
 [ "$reads" -gt 0 ] || { cat "$d/l-j3.err" >&2; fail "(l) -j 3 with the records capped at 1 byte: no body read"; }
+
+# (m) The answer and the challenge are the same A.vo, so the verdicts are
+# those of A's own proofs: what they are matters less than that -j 3 gives
+# the ones -j 1 gives. With the counts seam set, a run that recorded writes
+# the counts; one that did not writes nothing.
+mkdir "$d/chal"
+cp "$d/lib/A.vo" "$d/chal/A.vo"
+where=$(rocq -where)
+prelude=
+for p in "$where/theories/Corelib/Init/Prelude.vo" "$where/theories/Init/Prelude.vo"; do
+  if [ -f "$p" ]; then prelude=$p; break; fi
+done
+[ -n "$prelude" ] || fail "(m): no Prelude.vo under $where"
+prelude_sha=$(rocqchk -sha256 "$prelude")
+chal_sha=$(rocqchk -sha256 "$d/chal/A.vo")
+printf '%s\n' \
+  "{\"theorems\": [{\"name\": \"SRPar.A.clean\"}, {\"name\": \"SRPar.A.via\"}]," \
+  " \"tolerated_flags\": [{\"kind\": \"indices-not-mattering\", \"object\": \"Corelib.Init.Logic.eq\"}]," \
+  " \"prechecked\": [{\"library\": \"Corelib.Init.Prelude\", \"sha256\": \"$prelude_sha\"}]," \
+  " \"challenge_files\": [{\"path\": \"A.vo\", \"sha256\": \"$chal_sha\"}]}" > "$d/m.config"
+# compared NAME J: (a) at -j J with -compare, its verdict in $d/NAME.json.
+compared() {
+  run "$1" "$2" -statement-report "$d/a.req" -compare "$d/m.config" -challenge "$d/chal" \
+    -compare-out "$d/$1.json" -Q "$d/lib" SRPar -norec SRPar.A
+}
+compared m-j1 1
+[ "$R" = 0 ] || { cat "$d/m-j1.err" >&2; fail "(m) -j 1: exit code $R"; }
+grep -qx 'END STATEMENT REPORT' "$d/m-j1.report" \
+  || { cat "$d/m-j1.err" >&2; fail "(m) -j 1 printed no whole report"; }
+[ -s "$d/m-j1.json" ] || { cat "$d/m-j1.err" >&2; fail "(m) -j 1 wrote no verdict"; }
+compared m-j3 3
+same m-j1 m-j3 0 "(m) -j 3 with -compare"
+diff -u "$d/m-j1.json" "$d/m-j3.json" > "$d/m-j3.diff" \
+  || { cat "$d/m-j3.diff" >&2; fail "(m) -j 3 with -compare: its verdict differs from -j 1"; }
+[ ! -e "$d/m-j3.counts" ] \
+  || { cat "$d/m-j3.counts" >&2; fail "(m) -j 3 with -compare recorded opaque bodies"; }
 
 exit 0

@@ -878,16 +878,18 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   behind, unless ``rocqchk`` is killed in the instant between the creation
   of such a file and its removal, as with the files that hold the output
   of the workers. The records take bounded room: a process records no more
-  once its file would pass 64 MiB, and if the records of all the processes
-  would pass 256 MiB, or name more than 32 Mi objects in all (counted with
-  repetitions), none is used, and the report reads the proofs as it does
-  without ``-j``. A limit on the size of files (``ulimit -f``) that
-  the records meet costs only records: such a write fails, instead of
-  killing ``rocqchk``, and the report reads the proofs whose records are
-  lost. The report is the same as without ``-j``, but for one case: a
-  proof that a worker checked is not read again, so a library file that
-  changes or vanishes on disk during the run does not make the report warn
-  that this proof could not be read, nor report it as an axiom.
+  once its records would pass 64 MiB, and if the records of all the
+  processes would pass 256 MiB, or name more than 32 Mi objects in all
+  (counted with repetitions), none is used, and the report reads the
+  proofs as it does without ``-j``. A limit on the size of files
+  (``ulimit -f``) that the records meet costs only records: such a write
+  fails, instead of killing ``rocqchk``, and the report reads the proofs
+  whose records are lost. With ``-compare``, nothing is recorded, and the
+  report reads the proofs as it does without ``-j``. The report is the
+  same as without ``-j``, but for one case: a proof that a worker checked
+  is not read again, so a library file that changes or vanishes on disk
+  during the run does not make the report warn that this proof could not
+  be read, nor report it as an axiom.
 
 Environment variable ``$ROCQLIB`` can be set to override the location of
 the standard library.

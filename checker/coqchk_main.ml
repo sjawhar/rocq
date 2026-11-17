@@ -822,8 +822,14 @@ let main () =
   Check_stat.start_summary !Check_stat.output_context;
   (* With workers, the report takes the objects of each opaque body a check
      recorded instead of reading it again (ReportRecords); at -j 1 nothing
-     is recorded. *)
-  if Option.has_some !statement_report && CheckWorkers.parallel () then
+     is recorded. Nor is anything with -compare: the report reads the proofs
+     as before. Reading a body keeps its opaque table in this process
+     ([CheckLibrary.indirect_accessor]), and [run_compare] reads opaque
+     bodies through the same accessor; a body taken from a record would
+     leave its table unread, and the comparison could then read the library
+     file again where, without records, it uses the table the report kept. *)
+  if Option.has_some !statement_report && CheckWorkers.parallel ()
+     && Option.is_empty !compare_config then
     ReportRecords.start ();
   let senv, opac = run senv in
   let env = Safe_typing.env_of_safe_env senv in
@@ -832,7 +838,7 @@ let main () =
   let records = ReportRecords.collect () in
   Option.iter (fun requests ->
       print_statement_report ?recorded:(Option.map ReportRecords.recorded records) env requests;
-      Option.iter ReportRecords.print_counts records)
+      Option.iter ReportRecords.test_counts records)
     !statement_report;
   run_compare env;
   (* A summary the walk of mod_impl.ml could not complete is refused with a

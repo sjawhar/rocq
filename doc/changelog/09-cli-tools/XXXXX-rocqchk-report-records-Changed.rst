@@ -13,7 +13,8 @@
   all the processes would pass 256 MiB, or name more than 32 Mi objects
   in all, none is used, and the report reads the proofs as before. A
   limit on the size of files (``ulimit -f``) that the records meet costs
-  only records, not the run.
+  only records, not the run. With ``-compare``, nothing is recorded, and
+  the report reads the proofs as before.
   The report is the same, but for one case: a proof that a worker
   checked is not read again, so a library file that changes or vanishes
   on disk during the run no longer makes the report warn that this

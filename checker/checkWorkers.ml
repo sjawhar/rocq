@@ -652,16 +652,15 @@ let open_capture () =
 
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
 
-(* Two files of [open_capture], in that order, or neither of them: the two
-   files a worker prints to. *)
-let open_capture_pair () =
+(* The two files a worker prints to, or neither of them. *)
+let open_output () =
   match open_capture (), open_capture () with
   | Some out, Some err -> Some (out, err)
   | out, err -> Option.iter close_fd out; Option.iter close_fd err; None
 
 (* Whether a worker can be given its two files now. *)
 let capture_available () =
-  match open_capture_pair () with
+  match open_output () with
   | Some (out, err) -> close_fd out; close_fd err; true
   | None -> false
 
@@ -746,7 +745,7 @@ let spawn ?(releasable = true) ?prepared tasks =
     pending_request := false;
     let output = match prepared with
       | Some (_, _, output) -> Some output
-      | None -> open_capture_pair ()
+      | None -> open_output ()
     in
     (* Unlike the output files, the extra file is not prepared by [deal]: a
        worker can do without it, so its absence is no reason to hold a batch
@@ -1149,7 +1148,7 @@ let deal ?(walk = false) k size =
     else match Unix.pipe ~cloexec:true () with
       | exception Unix.Unix_error _ -> Error ()
       | report, report_out ->
-        match open_capture_pair () with
+        match open_output () with
         | Some output -> Ok (Some (report, report_out, output))
         | None -> close_fd report; close_fd report_out; Error ()
   in

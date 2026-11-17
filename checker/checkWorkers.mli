@@ -115,10 +115,6 @@ val set_cost_hints : (string * float) list -> unit
 val debugging : unit -> bool
 (** Whether the checker-workers debug output is on. *)
 
-val debug : CDebug.t
-(** The checker-workers debug output ([-d checker-workers]): one line,
-    prefixed with [[checker-workers]]. *)
-
 val capture_available : unit -> bool
 (** Whether a worker can now be given the two files its output is kept
     in until it is printed. *)
@@ -128,10 +124,6 @@ val open_capture : unit -> Unix.file_descr option
     temporary directory, opened, then removed, so that nothing is left of
     it on disk once its last descriptor is closed. [None] if it cannot be
     made. *)
-
-val open_capture_pair : unit -> (Unix.file_descr * Unix.file_descr) option
-(** Two files of [open_capture], in the order they are made, or neither:
-    [None], having closed the one made, if either cannot be made. *)
 
 val close_fd : Unix.file_descr -> unit
 (** Closes the descriptor, ignoring a Unix error. *)
