@@ -27,10 +27,12 @@
     opaque value, and the report uses a record only for that very value,
     as the body of a constant of that name. A record that is missing,
     because a worker could not write it or the main process could not
-    read it, only makes the report read that body. The main process
-    records nothing: it checks a body itself only where it could not make a
-    pipe or fork a worker ([CheckWorkers.spawn]), and the report then reads
-    that body, as it does without records.
+    read it, or because the body names an object whose names do not end
+    within a bound ([Check_closure.finite_names], at [RefMap]), only makes
+    the report read that body. The main process records nothing: it checks
+    a body itself only where it could not make a pipe or fork a worker
+    ([CheckWorkers.spawn]), and the report then reads that body, as it does
+    without records.
 
     Nothing here prints anything, and nothing here can fail a check or the
     run: the hook and the entry points raise nothing but an interrupt, and
@@ -105,7 +107,16 @@ open Names
    its names carry: they are the same object, and one can stand for the
    other anywhere. As above, the hash only picks a bucket, which is a map
    ordered by names ([HMap]), so that objects that a forged library gives
-   one hash are each found among the others in logarithmic time. *)
+   one hash are each found among the others in logarithmic time. Hashing an
+   object reads the hash its names carry and walks no name, but the order
+   walks the names, canonical ones included, and two copies of a name that
+   has no end, which a forged library can hold, compare for ever. So every
+   object this map holds or looks up has names that end within a bound,
+   checked before it is compared with any other
+   ([Check_closure.finite_names]): in the worker, by the walk that finds it
+   ([Check_closure.opaque_body_refs]), and in the main process, as its frame
+   is decoded ([read_segment]). Each comparison then ends, whatever the
+   library files hold. *)
 module RefMap = HMap.Make (struct
     type t = GlobRef.t
     let hash = GlobRef.UserOrd.hash
@@ -492,21 +503,27 @@ let make_frame n index objs =
    failure stops the recording in that worker only, and so does a frame
    that would take its file past its cap; a write that fails empties the
    file first ([empty_file]), and the report then reads the bodies that
-   worker checked. *)
+   worker checked. A body that names an object whose names do not end
+   within the bound of [Check_closure.finite_names] is not recorded, and
+   none of its objects is numbered: the report reads that body, and the
+   worker goes on recording the next ones. *)
 let record index env c =
   match !current with
   | None -> ()
   | Some o ->
     try
-      let frame = make_frame o.numbering index (Check_closure.opaque_body_refs env c) in
-      let size = Bytes.length frame in
-      if o.size + size > o.max_size then current := None
-      else begin
-        (try write_all o.fd frame 0 size with
-         | Sys.Break as e -> raise e
-         | e -> empty_file o.fd; raise e);
-        o.size <- o.size + size
-      end
+      match Check_closure.opaque_body_refs env c with
+      | None -> ()
+      | Some objs ->
+        let frame = make_frame o.numbering index objs in
+        let size = Bytes.length frame in
+        if o.size + size > o.max_size then current := None
+        else begin
+          (try write_all o.fd frame 0 size with
+           | Sys.Break as e -> raise e
+           | e -> empty_file o.fd; raise e);
+          o.size <- o.size + size
+        end
     with
     | Sys.Break as e -> raise e
     | _ -> current := None
@@ -746,10 +763,14 @@ let start () =
 (* The records of one segment, in order, for the constants and opaque
    values [values] of the checks, by number. A frame cut short, or one
    whose record or numbers are wrong, ends the segment: what follows it
-   cannot be told apart from what it holds. The records read before it are
-   whole, and kept. [decoded] counts the numbers of objects decoded so far,
-   in all the segments: one that would take it past [id_cap] raises, and
-   then no record is used. *)
+   cannot be told apart from what it holds. So does a frame that names
+   first an object whose names do not end within the bound of
+   [Check_closure.finite_names], which is checked for each such object
+   before any of them is kept or compared ([share]); the objects it names
+   by number were checked with the frame that named them first. The
+   records read before it are whole, and kept. [decoded] counts the
+   numbers of objects decoded so far, in all the segments: one that would
+   take it past [id_cap] raises, and then no record is used. *)
 let read_segment records values decoded b =
   let objects = ref [||] and known = ref 0 in
   let add (r : record) =
@@ -785,7 +806,8 @@ let read_segment records values decoded b =
       | size ->
         match (Marshal.from_bytes b ofs : record) with
         | exception (Failure _ | Invalid_argument _) -> ()
-        | r -> if add r then frames (ofs + size)
+        | r ->
+          if Array.for_all Check_closure.finite_names r.defs && add r then frames (ofs + size)
   in
   frames 0
 

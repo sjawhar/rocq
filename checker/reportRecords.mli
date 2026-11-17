@@ -27,7 +27,15 @@
     where it could not make a pipe or fork a worker), and those it reaches
     through a copy it makes itself: its implementation view substitutes the
     structure of each module it looks into, and a copy made with a
-    substitution is a new value, which no record names.
+    substitution is a new value, which no record names. It reads too each
+    body that names an object whose user or canonical name does not end
+    within the bound of [Check_closure.finite_names], as a name whose
+    module path loops, which a forged library can hold: such an object is
+    never recorded. The worker checks each object of a body before it
+    compares it with any other, and records no body that names such an
+    object; the main process checks each object of a frame before it
+    compares any, and a frame that names such an object ends the records
+    of that worker.
 
     The caller's rules:
     - [start] is called once, in the main process, before any library is

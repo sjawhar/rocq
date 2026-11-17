@@ -873,7 +873,12 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   the libraries that are not checked, those that the main process checks
   itself (it does so only where it cannot start a worker), and those it
   reaches through a copy it makes itself, by substituting the structure of
-  a module it looks into. While a worker runs, its records are kept in a
+  a module it looks into. Nor is a proof recorded that names an object
+  whose name, or canonical name, is longer than any name that ``coqc``
+  writes: more than 4,096 modules and identifiers in its module path and
+  in the directory path at the root of that path. A forged
+  library can hold such a name, even one whose module path loops; the
+  report reads such a proof. While a worker runs, its records are kept in a
   temporary file in ``/dev/shm``, removed from it as soon as it is opened,
   and once the worker has ended, in the memory of the main process, which
   copies that file and closes it at once: no directory is made and nothing
