@@ -358,6 +358,44 @@ let test_unreadable_opaque kn =
     CErrors.user_err Pp.(str "test unreadable opaque body")
   | None | Some _ -> ()
 
+(* Prototype I (measurement only, never merged): with ROCQCHK_REPORT_STATS
+   set, the time spent reading and walking each constant's body, by the root
+   of its library, is written to that file when the report ends. *)
+let report_stats : (string, float array) Hashtbl.t = Hashtbl.create 17
+
+let stats_on = Option.has_some (Sys.getenv_opt "ROCQCHK_REPORT_STATS")
+
+let rec file_of_mp = function
+  | MPfile dp -> Some dp
+  | MPdot (mp, _) -> file_of_mp mp
+  | MPbound _ -> None
+
+let root_of kn = match file_of_mp (Constant.modpath kn) with
+  | Some dp -> (match List.rev (DirPath.repr dp) with id :: _ -> Id.to_string id | [] -> "")
+  | None -> "<bound>"
+
+(* n_opaque, t_access, t_walk_opaque, n_other, t_walk_other *)
+let add_stats kn opaque t_access t_walk =
+  let r = root_of kn in
+  let a = match Hashtbl.find_opt report_stats r with
+    | Some a -> a
+    | None -> let a = Array.make 5 0. in Hashtbl.add report_stats r a; a in
+  if opaque then begin
+    a.(0) <- a.(0) +. 1.; a.(1) <- a.(1) +. t_access; a.(2) <- a.(2) +. t_walk end
+  else begin a.(3) <- a.(3) +. 1.; a.(4) <- a.(4) +. t_walk end
+
+let write_stats () =
+  match Sys.getenv_opt "ROCQCHK_REPORT_STATS" with
+  | None -> ()
+  | Some f ->
+    (try
+       let oc = open_out f in
+       Hashtbl.iter (fun r a ->
+           Printf.fprintf oc "%s %.0f %.3f %.3f %.0f %.3f\n" r a.(0) a.(1) a.(2) a.(3) a.(4))
+         report_stats;
+       close_out oc
+     with Sys_error _ -> ())
+
 let constant_node st view kn =
   match lookup_constant st view kn with
   | None -> unresolved
@@ -373,6 +411,8 @@ let constant_node st view kn =
        ordinary answer, and failing the whole check on it would turn every
        delayed proof into a failed grade. A reader who needs certainty reads the
        warning, which names the constant. *)
+    let t0 = if stats_on then Unix.gettimeofday () else 0. in
+    let opaque = match cb.const_body with OpaqueDef _ -> true | _ -> false in
     let body, axiom = match cb.const_body with
       | Def c -> [declaration_view, c], false
       | OpaqueDef o ->
@@ -385,7 +425,9 @@ let constant_node st view kn =
            [], true)
       | Undef _ | Primitive _ | Symbol _ -> [], true
     in
+    let t1 = if stats_on then Unix.gettimeofday () else 0. in
     let refs = walk st (fresh_gen st) empty_refs ((declaration_view, cb.const_type) :: body) in
+    if stats_on then add_stats kn opaque (t1 -. t0) (Unix.gettimeofday () -. t1);
     { refs = refs_to_list refs; axiom;
       flags = typing_flags (GlobRef.ConstRef kn) cb.const_typing_flags [] }
 
@@ -634,6 +676,11 @@ let test_fault () =
   | None | Some _ -> ()
 
 let print env access requests =
+  let pt0 = Unix.gettimeofday () in
+  let total () =
+    let a = Array.make 5 0. in
+    a.(1) <- Unix.gettimeofday () -. pt0;
+    Hashtbl.replace report_stats "<TOTAL-wall-in-[1]>" a in
   let index =
     Environ.fold_constants (fun c _ acc -> CString.Map.add (Constant.to_string c) c acc)
       env CString.Map.empty
@@ -665,7 +712,9 @@ let print env access requests =
         CString.Set.iter (line "axiom %s %s" r.req_name) axioms;
         CString.Set.iter (line "flag %s %s" r.req_name) flags)
     requests;
-  line "END STATEMENT REPORT"
+  line "END STATEMENT REPORT";
+  if stats_on then total ();
+  write_stats ()
 
 (** {6 The closure, for [rocqchk -compare]} *)
 
