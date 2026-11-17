@@ -639,10 +639,14 @@ let pr_batch b =
     str "the last " ++ Constant.print last ++ str ")"
   | _ -> pr_tasks b
 
-(* An unnamed file: created in [temp_dir], by default the temporary
-   directory, opened, then removed, so that nothing is left of it on disk
-   once its last descriptor is closed. *)
-let open_capture ?temp_dir () =
+let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
+
+(* A file created in [temp_dir], by default the temporary directory,
+   opened, then removed, so that nothing is left of it on disk once its
+   last descriptor is closed; [None] if it cannot be created or opened.
+   One that cannot be removed is still named: it is kept open all the same
+   if [named], and closed otherwise, so that there is none. *)
+let open_temp ~named ?temp_dir () =
   match Filename.temp_file ?temp_dir "rocqchk" ".out" with
   | exception Sys_error _ -> None
   | name ->
@@ -650,10 +654,15 @@ let open_capture ?temp_dir () =
       try Some (Unix.openfile name [Unix.O_RDWR; Unix.O_CLOEXEC] 0o600)
       with Unix.Unix_error _ -> None
     in
-    (try Sys.remove name with Sys_error _ -> ());
-    fd
+    match Sys.remove name with
+    | () -> fd
+    | exception Sys_error _ -> if named then fd else (Option.iter close_fd fd; None)
 
-let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
+(* An unnamed file for what a worker prints: created, opened, then
+   removed; one that cannot be removed is used all the same, named. *)
+let open_capture () = open_temp ~named:true ()
+
+let open_unnamed ~temp_dir = open_temp ~named:false ~temp_dir ()
 
 (* The two files a worker prints to, or neither of them. *)
 let open_output () =

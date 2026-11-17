@@ -877,9 +877,9 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   temporary file in ``/dev/shm``, removed from it as soon as it is opened,
   and once the worker has ended, in the memory of the main process, which
   copies that file and closes it at once: no directory is made and nothing
-  is left behind, unless ``rocqchk`` is killed in the instant between the
-  creation of such a file and its removal, as with the files that hold the
-  output of the workers.
+  is left behind, unless ``rocqchk`` cannot remove such a file (see
+  below), or is killed in the instant between the creation of such a file
+  and its removal, as with the files that hold the output of the workers.
 
   The records take memory, as ``/dev/shm`` is a file system in memory, and
   they are bounded. A worker records no more once its file would pass
@@ -906,12 +906,17 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   take no room on a file system that ``rocqchk`` writes to without them,
   and a full ``/dev/shm`` only stops recording; or where the limit on open
   files (``ulimit -n``), less the files already open as ``rocqchk``
-  starts, or the room left in the system's table of open files
-  (``/proc/sys/fs/file-nr``), is below ``5 n + 65`` with ``-j n``, or
-  ``rocqchk`` cannot read that limit from ``/proc/self/limits``, those
-  files from ``/proc/self/fd``, or that table where the system shows one.
-  In all these cases the report reads the proofs as it does without
-  ``-j``. Other processes that fill the system's table of open files while
+  starts, or the room left in the system's table of open files, is below
+  ``5 n + 65`` with ``-j n``, or ``rocqchk`` cannot read that limit from
+  ``/proc/self/limits``, those files from ``/proc/self/fd``, or that room
+  from ``/proc/sys/fs/file-nr``: without that file, as where a sandbox
+  hides it, the room in the system's table cannot be known. In all these
+  cases the report reads the proofs as it does without ``-j``. Where
+  ``rocqchk`` can make files in ``/dev/shm`` but not remove them, as in a
+  sandbox that forbids removing files there, the one empty file it made
+  before the removal failed is left in ``/dev/shm``, nothing more is
+  recorded, and the report reads the proofs as it does without ``-j``.
+  Other processes that fill the system's table of open files while
   ``rocqchk`` runs can make it fail, with or without records: no check at
   its start can foresee them.
 

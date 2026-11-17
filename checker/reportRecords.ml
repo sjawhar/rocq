@@ -203,13 +203,19 @@ let deferred_cap = 4 * 1024 * 1024
     Each worker that checks opaque bodies records to a file of its own,
     which the main process opens for it before the fork ([open_file],
     through [CheckWorkers.set_worker_file]): an unnamed file in /dev/shm
-    ([records_dir]), created, opened and removed at once, as
-    [CheckWorkers.open_capture] makes the files of the workers' output in
-    the temporary directory. It lives while a process holds it open, and
-    the system frees it with its last descriptor, at the latest when the
-    last process that holds it exits: so nothing is left in /dev/shm,
-    however the run ends (but for a kill in the instant between the
-    creation of a file and its removal). No other user can replace the
+    ([records_dir]), created, opened and removed at once
+    ([CheckWorkers.open_unnamed]), as the files of the workers' output are
+    made in the temporary directory. It lives while a process holds it
+    open, and the system frees it with its last descriptor, at the latest
+    when the last process that holds it exits: so nothing is left in
+    /dev/shm, however the run ends, but for a kill in the instant between
+    the creation of a file and its removal, or a file that cannot be
+    removed, as in a sandbox that forbids removing files in /dev/shm.
+    Such a file is closed at once, unused, and the main process gives up
+    ([open_file]): the one empty file is left, and no other is made. A
+    named file of the records would outlive the run with what it holds,
+    and every run would leave one for each worker, where rocqchk leaves
+    nothing in /dev/shm without records. No other user can replace the
     file between its creation and its opening, as [start] records only in
     a /dev/shm that no other user may write to, or that has the sticky bit.
     A process of the same user can open it while it lives, through
@@ -527,11 +533,14 @@ let records_dir = "/dev/shm"
    the whole run, as the other failures do: had the main process gone on
    without it, nothing else would end the recording where no file can be
    made at all, as in a /dev/shm whose room or inodes are used up, and
-   [deferred] would grow with every check while no record is made. *)
+   [deferred] would grow with every check while no record is made. So
+   does a file that can be made but not removed, which
+   [CheckWorkers.open_unnamed] closes and does not give: going on would
+   leave a named file in /dev/shm for each worker. *)
 let open_file () =
   match !buffer with
   | Some b when b.whole ->
-    (match CheckWorkers.open_capture ~temp_dir:records_dir () with
+    (match CheckWorkers.open_unnamed ~temp_dir:records_dir with
      | Some _ as file -> file
      | None -> give_up (); None
      | exception (Sys.Break as e) -> give_up (); raise e
@@ -611,7 +620,7 @@ let open_descriptors dev =
    looked at, as where there is no /dev/shm. It fails too where users other
    than its owner may write to it and it has no sticky bit: such a user
    could remove and replace a file of the records between its creation and
-   its opening ([CheckWorkers.open_capture]), and then see or change what a
+   its opening ([CheckWorkers.open_unnamed]), and then see or change what a
    worker records. *)
 let records_device () =
   let st = Unix.stat records_dir in
@@ -638,30 +647,28 @@ let temp_dir_on dev =
    the files of other processes: in a system whose table is nearly full,
    the files of the records could take the last places, and a later open
    that rocqchk needs, of a library say, would fail where it succeeds
-   without records. Where the file does not exist (ENOENT), the system
-   shows no such table, as under gVisor, and there is nothing to check;
-   any other failure to read or parse it fails, and then nothing is
-   recorded. Other processes that fill the table while rocqchk runs make
-   the outcome of a run without records depend on them too, which no check
-   at the start can cover. *)
+   without records. Without that file, the room in the system's table
+   cannot be known, even where a table is there and the file is only
+   hidden: so where it does not exist, as where it cannot be read or
+   parsed, this fails, and then nothing is recorded. Other processes that
+   fill the table while rocqchk runs make the outcome of a run without
+   records depend on them too, which no check at the start can cover. *)
 let system_room need =
-  match Unix.openfile "/proc/sys/fs/file-nr" [Unix.O_RDONLY; Unix.O_CLOEXEC] 0 with
-  | exception Unix.Unix_error (Unix.ENOENT, _, _) -> true
-  | fd ->
-    let ch = try Unix.in_channel_of_descr fd with e -> CheckWorkers.close_fd fd; raise e in
-    let line = Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () -> input_line ch) in
-    let number s =
-      if String.equal s "" || not (String.for_all (fun c -> '0' <= c && c <= '9') s)
-      then failwith "ReportRecords.system_room";
-      Int64.of_string ("0u" ^ s)
-    in
-    let words = String.split_on_char ' ' (String.map (fun c -> if Char.equal c '\t' then ' ' else c) line) in
-    match List.filter (fun s -> not (String.equal s "")) words with
-    | [allocated; _; size] ->
-      let allocated = number allocated and size = number size in
-      Int64.unsigned_compare allocated size <= 0
-      && Int64.unsigned_compare (Int64.sub size allocated) (Int64.of_int need) >= 0
-    | _ -> failwith "ReportRecords.system_room"
+  let fd = Unix.openfile "/proc/sys/fs/file-nr" [Unix.O_RDONLY; Unix.O_CLOEXEC] 0 in
+  let ch = try Unix.in_channel_of_descr fd with e -> CheckWorkers.close_fd fd; raise e in
+  let line = Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () -> input_line ch) in
+  let number s =
+    if String.equal s "" || not (String.for_all (fun c -> '0' <= c && c <= '9') s)
+    then failwith "ReportRecords.system_room";
+    Int64.of_string ("0u" ^ s)
+  in
+  let words = String.split_on_char ' ' (String.map (fun c -> if Char.equal c '\t' then ' ' else c) line) in
+  match List.filter (fun s -> not (String.equal s "")) words with
+  | [allocated; _; size] ->
+    let allocated = number allocated and size = number size in
+    Int64.unsigned_compare allocated size <= 0
+    && Int64.unsigned_compare (Int64.sub size allocated) (Int64.of_int need) >= 0
+  | _ -> failwith "ReportRecords.system_room"
 
 (* Whether the descriptors the workers may need with their files of
    records ([CheckWorkers.descriptors_for_workers], one file each) fit

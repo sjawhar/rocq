@@ -432,12 +432,19 @@ report() {
 
 # no_records_here: why rocqchk records nothing on this machine, by the
 # conditions of ReportRecords.start (coq-commands.rst) that this test can
-# see, or nothing where none of them holds. A run at -j 3 needs 5 * 3 + 65
-# = 80 descriptors free for the recorder to start
-# (CheckWorkers.descriptors_for_workers); the limit of a run, less the
-# descriptors open, is checked by (n) and (p).
+# see, or nothing where none of them holds. A run at -j 3 needs 80
+# descriptors free for the recorder to start: the count of
+# CheckWorkers.descriptors_for_workers ~extra_per_worker:1, whose formula
+# in checkWorkers.ml is (4 + extra_per_worker) * jobs () + 1 + 64, with
+# jobs () = 3 at -j 3, so (4 + 1) * 3 + 1 + 64 = 80. They must be free
+# below the soft limit on open files (ulimit -n) less the descriptors open,
+# which rocqchk counts in /proc/self/fd less the one of that listing
+# (ReportRecords.open_descriptors), as this test counts those of its
+# shell, which the runs below inherit; and in the system's table of open
+# files, by /proc/sys/fs/file-nr, without which rocqchk records nothing.
+# Cases (n) and (p) check the limit of a run less the descriptors open.
 no_records_here() {
-  local perm shm dir allocated max
+  local perm shm dir limit fds held allocated max
   if [ ! -d /dev/shm ] || [ ! -w /dev/shm ] || [ ! -x /dev/shm ]; then
     echo "/dev/shm is not a directory that rocqchk may create files in"; return
   fi
@@ -454,16 +461,28 @@ no_records_here() {
   if ! { read -r _ < /proc/self/limits; } 2> /dev/null || ! ls /proc/self/fd > /dev/null 2>&1; then
     echo "/proc/self/limits or /proc/self/fd cannot be read"; return
   fi
-  if [ -e /proc/sys/fs/file-nr ]; then
-    if ! { read -r allocated _ max < /proc/sys/fs/file-nr; } 2> /dev/null; then
-      echo "/proc/sys/fs/file-nr cannot be read"; return
-    fi
-    case $allocated$max in
-      ''|*[!0-9]*) echo "/proc/sys/fs/file-nr holds no numbers"; return ;;
-    esac
-    if (( max - allocated < 80 )); then
-      echo "the system's table of open files has fewer than 80 places left"; return
-    fi
+  limit=$(ulimit -Sn)
+  fds=(/proc/self/fd/*)
+  held=$(( ${#fds[@]} - 1 ))
+  case $limit in
+    unlimited) ;;
+    ''|*[!0-9]*) echo "the limit on open files cannot be read"; return ;;
+    *)
+      if (( limit - held < 80 )); then
+        echo "the limit on open files, $limit, less the $held open, leaves fewer than 80"; return
+      fi ;;
+  esac
+  if [ ! -e /proc/sys/fs/file-nr ]; then
+    echo "/proc/sys/fs/file-nr does not exist"; return
+  fi
+  if ! { read -r allocated _ max < /proc/sys/fs/file-nr; } 2> /dev/null; then
+    echo "/proc/sys/fs/file-nr cannot be read"; return
+  fi
+  case $allocated$max in
+    ''|*[!0-9]*) echo "/proc/sys/fs/file-nr holds no numbers"; return ;;
+  esac
+  if (( max - allocated < 80 )); then
+    echo "the system's table of open files has fewer than 80 places left"; return
   fi
 }
 
