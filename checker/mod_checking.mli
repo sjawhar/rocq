@@ -11,15 +11,15 @@
 val set_indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) -> unit
 
 val set_opaque_check_hook :
-  (Opaqueproof.opaque -> (Environ.env -> Constr.t -> unit)) -> unit
-(** [set_opaque_check_hook f]: the check of each opaque body [o] calls
-    [f o] when it is deferred, in the process that defers it (the main
-    process), and the function [f o] returned right after the check of the
-    cooked body [c] returned normally, in the process that runs it, with
-    the environment [c] was checked in and [c]. Nothing calls the second
-    stage for a check that raised. [f] and what it returns must raise
-    nothing but [Sys.Break]: the hook changes nothing that is checked.
-    Default: does nothing. *)
+  (Names.Constant.t -> Opaqueproof.opaque -> (Environ.env -> Constr.t -> unit)) -> unit
+(** [set_opaque_check_hook f]: the check of the opaque body [o] of each
+    constant [kn] calls [f kn o] when it is deferred, in the process that
+    defers it (the main process), and the function [f kn o] returned right
+    after the check of the cooked body [c] returned normally, in the
+    process that runs it, with the environment [c] was checked in and [c].
+    Nothing calls the second stage for a check that raised. [f] and what it
+    returns must raise nothing but [Sys.Break]: the hook changes nothing
+    that is checked. Default: does nothing. *)
 
 val reset_opaque_check_hook : unit -> unit
 (** Back to the default hook, which does nothing. *)

@@ -5,15 +5,20 @@
 # print what the run at -j 1 prints: the same report, line for line, the
 # same context summary (-o), the same standard output and the same
 # libraries checked and admitted, with the same exit code. The records are
-# kept in unnamed files, so no run may leave anything in TMPDIR.
+# kept in unnamed files in /dev/shm, and the files of the workers' output
+# in unnamed files in TMPDIR, so no run may leave anything in TMPDIR, nor a
+# file of rocqchk's in /dev/shm.
 #
 # The -j 3 runs take the default path, where the walk starts while the
 # libraries are read; COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS makes rocqchk
 # write "H M" there, H the opaque bodies the report took from the records
 # and M those it read, and H > 0 shows the records were used. At -j 1
 # nothing is recorded, and nothing is written. rocqchk records only where
-# it reads from /proc/self/limits a limit on open files that leaves room
-# for the records, as the usual limit of 1024 does.
+# /dev/shm is a directory it can write to, on a file system that neither
+# TMPDIR nor a file it holds open is on, and where the limit on open files
+# that it reads from /proc/self/limits, less the descriptors listed in
+# /proc/self/fd, leaves room for the records, as the usual limit of 1024
+# does.
 #
 #  (a) A.v, a plain library: an axiom that opaque proofs use through other
 #      opaque proofs. With -d checker-workers too, which prints what -j 1
@@ -52,32 +57,58 @@
 #      the others back while it runs. The report of -j 1, and M = 0.
 #  (j) (d) and (c) at -j 3, started together, with the same TMPDIR: each
 #      prints the report of its run at -j 1, (d) with M = 0, and TMPDIR is
-#      empty once both have ended. The two runs number their checks
-#      differently, so a record that crossed from one run to the other
-#      would name the objects of another body than the check of that number
-#      there: (d) would read bodies, or print another report.
-#  (k) (d) with the size of the files rocqchk writes limited to 1024 bytes
-#      (ulimit -f 1), less than its records take. Its standard output and
-#      error go through pipes, which the limit does not apply to, so the
-#      files that meet it are those of the records: a write past it fails,
-#      instead of killing the process with SIGXFSZ, and costs records only.
-#      -j 1 under the same limit prints what (d) prints at -j 1, and -j 3
+#      empty once both have ended, and nothing of theirs is left in
+#      /dev/shm. The two runs number their checks differently, so a record
+#      that crossed from one run to the other would name the objects of
+#      another body than the check of that number there: (d) would read
+#      bodies, or print another report.
+#  (k) K.v, a library of opaque proofs whose bodies each name 200
+#      constants, so that the first record a worker writes takes more than
+#      1024 bytes. Without a limit, -j 3 prints what -j 1 prints, and takes
+#      every body from the records: M = 0. Then with the size of the files
+#      rocqchk writes limited to 1024 bytes (ulimit -f 1). Its standard
+#      output and error go through pipes, which the limit does not apply
+#      to, and its workers print nothing to the files of their output, so
+#      the files that meet it are those of the records, in /dev/shm, which
+#      the limit applies to as to any file: a write past it fails, instead
+#      of killing the worker with SIGXFSZ, and costs records only. -j 1
+#      under the limit prints what K prints at -j 1 without it, and -j 3
 #      prints that too, with M > 0: the limit cost records.
 #  (l) (d) at -j 3 with COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP=1, which
 #      lowers the cap of the records of all processes to 1 byte: the main
-#      process gives up at the first segment it would append, and the
-#      report reads every body. The report of -j 1, with H = 0 and M > 0.
+#      process gives up at the first segment it would keep, and the report
+#      reads every body. The report of -j 1, with H = 0 and M > 0.
 #  (m) (a) with -compare, whose comparison reads opaque bodies through the
 #      accessor that keeps, in the main process, each table the report
 #      read: nothing is recorded, so the counts are not written, and -j 3
 #      prints the report and the verdict of -j 1. The challenge is a copy
 #      of A.vo, and the config pins it and the prelude, as the norec case
 #      of misc/compare.sh does.
-#  (n) (d) under a limit on open files of 60 (ulimit -n 60), below the
-#      4 * 3 + 64 = 76 that -j 3 needs for the recorder to start
+#  (n) (d) under a limit on open files of 60 (ulimit -n 60), which, less
+#      the descriptors open as rocqchk starts, is below the 4 * 3 + 64 = 76
+#      that -j 3 needs for the recorder to start
 #      (ReportRecords.room_for_files): nothing is recorded, so the counts
 #      are not written, and -j 3 prints what -j 1 prints under the same
 #      limit, which is what (d) prints at -j 1.
+#  (o) (d) with TMPDIR naming a directory that does not exist, so that no
+#      file of the workers' output can be made: the walk does not start
+#      while the libraries are read, and the workers print to the standard
+#      output and error they inherit. The records need no TMPDIR: -j 3
+#      prints what (d) prints at -j 1, with H > 0 and M = 0, and the
+#      directory still does not exist.
+#  (p) (d) under a limit on open files of 120, which leaves room for the
+#      recorder at -j 3 beside the few descriptors rocqchk starts with: the
+#      records are used, H > 0 and M = 0. Then the same with 60 descriptors
+#      more open as rocqchk starts: 120 is above 76, but 120 less the
+#      descriptors open is not, so nothing is recorded, the counts are not
+#      written, and -j 3 prints what (d) prints at -j 1.
+#  (q) (d) with TMPDIR a directory in /dev/shm: the files of the workers'
+#      output would share their file system with the records, so nothing
+#      is recorded, the counts are not written, and -j 3 prints what (d)
+#      prints at -j 1, leaving that directory empty.
+#
+# A case where /dev/shm is missing, or not writable, needs another mount
+# of /dev/shm than the one of the machine, which this test cannot make.
 set -eu
 : "${BIN:=$(dirname "$(command -v rocq)")/}"
 export PATH="$BIN:$PATH"
@@ -86,8 +117,10 @@ unset COQ_TEST_SUITE_STATEMENT_REPORT_FAILURE COQ_TEST_SUITE_STATEMENT_REPORT_RE
 
 d=$(mktemp -d)
 t=$(mktemp -d)
-trap 'rm -rf "$d" "$t"' EXIT
-mkdir "$d/lib" "$d/prims" "$d/good" "$d/bad" "$d/spliced"
+# The TMPDIR made in /dev/shm for (q), once it is made.
+s=
+trap 'rm -rf "$d" "$t"; [ -z "$s" ] || rm -rf "$s"' EXIT
+mkdir "$d/lib" "$d/prims" "$d/big" "$d/good" "$d/bad" "$d/spliced"
 
 {
   cat <<'EOF'
@@ -189,6 +222,19 @@ Lemma a : TA. Proof. exact [| O | O |]. Qed.
 EOF
 rocq c -native-compiler no -allow-rewrite-rules -Q "$d/prims" SRPrim "$d/prims/Prims.v"
 
+# K.v, for (k): the body of each opaque proof names the 200 constants
+# filler_<i>, so that the first record of each worker, which gives each of
+# them with its name, takes more than 1024 bytes.
+sum=filler_1
+for i in $(seq 2 200); do sum="$sum + filler_$i"; done
+{
+  for i in $(seq 1 200); do echo "Definition filler_$i : nat := 0."; done
+  for j in $(seq 1 12); do
+    echo "Lemma big_$j : $sum = $sum. Proof. exact (eq_refl ($sum)). Qed."
+  done
+} > "$d/big/K.v"
+rocq c -native-compiler no -Q "$d/big" SRBig "$d/big/K.v"
+
 cat > "$d/a.req" <<'EOF'
 via SRPar.A.via -
 model_a SRPar.A.model_a -
@@ -218,6 +264,7 @@ float SRPrim.Prims.f -
 string SRPrim.Prims.s -
 array SRPrim.Prims.a -
 EOF
+for j in $(seq 1 12); do echo "big_$j SRBig.K.big_$j -"; done > "$d/k.req"
 
 fail() { >&2 echo "FAILURE: $*"; exit 1; }
 
@@ -228,11 +275,16 @@ unreadable=
 # bytes (ulimit -f), for (k); none if empty.
 fsize=
 
-# The limit on the files rocqchk holds open (ulimit -n), for (n); none if
-# empty.
+# The limit on the files rocqchk holds open (ulimit -n), for (n) and (p);
+# none if empty. Under it, rocqchk starts with $extra descriptors more open,
+# on /dev/null, for (p).
 nofile=
+extra=0
 
-# capture NAME J ARGS...: rocqchk -o -j J ARGS with TMPDIR set to $t. Its
+# The TMPDIR of the runs: $t, but in (o) and (q).
+tmp=$t
+
+# capture NAME J ARGS...: rocqchk -o -j J ARGS with TMPDIR set to $tmp. Its
 # standard output is in $d/NAME.out and its standard error in $d/NAME.err;
 # from that, the report's lines are in $d/NAME.report, the context summary
 # in $d/NAME.summary, and the "Checking library:" and "Admitting library:"
@@ -240,7 +292,9 @@ nofile=
 # wrote them, are in $d/NAME.counts. Exit code in $R. With $fsize, rocqchk
 # runs under that limit, and its standard output and error are pipes, to
 # readers started outside the limit, so that it meets the limit only in
-# the files it writes itself. With $nofile, rocqchk runs under that limit.
+# the files it writes itself. With $nofile, rocqchk runs under that limit,
+# with $extra descriptors more open. Each descriptor that bash opens with
+# {fd}< is inherited by the commands it runs.
 R=0
 capture() {
   local name=$1 j=$2 po pe
@@ -249,11 +303,12 @@ capture() {
   rm -f "$d/$name.counts"
   if [ -n "$nofile" ]; then
     ( ulimit -n "$nofile" || exit
-      TMPDIR="$t" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
+      for _ in $(seq 1 "$extra"); do exec {fd}</dev/null || exit; done
+      TMPDIR="$tmp" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
         COQ_TEST_SUITE_STATEMENT_REPORT_UNREADABLE="$unreadable" \
         rocqchk -o -j "$j" "$@" ) > "$d/$name.out" 2> "$d/$name.err" || R=$?
   elif [ -z "$fsize" ]; then
-    TMPDIR="$t" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
+    TMPDIR="$tmp" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
       COQ_TEST_SUITE_STATEMENT_REPORT_UNREADABLE="$unreadable" \
       rocqchk -o -j "$j" "$@" > "$d/$name.out" 2> "$d/$name.err" || R=$?
   else
@@ -264,7 +319,7 @@ capture() {
     cat "$d/$name.e" > "$d/$name.err" &
     pe=$!
     ( ulimit -f "$fsize" || exit
-      TMPDIR="$t" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
+      TMPDIR="$tmp" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
         COQ_TEST_SUITE_STATEMENT_REPORT_UNREADABLE="$unreadable" \
         rocqchk -o -j "$j" "$@" ) > "$d/$name.o" 2> "$d/$name.e" || R=$?
     wait "$po"
@@ -276,16 +331,38 @@ capture() {
   { grep -E '(Checking|Admitting) library: ' "$d/$name.err" || true; } | sort > "$d/$name.libs"
 }
 
-# empty WHAT: nothing is left in $t after WHAT.
+# shm_files: the files in /dev/shm named as rocqchk names its files there,
+# sorted; shm0: those there when this test started, which are not its own.
+shm_files() { find /dev/shm -maxdepth 1 -name 'rocqchk*' 2>/dev/null | sort; }
+shm0=$(shm_files)
+
+# shm_new: the files of shm_files that were not there when this test
+# started.
+shm_new() { comm -13 <(printf '%s\n' "$shm0") <(shm_files); }
+
+# empty WHAT: nothing is left in $tmp after WHAT, if it is a directory, nor
+# in /dev/shm a file of rocqchk's that was not there when this test
+# started. A file that a rocqchk of another test holds there, for the
+# instant between its creation and its removal, is not left: what is found
+# is looked for again a second later.
 empty() {
   local left
-  left=$(find "$t" -mindepth 1 -maxdepth 1)
-  [ -z "$left" ] || fail "$1 left in TMPDIR: $left"
+  if [ -d "$tmp" ]; then
+    left=$(find "$tmp" -mindepth 1 -maxdepth 1)
+    [ -z "$left" ] || fail "$1 left in TMPDIR: $left"
+  fi
+  left=$(shm_new)
+  if [ -n "$left" ]; then
+    sleep 1
+    left=$(shm_new)
+  fi
+  [ -z "$left" ] || fail "$1 left in /dev/shm: $left"
 }
 
-# run NAME J ARGS...: capture, then the run must leave nothing in $t. Runs
-# that share $t at the same time, as in (j), are captured, and $t is looked
-# at once all of them have ended.
+# run NAME J ARGS...: capture, then the run must leave nothing in $tmp, nor
+# in /dev/shm. Runs that share $tmp at the same time, as in (j), are
+# captured, and $tmp and /dev/shm are looked at once all of them have
+# ended.
 run() {
   capture "$@"
   empty "$1"
@@ -477,24 +554,29 @@ same c-j1 j-c 0 "(j) -j 3 of (c), beside -j 3 of (d)"
 counts j-c
 [ "$hits" -gt 0 ] || { cat "$d/j-c.err" >&2; fail "(j) -j 3 of (c), beside -j 3 of (d): no body taken from the records"; }
 
-# (k) The records of (d) take more than 1024 bytes: its forty or so opaque
-# proofs make as many frames, each with a marshal header of 20 bytes, and
-# each file numbers again the objects it names. So a worker's file, or the
-# spool, meets the limit: M > 0 shows it, where (d) at -j 3 reads no body.
-# Were SIGXFSZ not ignored for the writes of the records, it would kill the
-# process that wrote past the limit, a worker or the main process, and the
-# run would fail where -j 1 succeeds.
+# (k) Each record of K names its 200 constants by number, and the first
+# record of a file gives each of them with its name, of 8 to 10 characters
+# (Definition filler_<i>), so that the first record of each worker takes
+# more than 1024 bytes: every worker that checks a proof of K meets the
+# limit as it writes its first record, which M > 0 shows, where K at -j 3
+# without the limit reads no body. The main process keeps its records in
+# its memory, which no limit on the size of a file applies to. Were SIGXFSZ
+# not ignored for the writes of the records, it would kill the worker that
+# wrote past the limit, and the run would fail where -j 1 succeeds.
+kargs=(-Q "$d/big" SRBig -norec SRBig.K)
+report k "${kargs[@]}"
+[ "$reads" = 0 ] || { cat "$d/k-j3.err" >&2; fail "(k) -j 3: $reads bodies read, all were checked"; }
 fsize=1
-run k-j1 1 -statement-report "$d/d.req" "${dargs[@]}"
-same d-j1 k-j1 0 "(k) -j 1 under ulimit -f 1"
-run k-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
-same k-j1 k-j3 0 "(k) -j 3 under ulimit -f 1"
-counts k-j3
-[ "$reads" -gt 0 ] || { cat "$d/k-j3.err" >&2; fail "(k) -j 3 under ulimit -f 1: no body read, so the records did not meet the limit"; }
+run kf-j1 1 -statement-report "$d/k.req" "${kargs[@]}"
+same k-j1 kf-j1 0 "(k) -j 1 under ulimit -f 1"
+run kf-j3 3 -statement-report "$d/k.req" "${kargs[@]}"
+same kf-j1 kf-j3 0 "(k) -j 3 under ulimit -f 1"
+counts kf-j3
+[ "$reads" -gt 0 ] || { cat "$d/kf-j3.err" >&2; fail "(k) -j 3 under ulimit -f 1: no body read, so the records did not meet the limit"; }
 fsize=
 
 # (l) Only the main process reads the cap; every process records as usual,
-# and the main process gives up when it would append the first segment.
+# and the main process gives up when it would keep the first segment.
 COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP=1 run l-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
 same d-j1 l-j3 0 "(l) -j 3 with the records capped at 1 byte"
 counts l-j3
@@ -539,7 +621,7 @@ diff -u "$d/m-j1.json" "$d/m-j3.json" > "$d/m-j3.diff" \
 
 # (n) Without records, -j 3 holds in the main process, besides its own
 # few, three descriptors for each of its at most three workers, which 60
-# leaves room for; with them, one more for each, and the spool
+# leaves room for; with them, one more for each
 # (ReportRecords.room_for_files). The counts seam is set, so a run that
 # recorded would write the counts.
 nofile=60
@@ -550,5 +632,47 @@ same n-j1 n-j3 0 "(n) -j 3 under ulimit -n 60"
 [ ! -e "$d/n-j3.counts" ] \
   || { cat "$d/n-j3.counts" >&2; fail "(n) -j 3 under ulimit -n 60 recorded opaque bodies"; }
 nofile=
+
+# (o) No file can be made in a TMPDIR that does not exist
+# (CheckWorkers.open_capture), so the workers have no files of output
+# (CheckLibrary: the walk waits for the libraries to be read), and the
+# records, in /dev/shm, are used as in (d).
+tmp=$t/none
+run o-j1 1 -statement-report "$d/d.req" "${dargs[@]}"
+same d-j1 o-j1 0 "(o) -j 1 with a TMPDIR that does not exist"
+run o-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
+like_d o-j3 "(o) -j 3 with a TMPDIR that does not exist"
+[ ! -e "$tmp" ] || fail "(o) -j 3 made its TMPDIR"
+tmp=$t
+empty "(o)"
+
+# (p) -j 3 records where the limit on open files less the descriptors
+# open is at least 76 (ReportRecords.room_for_files). Under a limit of 120
+# that holds where rocqchk starts with at most 44 open, as with its
+# standard input, output and error and the few that the test's runner may
+# leave open; with 60 more, on /dev/null, it does not, though 120 is above
+# 76. Without records, 120 less those 60 still leaves room for all that
+# -j 3 opens, as 60 does in (n).
+nofile=120
+run p-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
+like_d p-j3 "(p) -j 3 under ulimit -n 120"
+extra=60
+run pe-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
+same d-j1 pe-j3 0 "(p) -j 3 under ulimit -n 120 with 60 descriptors open"
+[ ! -e "$d/pe-j3.counts" ] \
+  || { cat "$d/pe-j3.counts" >&2; fail "(p) -j 3 under ulimit -n 120 with 60 descriptors open recorded opaque bodies"; }
+extra=0
+nofile=
+
+# (q) The files of the workers' output go to $s, on the file system of
+# /dev/shm, which the records would then share with them
+# (ReportRecords.start).
+s=$(mktemp -d /dev/shm/srpar.XXXXXX)
+tmp=$s
+run q-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
+same d-j1 q-j3 0 "(q) -j 3 with its TMPDIR in /dev/shm"
+[ ! -e "$d/q-j3.counts" ] \
+  || { cat "$d/q-j3.counts" >&2; fail "(q) -j 3 with its TMPDIR in /dev/shm recorded opaque bodies"; }
+tmp=$t
 
 exit 0

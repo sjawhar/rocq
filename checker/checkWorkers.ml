@@ -639,10 +639,11 @@ let pr_batch b =
     str "the last " ++ Constant.print last ++ str ")"
   | _ -> pr_tasks b
 
-(* An unnamed file: created, opened, then removed, so that nothing is left
-   of it on disk once its last descriptor is closed. *)
-let open_capture () =
-  match Filename.temp_file "rocqchk" ".out" with
+(* An unnamed file: created in [temp_dir], by default the temporary
+   directory, opened, then removed, so that nothing is left of it on disk
+   once its last descriptor is closed. *)
+let open_capture ?temp_dir () =
+  match Filename.temp_file ?temp_dir "rocqchk" ".out" with
   | exception Sys_error _ -> None
   | name ->
     let fd =

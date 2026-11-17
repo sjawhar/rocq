@@ -23,7 +23,7 @@ val read_requests : string -> request list
     are skipped. A tab or carriage return on any line is an error.
     @raise CErrors.UserError on any other line. *)
 
-val print : ?recorded:(Opaqueproof.opaque -> Names.GlobRef.t list option) ->
+val print : ?recorded:(Names.Constant.t -> Opaqueproof.opaque -> Names.GlobRef.t list option) ->
   Environ.env -> (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ->
   request list -> unit
 (** Print the report, one line per message on the feedback channel:
@@ -78,13 +78,13 @@ END STATEMENT REPORT
     these lines against a permitted list by name; [rocqchk -compare] judges
     each axiom and flag by the object itself ([axioms_and_flags]).
 
-    Given [recorded], an opaque body [o] for which [recorded o] gives
-    objects is not read: its objects are those, which must be what
-    [opaque_body_refs] gives for the body of [o]. The lines are then the
-    ones the report prints without [recorded], with one difference: the
-    report does not read such a body, so a library file that changes or
-    vanishes on disk during the run makes no warning that the body could
-    not be read, and the body is not reported as an axiom. *)
+    Given [recorded], the opaque body [o] of a constant [kn] for which
+    [recorded kn o] gives objects is not read: its objects are those, which
+    must be what [opaque_body_refs] gives for the body of [o]. The lines
+    are then the ones the report prints without [recorded], with one
+    difference: the report does not read such a body, so a library file
+    that changes or vanishes on disk during the run makes no warning that
+    the body could not be read, and the body is not reported as an axiom. *)
 
 val opaque_body_refs : Environ.env -> Constr.t -> Names.GlobRef.t list
 (** [opaque_body_refs env c]: the objects that the report's walk adds for

@@ -828,9 +828,11 @@ let main () =
      bodies through the same accessor; a body taken from a record would
      leave its table unread, and the comparison could then read the library
      file again where, without records, it uses the table the report kept.
-     Nor is anything recorded under a low limit on open files, which
-     [ReportRecords.start] reads itself: the records would take descriptors
-     this run needs without them. *)
+     Nor is anything recorded under a limit on open files that leaves too
+     few free beside the descriptors open already, nor where /dev/shm cannot
+     hold the records apart from every file this run writes without them,
+     which [ReportRecords.start] finds out itself: the records would take
+     descriptors, or room, that this run needs without them. *)
   if Option.has_some !statement_report && CheckWorkers.parallel ()
      && Option.is_empty !compare_config then
     ReportRecords.start ();

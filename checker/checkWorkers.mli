@@ -124,11 +124,11 @@ val capture_available : unit -> bool
 (** Whether a worker can now be given the two files its output is kept
     in until it is printed. *)
 
-val open_capture : unit -> Unix.file_descr option
-(** An unnamed file, open for reading and writing: created in the
-    temporary directory, opened, then removed, so that nothing is left of
-    it on disk once its last descriptor is closed. [None] if it cannot be
-    made. *)
+val open_capture : ?temp_dir:string -> unit -> Unix.file_descr option
+(** An unnamed file, open for reading and writing: created in [temp_dir],
+    by default the temporary directory (TMPDIR), opened, then removed, so
+    that nothing is left of it on disk once its last descriptor is closed.
+    [None] if it cannot be made. *)
 
 val close_fd : Unix.file_descr -> unit
 (** Closes the descriptor, ignoring a Unix error. *)

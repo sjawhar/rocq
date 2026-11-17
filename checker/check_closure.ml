@@ -167,9 +167,10 @@ let forget cache =
 type state = {
   env : Environ.env;
   access : Opaqueproof.opaque -> Opaqueproof.opaque_proofterm;
-  recorded : Opaqueproof.opaque -> GlobRef.t list option;
-  (* the objects that the check of an opaque body recorded for it, if any:
-     for the report only, never for the closure of -compare *)
+  recorded : Constant.t -> Opaqueproof.opaque -> GlobRef.t list option;
+  (* the objects that the check of the opaque body of a constant recorded
+     for it, if any: for the report only, never for the closure of
+     -compare *)
   mutable fields : field_index ModPath.Map.t;
   (* the indexed fields of the implementation of each module looked up so far *)
   mutable public_nodes : node GlobRef.Map_env.t;
@@ -430,14 +431,15 @@ type opaque_body =
   | Read of Constr.t
   | Recorded of GlobRef.t list
 
-(* The body of the opaque [o], read, or the objects that the check of [o]
-   recorded for it. A recorded body is not read again: the process that
-   checked it read it, from the table the main process hashed. So a library
-   file that changes or vanishes on disk during the run makes no warning
-   for a recorded body, where the report that reads that body warns that it
-   could not be read (the lazy reader refuses it). *)
-let opaque_body st o =
-  match st.recorded o with
+(* The body of the opaque [o] of the constant [kn], read, or the objects
+   that the check of [o] recorded for it. A recorded body is not read
+   again: the process that checked it read it, from the table the main
+   process hashed. So a library file that changes or vanishes on disk
+   during the run makes no warning for a recorded body, where the report
+   that reads that body warns that it could not be read (the lazy reader
+   refuses it). *)
+let opaque_body st kn o =
+  match st.recorded kn o with
   | Some objs -> Recorded objs
   | None -> let c, _ = st.access o in Read c
 
@@ -465,7 +467,7 @@ let constant_node st view kn =
     let body, recorded, axiom = match cb.const_body with
       | Def c -> [declaration_view, c], [], false
       | OpaqueDef o ->
-        (match (test_unreadable_opaque kn; opaque_body st o) with
+        (match (test_unreadable_opaque kn; opaque_body st kn o) with
          | Read c -> [declaration_view, c], [], false
          | Recorded objs -> [], objs, false
          | exception e when CErrors.noncritical e ->
@@ -726,7 +728,7 @@ let test_fault () =
   | None | Some _ -> ()
 
 (* Each opaque body is read: none has a record. *)
-let no_record _ = None
+let no_record _ _ = None
 
 (* A state with nothing reached yet, and a walk cache of its own. *)
 let new_state ?(recorded = no_record) env access = {

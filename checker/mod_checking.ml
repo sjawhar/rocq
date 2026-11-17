@@ -99,10 +99,11 @@ let set_indirect_accessor f = indirect_accessor := f
 (* The statement report's recorder of checked opaque bodies ([ReportRecords];
    see [set_opaque_check_hook]). Its first stage runs where the check of an
    opaque is deferred, in the main process, so that the main process can
-   find that opaque again. *)
-let no_opaque_check_hook _ _ _ = ()
+   find that constant and that opaque again. *)
+let no_opaque_check_hook _ _ _ _ = ()
 
-let opaque_check_hook : (Opaqueproof.opaque -> (env -> Constr.t -> unit)) ref =
+let opaque_check_hook :
+  (Constant.t -> Opaqueproof.opaque -> (env -> Constr.t -> unit)) ref =
   ref no_opaque_check_hook
 
 let set_opaque_check_hook f = opaque_check_hook := f
@@ -294,7 +295,7 @@ let check_constant_declaration env st kn cb =
        closure at once, so the order of effects is as before. The report's
        recorder is told of the check here, and of its success by the check
        itself ([opaque_check_hook]); by default neither does anything. *)
-    let checked = !opaque_check_hook o in
+    let checked = !opaque_check_hook kn o in
     CheckWorkers.defer kn (fun () ->
         let c, env = cook o in
         check env c ();
