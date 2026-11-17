@@ -108,9 +108,96 @@ let index_fields fields =
 let find_module fields label = Id.Map.find_opt label fields.modules
 let find_constant fields label = Id.Map.find_opt label fields.constants
 let find_mind fields label = Id.Map.find_opt label fields.minds
+
+(** {6 Records of checked opaque bodies}
+
+    With workers, the process that checks an opaque body records the
+    objects that the walk below adds for that body ([opaque_body_refs]), and
+    the report takes them instead of reading the body from its library's
+    table and walking it again ([ReportRecords] writes and reads the
+    records). A record is keyed by the opaque value itself, the one whose
+    check the main process deferred and still holds, and the report uses it
+    only for that very value. The body of an opaque value, the one
+    [st.access] reads, is a function of the value and of its library's
+    table ([CheckLibrary.indirect_accessor]: the stored proof, cooked by the
+    value's cooking information, then substituted by its substitutions), and
+    the table is the library's file as the main process hashed it, which
+    every process that reads it checks. So a record names the objects of
+    the body the report would read.
+
+    A key made of the constant's name and the stored proof's library and
+    index would not be enough. The cooking information is part of the body:
+    it abstracts the section variables the proof uses, and their types and
+    the bodies of the [Let]s among them become binders of the body
+    (kernel/cooking.ml, [abstract_as_body]), with the objects they name. In
+    a file coqc wrote, a stored proof has one cooking information, which it
+    gets as its sections close, before any module can hold it (a module is
+    never inside a section), and a module that copies a declaration
+    substitutes it. But a forged library can give the declaration of a
+    constant in a signature and the one in its implementation the same
+    stored proof with two cooking informations, both well-typed, so that
+    the two bodies name different objects; had the check of one of them
+    recorded nothing, the record of the other would stand for it. *)
+
+(* Keyed by physical identity, as said above. The hash is the stored
+   proof's, which every value of one proof shares. *)
+module OpaqueTbl = Hashtbl.Make (struct
+    type t = Opaqueproof.opaque
+    let equal = (==)
+    let hash o =
+      let (_, _, dp, i) = Opaqueproof.repr o in
+      Hashset.Combine.combine (DirPath.hash dp) (Opaqueproof.repr_handle i)
+  end)
+
+(* Two objects equal here have both their names equal: they are the same
+   object, and one can stand for the other anywhere. *)
+module RefTbl = Hashtbl.Make (struct
+    type t = GlobRef.t
+    let equal a b = GlobRef.UserOrd.equal a b && GlobRef.CanOrd.equal a b
+    let hash = GlobRef.UserOrd.hash
+  end)
+
+type opaque_records = {
+  bodies : GlobRef.t list option OpaqueTbl.t;
+  (* the recorded objects of each opaque value, or [None] when two records
+     of it disagree *)
+  shared : GlobRef.t RefTbl.t;
+  (* one copy of each object the records name *)
+  mutable hits : int;
+  mutable reads : int;
+  (* the opaque constants the report reached whose objects it took from a
+     record, and those whose body it read or tried to read, for the debug
+     output of [ReportRecords] *)
+}
+
+let opaque_records () = {
+  bodies = OpaqueTbl.create 4096; shared = RefTbl.create 4096; hits = 0; reads = 0;
+}
+
+(* A value can be checked twice: a declaration that a module's signature
+   and its implementation share is checked with each. Its records then name
+   the same objects. Records of one value that do not are not used, and the
+   report reads that body. Each object is kept once, so that the records of
+   a large tree take one copy of each name they share. *)
+let add_opaque_record r o objs =
+  let share obj = match RefTbl.find_opt r.shared obj with
+    | Some obj -> obj
+    | None -> RefTbl.add r.shared obj obj; obj
+  in
+  let objs = List.map share objs in
+  match OpaqueTbl.find_opt r.bodies o with
+  | None -> OpaqueTbl.add r.bodies o (Some objs)
+  | Some (Some objs') when List.equal (==) objs objs' -> ()
+  | Some _ -> OpaqueTbl.replace r.bodies o None
+
+let opaque_record_counts r = r.hits, r.reads
+
 type state = {
   env : Environ.env;
   access : Opaqueproof.opaque -> Opaqueproof.opaque_proofterm;
+  records : opaque_records option;
+  (* the records of checked opaque bodies, for the report only: never for
+     the closure of -compare *)
   mutable fields : field_index ModPath.Map.t;
   (* the indexed fields of the implementation of each module looked up so far *)
   mutable public_nodes : node GlobRef.Map_env.t;
@@ -319,6 +406,41 @@ let rec walk st gen refs = function
         in
         walk st gen refs (fold (fun todo c -> (view, c) :: todo) todo c)
 
+(* The objects [walk] adds for the term [c] alone, in one view: the walk
+   itself, so that the two cannot drift apart. A walk that starts from a
+   declaration's type and its body [c], both in the declaration's view, adds
+   the objects of the type and exactly these: [seen] only skips a node
+   already walked in the same generation, whose objects are added already,
+   so the objects of the two terms are the union of the objects of each.
+
+   The primitive types of literals and arrays are those that [env]
+   registers, where the report's walk takes the final environment's. They
+   are the same constants, by their user names: the check of [c] in [env]
+   typed each literal and array of [c], which needs its primitive type
+   registered there ([Typeops.type_of_int] and the like), and a registration
+   once made is never changed ([Primred.add_retroknowledge] keeps the first,
+   and refuses one of another name). The report looks objects up, and
+   prints them, by their user names only ([GlobRef.Map_env],
+   [Environ.lookup_constant], [Constant.to_string]).
+
+   The cache of these walks is the process's own, made at its first call;
+   each call takes a new generation of it before it walks, so that no call
+   sees the entries of another. *)
+let body_walk_cache =
+  lazy (Array.make cache_size Constr.mkProp, Array.make cache_size (-1), ref 0)
+
+let opaque_body_refs env c =
+  let keys, gens, gen = Lazy.force body_walk_cache in
+  incr gen;
+  let st = {
+    env; access = (fun _ -> CErrors.anomaly (Pp.str "opaque_body_refs reads no opaque body."));
+    records = None; fields = ModPath.Map.empty;
+    public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
+    gen = !gen; keys; gens;
+  } in
+  let public, _ = walk st !gen empty_refs [Public, c] in
+  GlobRef.Set_env.elements public
+
 let push_context view ctx todo =
   List.fold_left (fun todo d ->
       Context.Rel.Declaration.fold_constr (fun c todo -> (view, c) :: todo) d todo)
@@ -353,6 +475,25 @@ let test_unreadable_opaque kn =
     CErrors.user_err Pp.(str "test unreadable opaque body")
   | None | Some _ -> ()
 
+type opaque_body =
+  | Read of Constr.t
+  | Recorded of GlobRef.t list
+
+(* The body of the opaque [o], read, or the objects that the check of [o]
+   recorded for it. A recorded body is not read again: the process that
+   checked it read it, from the table the main process hashed. So a record
+   also saves a read that could fail here after it succeeded there, such as
+   that of a library file changed on disk since, which the lazy reader
+   refuses, and for which the report without records warns. *)
+let opaque_body st o =
+  let read () = let c, _ = st.access o in Read c in
+  match st.records with
+  | None -> read ()
+  | Some r ->
+    match OpaqueTbl.find_opt r.bodies o with
+    | Some (Some objs) -> r.hits <- r.hits + 1; Recorded objs
+    | Some None | None -> r.reads <- r.reads + 1; read ()
+
 let constant_node st view kn =
   match lookup_constant st view kn with
   | None -> unresolved
@@ -367,20 +508,28 @@ let constant_node st view kn =
        The exit status is deliberately unchanged: a stored-nowhere body is an
        ordinary answer, and failing the whole check on it would turn every
        delayed proof into a failed grade. A reader who needs certainty reads the
-       warning, which names the constant. *)
-    let body, axiom = match cb.const_body with
-      | Def c -> [declaration_view, c], false
+       warning, which names the constant.
+
+       The test seam comes before the records, so that it still makes the
+       body unreadable. Then a body that a check recorded is not read: the
+       walk of the type alone, with the recorded objects added in the
+       declaration's view, makes the same references as the walk of the type
+       and the body ([opaque_body_refs]). *)
+    let body, recorded, axiom = match cb.const_body with
+      | Def c -> [declaration_view, c], [], false
       | OpaqueDef o ->
-        (match (test_unreadable_opaque kn; st.access o) with
-         | c, _ -> [declaration_view, c], false
+        (match (test_unreadable_opaque kn; opaque_body st o) with
+         | Read c -> [declaration_view, c], [], false
+         | Recorded objs -> [], objs, false
          | exception e when CErrors.noncritical e ->
            Feedback.msg_warning
              Pp.(str "Statement report: the opaque body of " ++ str (Constant.to_string kn)
                  ++ str " could not be read, so it is reported as an axiom: " ++ CErrors.print e);
-           [], true)
-      | Undef _ | Primitive _ | Symbol _ -> [], true
+           [], [], true)
+      | Undef _ | Primitive _ | Symbol _ -> [], [], true
     in
     let refs = walk st (fresh_gen st) empty_refs ((declaration_view, cb.const_type) :: body) in
+    let refs = List.fold_left (fun refs obj -> add_ref declaration_view obj refs) refs recorded in
     { refs = refs_to_list refs; axiom;
       flags = typing_flags (GlobRef.ConstRef kn) cb.const_typing_flags [] }
 
@@ -628,13 +777,13 @@ let test_fault () =
   | Some "1" -> CErrors.user_err Pp.(str "test statement-report failure")
   | None | Some _ -> ()
 
-let print env access requests =
+let print ?records env access requests =
   let index =
     Environ.fold_constants (fun c _ acc -> CString.Map.add (Constant.to_string c) c acc)
       env CString.Map.empty
   in
   let st = {
-    env; access; fields = ModPath.Map.empty;
+    env; access; records; fields = ModPath.Map.empty;
     public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty; gen = 0;
     keys = Array.make cache_size Constr.mkProp; gens = Array.make cache_size (-1);
   } in
@@ -666,12 +815,13 @@ let print env access requests =
 
 (* The comparator needs the axioms and flags of a constant, not the report's
    text, and it asks for several constants in one run, so the walk's caches
-   are built once and kept. *)
+   are built once and kept. It reads every opaque body it reaches: the
+   records are the report's alone. *)
 
 type closure_state = state
 
 let closure_state env access = {
-  env; access; fields = ModPath.Map.empty;
+  env; access; records = None; fields = ModPath.Map.empty;
   public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty; gen = 0;
   keys = Array.make cache_size Constr.mkProp; gens = Array.make cache_size (-1);
 }

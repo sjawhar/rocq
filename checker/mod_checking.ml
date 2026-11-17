@@ -96,6 +96,24 @@ let indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ref
 
 let set_indirect_accessor f = indirect_accessor := f
 
+(* The statement report's recorder of checked opaque bodies (see
+   [ReportRecords]), in two stages. [!opaque_check_hook kn o] is called
+   when the check of the opaque body [o] of [kn] is deferred, in the
+   process that defers it, which is the main process: that is where the
+   recorder can name [o] so that the main process finds it again. The
+   function it returns is called by the deferred check, in whichever
+   process runs it, right after the check of the cooked body [c] returned
+   normally, with the environment [c] was checked in and [c]. Nothing
+   calls it for a check that raised. Neither stage may raise anything but
+   an interrupt, and neither reads or changes anything that is checked.
+   The default does nothing, so that without the recorder (at -j 1, or
+   without -statement-report) the check is the one it always was. *)
+let opaque_check_hook :
+  (Constant.t -> Opaqueproof.opaque -> (env -> Constr.t -> unit)) ref =
+  ref (fun _ _ _ _ -> ())
+
+let set_opaque_check_hook f = opaque_check_hook := f
+
 let register_opacified_constant env opac kn cb =
   let rec gather_consts s c =
     match Constr.kind c with
@@ -278,8 +296,14 @@ let check_constant_declaration env st kn cb =
        waits. The process that runs the check reads the table it needs
        ([CheckLibrary.indirect_accessor]), and a check handed back cooks
        again in the process that runs it. With -j 1, [defer] runs the
-       closure at once, so the order of effects is as before. *)
-    CheckWorkers.defer kn (fun () -> let c, env = cook o in check env c ())
+       closure at once, so the order of effects is as before. The report's
+       recorder is told of the check here, and of its success by the check
+       itself ([opaque_check_hook]); by default neither does anything. *)
+    let checked = !opaque_check_hook kn o in
+    CheckWorkers.defer kn (fun () ->
+        let c, env = cook o in
+        check env c ();
+        checked env c)
   in
   retro, st
 

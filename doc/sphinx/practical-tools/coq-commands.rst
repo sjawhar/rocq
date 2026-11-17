@@ -867,6 +867,13 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   would print that is not made of identifiers, for instance the name of a
   constant that a term of an admitted library names but no library declares.
 
+  With ``-j``, the report takes the references of each opaque proof that a
+  worker checked from that worker, which records them as it checks the
+  proof, instead of reading the proof again; the report is the same. While
+  ``rocqchk`` runs, these records are kept in files in a directory that it
+  makes in the temporary directory (``TMPDIR``, by default ``/tmp``) and
+  removes once it has read them, and when it exits.
+
 Environment variable ``$ROCQLIB`` can be set to override the location of
 the standard library.
 
