@@ -292,6 +292,7 @@ let print_chunk = function
   | Err s -> output_string stderr s; flush stderr
 
 let release_held () =
+  MainProfile.span MainProfile.Output @@ fun () ->
   hold_off ();
   match !held with
   | None -> ()
@@ -591,6 +592,7 @@ let run_worker parent report output (tasks : task array) =
   (* Not [exit]: the at_exit functions of the main process must not run
      here. So the worker prints its own VM counters, if they are on. *)
   (try Vmbinnum.print_stats () with _ -> ());
+  MainProfile.worker_exit ~size ~completed:!completed ~code;
   Unix._exit code
 
 let check_here t =
@@ -711,8 +713,9 @@ let spawn ?(releasable = true) ?prepared tasks =
     let mine = report :: report_out ::
                (match output with Some (out, err) -> [out; err] | None -> []) in
     prepared_fds := List.filter (fun fd -> not (List.mem fd mine)) !prepared_fds;
-    match Unix.fork () with
+    match MainProfile.fork Unix.fork with
     | 0 ->
+      MainProfile.in_child ();
       Unix.close report;
       List.iter (fun w ->
           close_fd w.report;
@@ -763,7 +766,8 @@ let abort () =
       try Unix.kill w.pid Sys.sigkill with Unix.Unix_error _ -> ())
     workers;
   List.iter (fun w ->
-      (try ignore (waitpid_non_intr [] w.pid) with Unix.Unix_error _ -> ());
+      (try ignore (MainProfile.span MainProfile.Wait (fun () -> waitpid_non_intr [] w.pid))
+       with Unix.Unix_error _ -> ());
       close_report w.report;
       close_output w)
     workers
@@ -790,6 +794,7 @@ let read_output w =
   | Some (out, err) -> (read_fd out, read_fd err)
 
 let print_output (out, err) =
+  MainProfile.span MainProfile.Output @@ fun () ->
   if out <> "" || err <> "" then begin
     flush_output ();
     match !held with
@@ -979,7 +984,7 @@ let request_release slots =
    the main process has a handler for the request signal, which OCaml 4.14
    installs without SA_RESTART, so a signal from outside interrupts
    [select]. *)
-let rec wait_for_messages timeout =
+let rec wait_loop timeout =
   let fds = List.map (fun w -> w.report) !running in
   if not (CList.is_empty fds) then
     match Unix.select fds [] [] timeout with
@@ -989,12 +994,15 @@ let rec wait_for_messages timeout =
           | None -> ()
           | Some w -> if read_some w then take_releases w)
         ready
-    | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait_for_messages timeout
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait_loop timeout
     | exception Unix.Unix_error _ ->
       (* Not expected (an fd above FD_SETSIZE, or EBADF). The caller reaps
          and parses as usual, so the result is still right; this only keeps
          [finish] from spinning until the workers exit. *)
       (try Unix.sleepf timeout with Unix.Unix_error _ -> ())
+
+let wait_for_messages timeout =
+  MainProfile.span MainProfile.Wait (fun () -> wait_loop timeout)
 
 (* The runs of [l], in order: its maximal sequences of jobs that one
    library's walk deferred. A library's jobs make one run, unless jobs
@@ -1047,6 +1055,7 @@ let pieces ?open_group size r =
    first, down to a single job. What is not dealt stays in the queue, in
    order. *)
 let deal ?(walk = false) k size =
+  MainProfile.span MainProfile.Deal @@ fun () ->
   let all = List.rev (Queue.fold (fun acc t -> t :: acc) [] queue) in
   let open_group = if walk then Some !current_group else None in
   let ps = Array.of_list (List.concat_map (pieces ?open_group size) (runs all)) in

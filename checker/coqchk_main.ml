@@ -708,6 +708,7 @@ let run senv =
    The text is the one [explain_exn] returns: it prints the terms of a
    [CantApplyBadType] type error itself, but nothing in the report raises one. *)
 let print_statement_report env requests =
+  MainProfile.span MainProfile.Statement_report @@ fun () ->
   try Check_closure.print env CheckLibrary.indirect_accessor requests
   with e when (match e with Sys.Break | Out_of_memory -> false | _ -> true) ->
     Feedback.msg_warning
@@ -826,5 +827,6 @@ let main () =
   run_compare env;
   (* A summary the walk of mod_impl.ml could not complete is refused with a
      user error, reported as a check's error is. *)
-  (try Check_stat.stats env opac with e -> fatal_exn e);
+  (try MainProfile.span MainProfile.Summary (fun () -> Check_stat.stats env opac)
+   with e -> fatal_exn e);
   exit 0

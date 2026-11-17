@@ -55,6 +55,7 @@ let drop_inline_bodies clib =
   if mb' == mb then clib else Safe_typing.replace_module_of_library clib mb'
 
 let env_of_library senv clib =
+  MainProfile.span MainProfile.Universes @@ fun () ->
   let env = Safe_typing.env_of_safe_env senv in
   let qualities, univs = Safe_typing.univs_of_library clib in
   let check_quality q =
@@ -70,6 +71,7 @@ let env_of_library senv clib =
    about to check, and hands the resulting table to [Safe_typing.import] in place
    of the one stored in the file. *)
 let compile_vm_library env clib =
+  MainProfile.span MainProfile.Vm_compile @@ fun () ->
   let dp = Safe_typing.dirpath_of_library clib in
   let mb = Safe_typing.module_of_library clib in
   let vmtab = Vmlibrary.set_path dp (Environ.vm_library env) in
@@ -112,9 +114,13 @@ let import senv opac clib digest =
      Move a global relocation into the non-substituted table and the VM would
      keep the pre-merge name while the kernel checks the merged one. *)
   let mb = Indmerge.apply_earlier_merges (Names.ModPath.MPfile dp) mb in
-  let opac = Mod_checking.check_module env opac retro (Names.ModPath.MPfile dp) mb in
-  let vmtab = Vmlibrary.inject (Vmlibrary.export vmtab) in
-  let (_,senv) = Safe_typing.import clib vmtab digest senv in senv, opac
+  let opac = MainProfile.span MainProfile.Check (fun () ->
+      Mod_checking.check_module env opac retro (Names.ModPath.MPfile dp) mb) in
+  let vmtab = MainProfile.span MainProfile.Vm_compile (fun () ->
+      Vmlibrary.inject (Vmlibrary.export vmtab)) in
+  let (_,senv) = MainProfile.span MainProfile.Universes (fun () ->
+      Safe_typing.import clib vmtab digest senv) in
+  senv, opac
 
 let import senv opac clib digest : _ * _ =
   NewProfile.profile "import"
@@ -140,5 +146,8 @@ let unsafe_import senv clib digest =
      recompiled all the same, so that the trusted surface is exactly the same. *)
   let env = env_of_library senv clib in
   let vmtab, clib = compile_vm_library env clib in
-  let vmtab = Vmlibrary.inject (Vmlibrary.export vmtab) in
-  let (_,senv) = Safe_typing.import clib vmtab digest senv in senv
+  let vmtab = MainProfile.span MainProfile.Vm_compile (fun () ->
+      Vmlibrary.inject (Vmlibrary.export vmtab)) in
+  let (_,senv) = MainProfile.span MainProfile.Universes (fun () ->
+      Safe_typing.import clib vmtab digest senv) in
+  senv

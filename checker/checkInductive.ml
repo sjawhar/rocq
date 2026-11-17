@@ -259,6 +259,7 @@ let check_inductive env mind mb retro =
   add_mind mind mb env
 
 let check_inductive env mind mb retro : Environ.env =
+  MainProfile.span MainProfile.Check @@ fun () ->
   NewProfile.profile "check_inductive"
     ~args:(fun () -> [("name", `String (MutInd.to_string mind))])
     (fun () -> check_inductive env mind mb retro)

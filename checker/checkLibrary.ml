@@ -223,6 +223,7 @@ let opaque_test_at point dp = test_at "ROCQCHK_OPAQUE_AT" point dp
    test-suite/misc/rocqchk_lazyopaque.sh). A string of the table's size
    also costs that much memory, which stock never needs (D5, test (v)). *)
 let read_opaque_table dp src =
+  MainProfile.span MainProfile.Load @@ fun () ->
   let f = src.src_file in
   let () = opaque_test_at "before" dp in
   let ch = try open_in_bin f with Sys_error _ -> error_changed f in
@@ -528,6 +529,7 @@ type intern_mode = Rec | Root | Dep (* Rec = standard, Root = -norec, Dep = depe
 let depgraph = ref LibraryMap.empty
 
 let marshal_in_segment (type a) ~validate ~value ~(segment : a ObjFile.segment) f ch : a =
+  MainProfile.span MainProfile.Load @@ fun () ->
   marshal_in_at ~validate ~value
     ~pos:segment.ObjFile.pos ~hash:segment.ObjFile.hash f ch
 
@@ -550,6 +552,7 @@ let marshal_in_segment (type a) ~validate ~value ~(segment : a ObjFile.segment) 
    here, with stock's own [marshal_in_segment]: the run then rejects what
    stock rejects, where stock rejects it, down to the message. *)
 let intern_opaques ~validate ~(segment : seg_proofs ObjFile.segment) f ch =
+  MainProfile.span MainProfile.Load @@ fun () ->
   NewProfile.profile "intern_opaques" (fun () ->
   let pos = segment.ObjFile.pos and len = segment.ObjFile.len in
   let size = LargeFile.in_channel_length ch in
@@ -703,6 +706,7 @@ let intern_from_file ~intern_mode ~validated (dir, f) =
   mk_library sd md f digest
 
 let intern_from_file ~intern_mode ~validated dirf : library_t =
+  MainProfile.span MainProfile.Load @@ fun () ->
   NewProfile.profile "intern_from_file"
     ~args:(fun () -> [("name", `String (DirPath.to_string (fst dirf)))])
     (fun () -> intern_from_file ~intern_mode ~validated dirf)
@@ -873,12 +877,14 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
     Fun.protect ~finally:(fun () -> intern_context := None) @@ fun () ->
     try
       let acc =
-        List.fold_right (intern_library ~intern_mode:Rec ~validated ~on_done LibrarySet.empty)
-          ml ([], LibrarySet.empty)
+        MainProfile.span MainProfile.Intern (fun () ->
+            List.fold_right (intern_library ~intern_mode:Rec ~validated ~on_done LibrarySet.empty)
+              ml ([], LibrarySet.empty))
       in
       let acc =
-        List.fold_right (intern_library ~intern_mode:Root ~validated ~on_done LibrarySet.empty)
-          nrl acc
+        MainProfile.span MainProfile.Intern (fun () ->
+            List.fold_right (intern_library ~intern_mode:Root ~validated ~on_done LibrarySet.empty)
+              nrl acc)
       in
       (* Intern the admit list too, in Dep mode so it is loaded but not validated
          ([validated] already excludes [al]). Without this an admitted library that
@@ -890,8 +896,9 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
          referenced by constant name, not Require'd by the checked statement library.
          A run with -admit never streams, so no library is checked early here. *)
       let needed, _ =
-        List.fold_right (intern_library ~intern_mode:Dep ~validated ~on_done LibrarySet.empty)
-          al acc
+        MainProfile.span MainProfile.Intern (fun () ->
+            List.fold_right (intern_library ~intern_mode:Dep ~validated ~on_done LibrarySet.empty)
+              al acc)
       in
       let needed = List.rev needed in
       (* first compute the closure of norec, remove closure of check,

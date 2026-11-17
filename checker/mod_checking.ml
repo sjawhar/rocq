@@ -246,6 +246,7 @@ let check_constant_declaration env st kn cb =
      where it runs, so that a test can tell the main process from a
      worker. *)
   let cook o =
+    MainProfile.span MainProfile.Cook @@ fun () ->
     CheckWorkers.note_cook ();
     let c, u = !indirect_accessor o in
     let env = match u, cb.const_universes with
@@ -842,6 +843,7 @@ let get_retroknowlege env retro =
 let collect_module_opaques env opac mp mb =
   if not (Check_stat.summary_enabled ()) then opac
   else begin
+    MainProfile.span MainProfile.Cook @@ fun () ->
     record_sealed_axioms ~hidden:false mp mb;
     collect_module_opaques env opac mp mb Cset.empty
   end
