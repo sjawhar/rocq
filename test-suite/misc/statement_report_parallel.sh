@@ -40,6 +40,20 @@
 #      proof that a worker checks: the seam comes before the records, so
 #      -j 3 warns that the body could not be read and reports it as an
 #      axiom, as -j 1 does.
+#  (h) (d) with -worker-budget 0: every worker stops once it has completed
+#      its first check, and the other checks of its batch are queued again,
+#      so most bodies are checked, and recorded, by workers that stopped
+#      early, each in a file of its own. The report of -j 1, and M = 0.
+#  (i) (d) with ROCQCHK_WORKER_RELEASE_AT=check:1 (see misc/rocqchk_release.sh):
+#      a worker asks itself to release as it starts the second check of its
+#      batch, so a worker with more than two checks completes two and gives
+#      the others back while it runs. The report of -j 1, and M = 0.
+#  (j) (d) and (c) at -j 3, started together, with the same TMPDIR: each
+#      prints the report of its run at -j 1, (d) with M = 0, and TMPDIR is
+#      empty once both have ended. The two runs number their checks
+#      differently, so a record that crossed from one run to the other
+#      would name the objects of another body than the check of that number
+#      there: (d) would read bodies, or print another report.
 set -eu
 : "${BIN:=$(dirname "$(command -v rocq)")/}"
 export PATH="$BIN:$PATH"
@@ -186,16 +200,15 @@ fail() { >&2 echo "FAILURE: $*"; exit 1; }
 # The opaque proof whose body the test seam makes unreadable, for (g).
 unreadable=
 
-# run NAME J ARGS...: rocqchk -o -j J ARGS with TMPDIR set to $t. Its
+# capture NAME J ARGS...: rocqchk -o -j J ARGS with TMPDIR set to $t. Its
 # standard output is in $d/NAME.out and its standard error in $d/NAME.err;
 # from that, the report's lines are in $d/NAME.report, the context summary
 # in $d/NAME.summary, and the "Checking library:" and "Admitting library:"
 # lines, sorted, in $d/NAME.libs. The counts of the records, if the run
-# wrote them, are in $d/NAME.counts. Exit code in $R. The run must leave
-# nothing in $t.
+# wrote them, are in $d/NAME.counts. Exit code in $R.
 R=0
-run() {
-  local name=$1 j=$2 left
+capture() {
+  local name=$1 j=$2
   shift 2
   R=0
   rm -f "$d/$name.counts"
@@ -205,8 +218,21 @@ run() {
   sed -n '/^STATEMENT REPORT$/,/^END STATEMENT REPORT$/p' "$d/$name.err" > "$d/$name.report"
   sed -n '/CONTEXT SUMMARY/,$p' "$d/$name.err" > "$d/$name.summary"
   { grep -E '(Checking|Admitting) library: ' "$d/$name.err" || true; } | sort > "$d/$name.libs"
+}
+
+# empty WHAT: nothing is left in $t after WHAT.
+empty() {
+  local left
   left=$(find "$t" -mindepth 1 -maxdepth 1)
-  [ -z "$left" ] || fail "$name left in TMPDIR: $left"
+  [ -z "$left" ] || fail "$1 left in TMPDIR: $left"
+}
+
+# run NAME J ARGS...: capture, then the run must leave nothing in $t. Runs
+# that share $t at the same time, as in (j), are captured, and $t is looked
+# at once all of them have ended.
+run() {
+  capture "$@"
+  empty "$1"
 }
 
 # counts NAME: $hits and $reads, from the counts the run NAME wrote.
@@ -280,7 +306,8 @@ has c-j1 'axiom plain_c SRPar.A.ax'
 [ "$reads" -gt 0 ] || { cat "$d/c-j3.err" >&2; fail "(c) -j 3: no body of A read"; }
 
 # (d)
-report d -Q "$d/lib" SRPar -norec SRPar.A -norec SRPar.B -norec SRPar.C -norec SRPar.D
+dargs=(-Q "$d/lib" SRPar -norec SRPar.A -norec SRPar.B -norec SRPar.C -norec SRPar.D)
+report d "${dargs[@]}"
 has d-j1 'axiom model_d SRPar.A.ax'
 has d-j1 'axiom model_d SRPar.B.bax'
 [ "$reads" = 0 ] || { cat "$d/d-j3.err" >&2; fail "(d) -j 3: $reads bodies read, all were checked"; }
@@ -342,5 +369,53 @@ w1=$(warned g-j1)
 [ -n "$w1" ] || { cat "$d/g-j1.err" >&2; fail "(g) -j 1: no warning"; }
 [ "$(warned g-j3)" = "$w1" ] || { cat "$d/g-j3.err" >&2; fail "(g) -j 3: not the warning of -j 1"; }
 unreadable=
+
+# like_d NAME WHAT: the run NAME of the fixture (d) at -j 3, whose exit code
+# is $R, printed what (d) at -j 1 printed, and took every opaque body the
+# report reached from the records, as (d) at -j 3 does: M = 0. Every check
+# is recorded by the process that ran it, whatever the schedule, so a
+# worker that stopped early or gave checks back must have its records used
+# too.
+like_d() {
+  same d-j1 "$1" 0 "$2"
+  counts "$1"
+  [ "$hits" -gt 0 ] || { cat "$d/$1.err" >&2; fail "$2: no body taken from the records"; }
+  [ "$reads" = 0 ] || { cat "$d/$1.err" >&2; fail "$2: $reads bodies read, all were checked"; }
+}
+
+# (h) -worker-budget takes any number of seconds from 0 up (coqchk_main.ml,
+# set_worker_budget). At 0, a worker's budget has passed as soon as it has
+# completed its first check, which it always completes, so it stops there
+# and the main process queues the rest of its batch again
+# (CheckWorkers.run_worker). The checks of (d) are many enough that the
+# first batches dealt hold several each.
+run h-j3 3 -worker-budget 0 -statement-report "$d/d.req" "${dargs[@]}"
+like_d h-j3 "(h) -j 3 -worker-budget 0"
+
+# (i) At "check:1" the request comes after the second check of the batch is
+# started, so the worker completes that check and releases the ones after
+# it (CheckWorkers.release_test_at); the main process queues them again
+# when it reads the release message. A batch of one or two checks has
+# nothing to give back, but the first batches dealt hold more.
+ROCQCHK_WORKER_RELEASE_AT=check:1 run i-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
+like_d i-j3 "(i) -j 3 ROCQCHK_WORKER_RELEASE_AT=check:1"
+
+# (j) Each run's exit code is the one of its subshell; both are waited for
+# before anything is looked at.
+( capture j-d 3 -statement-report "$d/d.req" "${dargs[@]}"; exit "$R" ) &
+pd=$!
+( capture j-c 3 -statement-report "$d/c.req" -Q "$d/lib" SRPar -norec SRPar.C; exit "$R" ) &
+pc=$!
+rd=0
+rc=0
+wait "$pd" || rd=$?
+wait "$pc" || rc=$?
+empty "(j) j-d and j-c"
+R=$rd
+like_d j-d "(j) -j 3 of (d), beside -j 3 of (c)"
+R=$rc
+same c-j1 j-c 0 "(j) -j 3 of (c), beside -j 3 of (d)"
+counts j-c
+[ "$hits" -gt 0 ] || { cat "$d/j-c.err" >&2; fail "(j) -j 3 of (c), beside -j 3 of (d): no body taken from the records"; }
 
 exit 0
