@@ -969,7 +969,20 @@ let run_compare env =
     with e -> fatal_exn e
 
 
+(* Prototype G (measurement only, never merged): ROCQCHK_MAIN_MINOR_WORDS and
+   ROCQCHK_MAIN_SPACE_OVERHEAD, when set, replace the main process's minor
+   heap size and space overhead from the start. Unset, the base's settings. *)
+let tune_main_gc () =
+  let env_int v = Option.bind (Sys.getenv_opt v) int_of_string_opt in
+  let gc = Gc.get () in
+  let gc = match env_int "ROCQCHK_MAIN_MINOR_WORDS" with
+    | Some n -> { gc with Gc.minor_heap_size = n } | None -> gc in
+  let gc = match env_int "ROCQCHK_MAIN_SPACE_OVERHEAD" with
+    | Some n -> { gc with Gc.space_overhead = n } | None -> gc in
+  Gc.set gc
+
 let main () =
+  tune_main_gc ();
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
   (match !statement_report with

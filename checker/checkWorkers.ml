@@ -341,13 +341,23 @@ let rec waitpid_non_intr flags pid =
    keeps its own setting: it is the one whose heap the workers inherit. *)
 let lazy_gc_min_max_workers = 9
 
+(* Prototype G (measurement only, never merged): ROCQCHK_WORKER_MINOR_WORDS
+   and ROCQCHK_WORKER_SPACE_OVERHEAD, when set, replace a worker's minor heap
+   size and space overhead. Unset, a worker is tuned as at the base. *)
+let env_int v = Option.bind (Sys.getenv_opt v) int_of_string_opt
+
 let tune_gc () =
   let gc = Gc.get () in
   let space_overhead =
     if !max_workers >= lazy_gc_min_max_workers then max gc.Gc.space_overhead 1000
     else gc.Gc.space_overhead in
+  let space_overhead =
+    Option.default space_overhead (env_int "ROCQCHK_WORKER_SPACE_OVERHEAD") in
+  let minor_heap_size =
+    Option.default (max gc.Gc.minor_heap_size (4 * 1024 * 1024))
+      (env_int "ROCQCHK_WORKER_MINOR_WORDS") in
   Gc.set { gc with
-           Gc.minor_heap_size = max gc.Gc.minor_heap_size (4 * 1024 * 1024);
+           Gc.minor_heap_size;
            space_overhead;
            max_overhead = 1000000 }
 
