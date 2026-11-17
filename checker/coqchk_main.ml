@@ -710,7 +710,20 @@ let run senv =
    of the exception, which can quote a name read from a library (checkNames.mli).
    The text is the one [explain_exn] returns: it prints the terms of a
    [CantApplyBadType] type error itself, but nothing in the report raises one. *)
+(* Prototype (measurement only, never merged): ROCQCHK_REPORT_MINOR_WORDS and
+   ROCQCHK_REPORT_SPACE_OVERHEAD, when set, replace the GC settings of the
+   process that computes the report, from the report on. *)
+let tune_report_gc () =
+  let env_int v = Option.bind (Sys.getenv_opt v) int_of_string_opt in
+  let gc = Gc.get () in
+  let gc = match env_int "ROCQCHK_REPORT_MINOR_WORDS" with
+    | Some n -> { gc with Gc.minor_heap_size = n } | None -> gc in
+  let gc = match env_int "ROCQCHK_REPORT_SPACE_OVERHEAD" with
+    | Some n -> { gc with Gc.space_overhead = n } | None -> gc in
+  Gc.set gc
+
 let print_statement_report env requests =
+  tune_report_gc ();
   try Check_closure.print env CheckLibrary.indirect_accessor requests
   with e when (match e with Sys.Break | Out_of_memory -> false | _ -> true) ->
     Feedback.msg_warning

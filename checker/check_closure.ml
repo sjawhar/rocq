@@ -260,7 +260,12 @@ let lookup_mind st view mind =
    the same declaration, as vernac/assumptions.ml does, with a cache of the
    same size. The cache is lossy and direct-mapped: a miss only walks the node
    again. *)
-let cache_size = 1 lsl 18
+(* Prototype (measurement only, never merged): ROCQCHK_REPORT_CACHE_BITS
+   sets the cache to 2^bits entries; unset, 2^18 as at the base. *)
+let cache_size =
+  match Option.bind (Sys.getenv_opt "ROCQCHK_REPORT_CACHE_BITS") int_of_string_opt with
+  | Some b when b >= 10 && b <= 26 -> 1 lsl b
+  | Some _ | None -> 1 lsl 18
 
 let fresh_gen st = st.gen <- st.gen + 1; st.gen
 
