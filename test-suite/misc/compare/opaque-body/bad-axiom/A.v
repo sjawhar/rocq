@@ -1,6 +1,7 @@
 (* The challenge's Qed f is made an axiom, so f has no body in the answer.
-   Because thm reaches the axiom f, the axiom rule fails thm as well. The
-   expected reason pins f's own record, which only the opacity rule writes. *)
+   Without the opacity rule, thm would still fail by the axiom rule, because
+   it reaches the axiom f. So the expected reason pins f's own record, which
+   only the opacity rule writes. *)
 
 Axiom f : nat -> nat.
 
