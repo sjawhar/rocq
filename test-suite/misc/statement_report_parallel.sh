@@ -16,11 +16,16 @@
 # nothing is recorded, and nothing is written. rocqchk records only where
 # the conditions of ReportRecords.start hold (coq-commands.rst): where
 # this test can see that one of them does not, it says which, checks only
-# that -j 3 prints what -j 1 prints on (a), and ends there with success.
+# that -j 3 prints what -j 1 prints on (a), with the line that says the
+# records are off for that reason, and ends there with success. A run at
+# -j 3 where rocqchk records nothing, or gives up, prints that line, just
+# before the report: "rocqchk: statement report: records off: REASON" or
+# "... records given up: REASON" (ReportRecords.status_line); every other
+# run, at -j 1 or with the records used, prints no such line.
 #
 #  (a) A.v, a plain library: an axiom that opaque proofs use through other
 #      opaque proofs. With -d checker-workers too, which prints what -j 1
-#      prints, with no line of its own about the records.
+#      prints.
 #  (b) B.v: opaque proofs in a section. Their cooking information abstracts
 #      a hypothesis whose type names an opaque proof of A, and a Let whose
 #      body is an axiom, which only the cooked body names. A is loaded
@@ -69,25 +74,27 @@
 #      to, and its workers print nothing to the files of their output, so
 #      the files that meet it are those of the records, in /dev/shm, which
 #      the limit applies to as to any file: a write past it fails, instead
-#      of killing the worker with SIGXFSZ, and costs records only. -j 1
-#      under the limit prints what K prints at -j 1 without it, and -j 3
-#      prints that too, with M > 0: the limit cost records.
+#      of killing the worker with SIGXFSZ, and costs records only. -j 3
+#      under the limit prints what K prints at -j 1 without it, with M > 0:
+#      the limit cost records. A worker that stops recording loses its own
+#      records only, so no line says the records are off or given up.
 #  (l) (d) at -j 3 with COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP=1, which
 #      lowers the cap of the records the main process copies to 1 byte: the
 #      main process gives up at the first segment it would keep, and the
-#      report reads every body. The report of -j 1, with H = 0 and M > 0.
+#      report reads every body. The report of -j 1, with H = 0 and M > 0,
+#      and the line "records given up: buffer cap (test)".
 #  (m) (a) with -compare, whose comparison reads opaque bodies through the
 #      accessor that keeps, in the main process, each table the report
 #      read: nothing is recorded, so the counts are not written, and -j 3
-#      prints the report and the verdict of -j 1. The challenge is a copy
-#      of A.vo, and the config pins it and the prelude, as the norec case
-#      of misc/compare.sh does.
+#      prints the report and the verdict of -j 1, and "records off:
+#      compare". The challenge is a copy of A.vo, and the config pins it
+#      and the prelude, as the norec case of misc/compare.sh does.
 #  (n) (d) under a limit on open files of 60 (ulimit -n 60), which, less
 #      the descriptors open as rocqchk starts, is below the 5 * 3 + 65 = 80
 #      that -j 3 needs for the recorder to start
 #      (CheckWorkers.descriptors_for_workers): nothing is recorded, so the
-#      counts are not written, and -j 3 prints what -j 1 prints under the
-#      same limit, which is what (d) prints at -j 1.
+#      counts are not written, and -j 3 prints what (d) prints at -j 1,
+#      and "records off: no room for descriptors".
 #  (o) (d) with TMPDIR naming a directory that does not exist, so that no
 #      file of the workers' output can be made: the walk does not start
 #      while the libraries are read, and the workers print to the standard
@@ -99,16 +106,18 @@
 #      records are used, H > 0 and M = 0. Then the same with 60 descriptors
 #      more open as rocqchk starts: 120 is above 80, but 120 less the
 #      descriptors open is not, so nothing is recorded, the counts are not
-#      written, and -j 3 prints what (d) prints at -j 1.
+#      written, and -j 3 prints what (d) prints at -j 1, and "records off:
+#      no room for descriptors".
 #  (q) (d) with TMPDIR a directory in /dev/shm: the files of the workers'
 #      output would share their file system with the records, so nothing
 #      is recorded, the counts are not written, and -j 3 prints what (d)
-#      prints at -j 1, leaving that directory empty.
+#      prints at -j 1, and "records off: TMPDIR on /dev/shm", leaving that
+#      directory empty.
 #  (r) (d) with -merge-inductives, at -j 1 and at -j 3: after a merge the
 #      opaque values of the final environment are new values, which no
-#      record would match, so nothing is recorded (rocqchk does not start
-#      the recorder), the counts are not written, and -j 3 prints what
-#      -j 1 prints.
+#      record would match, so nothing is recorded, the counts are not
+#      written, and -j 3 prints what -j 1 prints, and "records off:
+#      merge-inductives".
 #
 # A case where /dev/shm is missing, not writable, or writable by other
 # users without its sticky bit needs another mount of /dev/shm than the
@@ -386,6 +395,19 @@ not_recorded() {
   [ ! -e "$d/$1.counts" ] || { cat "$d/$1.counts" >&2; fail "$2 recorded opaque bodies"; }
 }
 
+# records_line NAME LINE: of the lines that say the records are off or
+# given up (ReportRecords.status_line), the run NAME printed LINE alone,
+# before the report; none where LINE is empty.
+records_line() {
+  local got
+  got=$(grep -E '^rocqchk: statement report: records (off|given up): ' "$d/$1.err" || true)
+  [ "$got" = "$2" ] || { cat "$d/$1.err" >&2; fail "$1: printed \"$got\" about the records, not \"$2\""; }
+  if [ -n "$2" ]; then
+    sed -n '/^STATEMENT REPORT$/q;p' "$d/$1.err" | grep -qxF "$2" \
+      || { cat "$d/$1.err" >&2; fail "$1: \"$2\" is not before the report"; }
+  fi
+}
+
 # has NAME LINE: the report of the run NAME has the line LINE.
 has() {
   grep -qxF "$2" "$d/$1.report" || { cat "$d/$1.err" >&2; fail "$1: no line \"$2\""; }
@@ -415,6 +437,7 @@ baseline() {
   [ -s "$d/$f-j1.summary" ] || { cat "$d/$f-j1.err" >&2; fail "($f) -j 1 printed no context summary"; }
   [ -s "$d/$f-j1.libs" ] || { cat "$d/$f-j1.err" >&2; fail "($f) -j 1 named no library"; }
   not_recorded "$f-j1" "($f) -j 1"
+  records_line "$f-j1" ""
 }
 
 # report F ARGS...: the fixture F at -j 1 (baseline), then at -j 3, which
@@ -428,47 +451,46 @@ report() {
   same "$f-j1" "$f-j3" 0 "($f) -j 3"
   counts "$f-j3"
   [ "$hits" -gt 0 ] || { cat "$d/$f-j3.err" >&2; fail "($f) -j 3: no body taken from the records"; }
+  records_line "$f-j3" ""
 }
 
 # no_records_here: why rocqchk records nothing on this machine, by the
 # conditions of ReportRecords.start (coq-commands.rst) that this test can
-# see, or nothing where none of them holds. No descriptor open may be on
-# the file system of /dev/shm: rocqchk looks at each one it lists in
-# /proc/self/fd, but the listing's own (ReportRecords.open_descriptors),
-# and this test at each one its shell holds, which the runs below
-# inherit. A run at -j 3 needs 80 descriptors free for the recorder to
-# start: the count of CheckWorkers.descriptors_for_workers
-# ~extra_per_worker:1, whose formula in checkWorkers.ml is
-# (4 + extra_per_worker) * jobs () + 1 + 64, with jobs () = 3 at -j 3, so
-# (4 + 1) * 3 + 1 + 64 = 80. They must be free below the soft limit on
-# open files (ulimit -n) less the descriptors open, which rocqchk counts in
-# /proc/self/fd less the one of that listing, as this test counts those of
-# its shell. The run needs besides 84 places left in the system's table of
-# open files, by /proc/sys/fs/file-nr, without which rocqchk records
-# nothing: the count of CheckWorkers.open_files_for_workers
-# ~extra_per_worker:1, whose formula is
-# (5 + extra_per_worker) * jobs () + 1 + 1 + 64, so
-# (5 + 1) * 3 + 1 + 1 + 64 = 84. Cases (n) and (p) check the limit of a
-# run less the descriptors open.
+# see, in the order in which rocqchk checks them, as "REASON|WHY": REASON
+# is the reason of the line "rocqchk: statement report: records off:
+# REASON" that rocqchk then prints, and WHY says it. Nothing where none of
+# them holds. No descriptor open may be on the file system of /dev/shm:
+# rocqchk looks at each one it lists in /proc/self/fd, but the listing's
+# own (ReportRecords.open_descriptors), and this test at each one its shell
+# holds, which the runs below inherit, and at $d, where their standard
+# output and error go. A run at -j 3 needs 80 descriptors free for the
+# recorder to start: CheckWorkers.descriptors_for_workers, whose formula
+# in checkWorkers.ml is 5 * jobs () + 1 + 64, with jobs () = 3 at -j 3. They
+# must be free below the soft limit on open files (ulimit -n) less the
+# descriptors open, which rocqchk counts in /proc/self/fd less the one of
+# that listing, as this test counts those of its shell; and the
+# descriptors open and those 80 must be at most 1024 (FD_SETSIZE). The run
+# needs besides 84 places left in the system's table of open files, by
+# /proc/sys/fs/file-nr, without which rocqchk records nothing:
+# CheckWorkers.open_files_for_workers, whose formula is
+# 6 * jobs () + 1 + 1 + 64. Cases (n) and (p) check the limit of a run less
+# the descriptors open.
 no_records_here() {
   local perm shm dir limit self fds fd dev held allocated max
-  if [ ! -d /dev/shm ] || [ ! -w /dev/shm ] || [ ! -x /dev/shm ]; then
-    echo "/dev/shm is not a directory that rocqchk may create files in"; return
+  if [ ! -d /dev/shm ]; then
+    echo "no /dev/shm|/dev/shm is not a directory"; return
   fi
-  perm=$(stat -L -c %a /dev/shm) || { echo "the mode of /dev/shm cannot be read"; return; }
+  perm=$(stat -L -c %a /dev/shm) || { echo "no /dev/shm|the mode of /dev/shm cannot be read"; return; }
   if (( (8#$perm & 8#022) != 0 && (8#$perm & 8#1000) == 0 )); then
-    echo "other users may write to /dev/shm, which has no sticky bit"; return
+    echo "/dev/shm writable by others|other users may write to /dev/shm, which has no sticky bit"; return
   fi
-  shm=$(stat -L -c %d /dev/shm) || { echo "the file system of /dev/shm cannot be read"; return; }
-  for dir in "${TMPDIR:-/tmp}" "$d" "$t"; do
-    if [ "$(stat -L -c %d "$dir")" = "$shm" ]; then
-      echo "$dir is on the file system of /dev/shm"; return
-    fi
-  done
-  if ! { read -r _ < /proc/self/limits; } 2> /dev/null || ! ls /proc/self/fd > /dev/null 2>&1; then
-    echo "/proc/self/limits or /proc/self/fd cannot be read"; return
+  if [ ! -w /dev/shm ] || [ ! -x /dev/shm ]; then
+    echo "/dev/shm not writable|rocqchk may not create files in /dev/shm"; return
   fi
-  limit=$(ulimit -Sn)
+  shm=$(stat -L -c %d /dev/shm) || { echo "no /dev/shm|the file system of /dev/shm cannot be read"; return; }
+  if ! ls /proc/self/fd > /dev/null 2>&1; then
+    echo "no /proc/self/fd|/proc/self/fd cannot be read"; return
+  fi
   self=$BASHPID
   fds=(/proc/self/fd/*)
   held=$(( ${#fds[@]} - 1 ))
@@ -478,42 +500,59 @@ no_records_here() {
   for fd in "${fds[@]}"; do
     fd=/proc/$self/fd/${fd##*/}
     [ -e "$fd" ] || continue
-    dev=$(stat -L -c %d "$fd") || { echo "descriptor ${fd##*/} cannot be looked at"; return; }
+    dev=$(stat -L -c %d "$fd") || { echo "no /proc/self/fd|descriptor ${fd##*/} cannot be looked at"; return; }
     if [ "$dev" = "$shm" ]; then
-      echo "descriptor ${fd##*/} is open on the file system of /dev/shm"; return
+      echo "descriptor on /dev/shm|descriptor ${fd##*/} is open on the file system of /dev/shm"; return
     fi
   done
+  if [ "$(stat -L -c %d "$d")" = "$shm" ]; then
+    echo "descriptor on /dev/shm|$d, where the runs print, is on the file system of /dev/shm"; return
+  fi
+  for dir in "$t" "${TMPDIR:-/tmp}"; do
+    if [ "$(stat -L -c %d "$dir")" = "$shm" ]; then
+      echo "TMPDIR on /dev/shm|$dir is on the file system of /dev/shm"; return
+    fi
+  done
+  if ! { read -r _ < /proc/self/limits; } 2> /dev/null; then
+    echo "no /proc/self/limits|/proc/self/limits cannot be read"; return
+  fi
+  limit=$(ulimit -Sn)
   case $limit in
     unlimited) ;;
-    ''|*[!0-9]*) echo "the limit on open files cannot be read"; return ;;
+    ''|*[!0-9]*) echo "no /proc/self/limits|the limit on open files cannot be read"; return ;;
     *)
       if (( limit - held < 80 )); then
-        echo "the limit on open files, $limit, less the $held open, leaves fewer than 80"; return
+        echo "no room for descriptors|the limit on open files, $limit, less the $held open, leaves fewer than 80"; return
       fi ;;
   esac
+  if (( held + 80 > 1024 )); then
+    echo "FD_SETSIZE|the $held descriptors open and 80 more would pass 1024"; return
+  fi
   if [ ! -e /proc/sys/fs/file-nr ]; then
-    echo "/proc/sys/fs/file-nr does not exist"; return
+    echo "no file-nr|/proc/sys/fs/file-nr does not exist"; return
   fi
   if ! { read -r allocated _ max < /proc/sys/fs/file-nr; } 2> /dev/null; then
-    echo "/proc/sys/fs/file-nr cannot be read"; return
+    echo "no file-nr|/proc/sys/fs/file-nr cannot be read"; return
   fi
   case $allocated$max in
-    ''|*[!0-9]*) echo "/proc/sys/fs/file-nr holds no numbers"; return ;;
+    ''|*[!0-9]*) echo "no file-nr|/proc/sys/fs/file-nr holds no numbers"; return ;;
   esac
   if (( max - allocated < 84 )); then
-    echo "the system's table of open files has fewer than 84 places left"; return
+    echo "no room in file table|the system's table of open files has fewer than 84 places left"; return
   fi
 }
 
 # Where rocqchk rightly records nothing, every case below that needs
 # records would fail: then only (a) is run, which must print at -j 3 what
-# it prints at -j 1.
+# it prints at -j 1, and the line that says the records are off, with the
+# reason this test found.
 why=$(no_records_here) || true
 if [ -n "$why" ]; then
-  echo "rocqchk records nothing here: $why; only (a) is checked, without records."
+  echo "rocqchk records nothing here: ${why#*|}; only (a) is checked, without records."
   baseline a -Q "$d/lib" SRPar -norec SRPar.A
   run a-j3 3 -statement-report "$d/a.req" -Q "$d/lib" SRPar -norec SRPar.A
   same a-j1 a-j3 0 "(a) -j 3 without records"
+  records_line a-j3 "rocqchk: statement report: records off: ${why%%|*}"
   exit 0
 fi
 
@@ -522,15 +561,12 @@ report a -Q "$d/lib" SRPar -norec SRPar.A
 has a-j1 'axiom via SRPar.A.ax'
 has a-j1 'statement typed SRPar.A.uses_ax SRPar.A.via match 1 1'
 # -d checker-workers also turns the default path off. The run prints the
-# report, the summary, the output and the exit code of -j 1, and among its
-# debug lines none about the records, which the counts alone give.
+# report, the summary, the output and the exit code of -j 1.
 run a-d3 3 -d checker-workers -statement-report "$d/a.req" -Q "$d/lib" SRPar -norec SRPar.A
 same a-j1 a-d3 0 "(a) -j 3 -d checker-workers"
 counts a-d3
 [ "$hits" -gt 0 ] || { cat "$d/a-d3.err" >&2; fail "(a) -j 3 -d checker-workers: no body taken from the records"; }
-if tr -s ' \n\t' ' ' < "$d/a-d3.err" | grep -qF '[checker-workers] statement report'; then
-  cat "$d/a-d3.err" >&2; fail "(a) -j 3 -d checker-workers: a debug line about the records"
-fi
+records_line a-d3 ""
 
 # (b)
 report b -Q "$d/lib" SRPar -norec SRPar.B
@@ -588,6 +624,7 @@ for name in e-j1 e-j3; do
     fail "($name) printed a report for a refused library"
   fi
 done
+records_line e-j3 ""
 
 # (f)
 report f -Q "$d/prims" SRPrim -norec SRPrim.Prims
@@ -611,6 +648,7 @@ same g-j1 g-j3 0 "(g) -j 3"
 w1=$(warned g-j1)
 [ -n "$w1" ] || { cat "$d/g-j1.err" >&2; fail "(g) -j 1: no warning"; }
 [ "$(warned g-j3)" = "$w1" ] || { cat "$d/g-j3.err" >&2; fail "(g) -j 3: not the warning of -j 1"; }
+records_line g-j3 ""
 unreadable=
 
 # like_d NAME WHAT: the run NAME of the fixture (d) at -j 3, whose exit code
@@ -624,6 +662,7 @@ like_d() {
   counts "$1"
   [ "$hits" -gt 0 ] || { cat "$d/$1.err" >&2; fail "$2: no body taken from the records"; }
   [ "$reads" = 0 ] || { cat "$d/$1.err" >&2; fail "$2: $reads bodies read, all were checked"; }
+  records_line "$1" ""
 }
 
 # (h) -worker-budget takes any number of seconds from 0 up (coqchk_main.ml,
@@ -660,6 +699,7 @@ R=$rc
 same c-j1 j-c 0 "(j) -j 3 of (c), beside -j 3 of (d)"
 counts j-c
 [ "$hits" -gt 0 ] || { cat "$d/j-c.err" >&2; fail "(j) -j 3 of (c), beside -j 3 of (d): no body taken from the records"; }
+records_line j-c ""
 
 # (k) Each record of K names its 200 constants by number, and the first
 # record of a file gives each of them with its name, of 8 to 10 characters
@@ -668,17 +708,18 @@ counts j-c
 # limit as it writes its first record, which M > 0 shows, where K at -j 3
 # without the limit reads no body. Were SIGXFSZ not ignored for the writes
 # of the records, it would kill the worker that wrote past the limit, and
-# the run would fail where -j 1 succeeds.
+# the run would fail where -j 1 succeeds. At -j 1 nothing writes a file
+# that the limit applies to, so -j 3 under it is compared with K at -j 1
+# without it.
 kargs=(-Q "$d/big" SRBig -norec SRBig.K)
 report k "${kargs[@]}"
 [ "$reads" = 0 ] || { cat "$d/k-j3.err" >&2; fail "(k) -j 3: $reads bodies read, all were checked"; }
 fsize=1
-run kf-j1 1 -statement-report "$d/k.req" "${kargs[@]}"
-same k-j1 kf-j1 0 "(k) -j 1 under ulimit -f 1"
 run kf-j3 3 -statement-report "$d/k.req" "${kargs[@]}"
-same kf-j1 kf-j3 0 "(k) -j 3 under ulimit -f 1"
+same k-j1 kf-j3 0 "(k) -j 3 under ulimit -f 1"
 counts kf-j3
 [ "$reads" -gt 0 ] || { cat "$d/kf-j3.err" >&2; fail "(k) -j 3 under ulimit -f 1: no body read, so the records did not meet the limit"; }
+records_line kf-j3 ""
 fsize=
 
 # (l) Only the main process reads the cap; every worker records as usual,
@@ -688,6 +729,7 @@ same d-j1 l-j3 0 "(l) -j 3 with the records capped at 1 byte"
 counts l-j3
 [ "$hits" = 0 ] || { cat "$d/l-j3.err" >&2; fail "(l) -j 3 with the records capped at 1 byte: $hits bodies taken from the records"; }
 [ "$reads" -gt 0 ] || { cat "$d/l-j3.err" >&2; fail "(l) -j 3 with the records capped at 1 byte: no body read"; }
+records_line l-j3 "rocqchk: statement report: records given up: buffer cap (test)"
 
 # (m) The answer and the challenge are the same A.vo, so the verdicts are
 # those of A's own proofs: what they are matters less than that -j 3 gives
@@ -718,32 +760,33 @@ compared m-j1 1
 grep -qx 'END STATEMENT REPORT' "$d/m-j1.report" \
   || { cat "$d/m-j1.err" >&2; fail "(m) -j 1 printed no whole report"; }
 [ -s "$d/m-j1.json" ] || { cat "$d/m-j1.err" >&2; fail "(m) -j 1 wrote no verdict"; }
+records_line m-j1 ""
 compared m-j3 3
 same m-j1 m-j3 0 "(m) -j 3 with -compare"
 diff -u "$d/m-j1.json" "$d/m-j3.json" > "$d/m-j3.diff" \
   || { cat "$d/m-j3.diff" >&2; fail "(m) -j 3 with -compare: its verdict differs from -j 1"; }
 not_recorded m-j3 "(m) -j 3 with -compare"
+records_line m-j3 "rocqchk: statement report: records off: compare"
 
 # (n) Without records, -j 3 holds in the main process, besides its own
 # few, at most four descriptors for each of its at most three workers,
 # which 60 leaves room for; with them, one more for each, which
 # ReportRecords.start counts (CheckWorkers.descriptors_for_workers). The
-# counts seam is set, so a run that recorded would write the counts.
+# counts seam is set, so a run that recorded would write the counts. At
+# -j 1, rocqchk opens its libraries one at a time, far below 60
+# descriptors, so -j 3 under the limit is compared with (d) at -j 1.
 nofile=60
-run n-j1 1 -statement-report "$d/d.req" "${dargs[@]}"
-same d-j1 n-j1 0 "(n) -j 1 under ulimit -n 60"
 run n-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
-same n-j1 n-j3 0 "(n) -j 3 under ulimit -n 60"
+same d-j1 n-j3 0 "(n) -j 3 under ulimit -n 60"
 not_recorded n-j3 "(n) -j 3 under ulimit -n 60"
+records_line n-j3 "rocqchk: statement report: records off: no room for descriptors"
 nofile=
 
 # (o) No file can be made in a TMPDIR that does not exist
 # (CheckWorkers.open_capture), so the workers have no files of output
 # (CheckLibrary: the walk waits for the libraries to be read), and the
-# records, in /dev/shm, are used as in (d).
+# records, in /dev/shm, are used as in (d). At -j 1 nothing uses TMPDIR.
 tmp=$t/none
-run o-j1 1 -statement-report "$d/d.req" "${dargs[@]}"
-same d-j1 o-j1 0 "(o) -j 1 with a TMPDIR that does not exist"
 run o-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
 like_d o-j3 "(o) -j 3 with a TMPDIR that does not exist"
 [ ! -e "$tmp" ] || fail "(o) -j 3 made its TMPDIR"
@@ -764,6 +807,7 @@ extra=60
 run pe-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
 same d-j1 pe-j3 0 "(p) -j 3 under ulimit -n 120 with 60 descriptors open"
 not_recorded pe-j3 "(p) -j 3 under ulimit -n 120 with 60 descriptors open"
+records_line pe-j3 "rocqchk: statement report: records off: no room for descriptors"
 extra=0
 nofile=
 
@@ -775,15 +819,17 @@ tmp=$s
 run q-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
 same d-j1 q-j3 0 "(q) -j 3 with its TMPDIR in /dev/shm"
 not_recorded q-j3 "(q) -j 3 with its TMPDIR in /dev/shm"
+records_line q-j3 "rocqchk: statement report: records off: TMPDIR on /dev/shm"
 tmp=$t
 
-# (r) coqchk_main.ml does not start the recorder with -merge-inductives
-# (Indmerge.enabled), as it does not with -compare. The counts seam is set,
-# so a run that recorded would write the counts.
+# (r) ReportRecords.start records nothing with -merge-inductives
+# (Indmerge.enabled), as with -compare. The counts seam is set, so a run
+# that recorded would write the counts.
 cp "$d/d.req" "$d/r.req"
 baseline r -merge-inductives "${dargs[@]}"
 run r-j3 3 -statement-report "$d/r.req" -merge-inductives "${dargs[@]}"
 same r-j1 r-j3 0 "(r) -j 3 with -merge-inductives"
 not_recorded r-j3 "(r) -j 3 with -merge-inductives"
+records_line r-j3 "rocqchk: statement report: records off: merge-inductives"
 
 exit 0

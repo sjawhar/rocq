@@ -91,22 +91,15 @@ val opaque_body_refs : Environ.env -> Constr.t -> Names.GlobRef.t list option
     a constructor, a [match] or a projection names, and the registered type
     of each literal and array. It is the walk itself, run on [c] alone. Each
     object is given once. [None] where one of them has names that are not
-    finite ([finite_names]), which the walk checks before it compares that
-    object with any other. Called by the process that checked the opaque
-    body [c], with the environment [c] was checked in ([ReportRecords]). *)
+    finite ([CheckNames.finite_names]), which the walk checks before it
+    compares that object with any other. Called by the process that checked
+    the opaque body [c], with the environment [c] was checked in
+    ([ReportRecords]). *)
 
-val finite_names : Names.GlobRef.t -> bool
-(** Whether the user name and the canonical name of the object each end
-    within 4096 steps: each module of its module path, the root of that
-    path, and each identifier of the directory path at that root is a step.
-    A name that coqc writes takes a few tens; a name whose module path or
-    directory path loops, which a forged library can hold, has no end, and
-    two copies of it compare for ever. Total: it walks each of the two names
-    for at most 4096 steps and a few more, whatever the object holds, and
-    compares names only physically, and hashes and prints nothing. A name
-    it found finite is kept in a cache of the process, and found there again
-    only as the very same value. Before an object that a record names is
-    compared ([ReportRecords]), its names are checked with this. *)
+val prepare_opaque_body_refs : unit -> unit
+(** Makes the cache that [opaque_body_refs] uses, 6 MiB on a 64-bit
+    machine, if it is not made yet: in the main process before any worker
+    is forked, the workers share it until they write to it. *)
 
 (** {6 The closure, for [rocqchk -compare]} *)
 

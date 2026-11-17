@@ -8,51 +8,18 @@
 (*         *     (see LICENSE file for the text of the license)         *)
 (************************************************************************)
 
-(** With workers, the statement report would otherwise read each opaque
-    body it reaches from its library's table, cook it and walk it, in the
-    main process, one body after the other, once the workers had checked
-    them all. Instead, the worker that checked a body records the objects
-    the report's walk finds in it, and the report takes them from the
-    record: those walks are made by the workers, side by side. What a caller
-    must do, and the one way the report can differ, are in the header of
-    reportRecords.mli; the rules a user sees, in coq-commands.rst.
+(** The recorder works in two stages. When the main process defers the
+    check of the opaque body of a constant ([deferring]), it numbers the
+    check: the index of that constant and that opaque value in its list of
+    deferred checks. When the check has passed in a worker, the worker
+    writes the record of that number, the objects
+    [Check_closure.opaque_body_refs] finds in the body, to a file of its own
+    ([record]). After the run, the main process maps each number back to its
+    constant and its opaque value ([collect]). Its whole state is [mode].
 
-    The recorder is the hook of [Mod_checking], in two stages. When the main
-    process defers the check of the opaque body of a constant, it gives the
-    check a number, the index of that constant and that opaque value in
-    [deferred]. When the check has passed in a worker, the worker writes
-    the record of that number ([record]): the objects
-    [Check_closure.opaque_body_refs] finds in the body it checked. After the
-    run, the main process maps each number back to its constant and its
-    opaque value, and the report uses a record only for that very value,
-    as the body of a constant of that name. A record that is missing,
-    because a worker could not write it or the main process could not
-    read it, or because the body names an object whose names do not end
-    within a bound ([Check_closure.finite_names], at [RefMap]), only makes
-    the report read that body. The main process records nothing: it checks
-    a body itself only where it could not make a pipe or fork a worker
-    ([CheckWorkers.spawn]), and the report then reads that body, as it does
-    without records.
-
-    Nothing here prints anything, and nothing here can fail a check or the
-    run: the hook and the entry points raise nothing but an interrupt, and
-    every failure falls back to reading the body. The records take bounded
-    room ([worker_file_cap], [buffer_cap], [id_cap], [deferred_cap], and
-    the sum after [id_cap]), a write of a record past the limit on the size
-    of a file fails instead of killing the process ([write_all]), a write
-    that fails gives back the room its file took ([empty_file]), and
-    nothing is recorded where the files of the records would share a file
-    system with a file rocqchk writes without them, or where the
-    descriptors and open files they take could be ones rocqchk needs
-    without them ([start]). Whatever the library files hold,
-    finding the records of a body costs a lookup in a map ordered by names
-    and a walk of the records of that name ([t]), and finding an object
-    among those the records name, a lookup in such a map ([RefMap]).
-
-    One switch turns the recording off, the buffer of the main process
-    ([buffer] and its [whole]): [deferring], [open_file] and [done_ok] look
-    at it before anything else, and do nothing once it is gone or the main
-    process gave up ([give_up]). The hook of [Mod_checking] stays. *)
+    Nothing here can fail a check or the run: every entry point raises
+    nothing but an interrupt, and every failure only leaves the report to
+    read the bodies it would have taken from the records. *)
 
 open Names
 
@@ -104,192 +71,114 @@ open Names
     then at most twice their length, in all. *)
 
 (* Two objects equal here have both their names equal, and each the hash
-   its names carry: they are the same object, and one can stand for the
-   other anywhere. As above, the hash only picks a bucket, which is a map
-   ordered by names ([HMap]), so that objects that a forged library gives
-   one hash are each found among the others in logarithmic time. Hashing an
-   object reads the hash its names carry and walks no name, but the order
-   walks the names, canonical ones included, and two copies of a name that
-   has no end, which a forged library can hold, compare for ever. So every
-   object this map holds or looks up has names that end within a bound,
-   checked before it is compared with any other
-   ([Check_closure.finite_names]): in the worker, by the walk that finds it
-   ([Check_closure.opaque_body_refs]), and in the main process, as its frame
-   is decoded ([read_segment]). Each comparison then ends, whatever the
-   library files hold. *)
+   its names carry: one can stand for the other anywhere. As above, the
+   hash only picks a bucket, a map ordered by names ([HMap]) whose keys all
+   have the same user hash, so that objects that a forged library gives one
+   hash are each found among the others in logarithmic time. The order
+   walks both names, so every object this map holds or looks up is checked
+   first ([CheckNames.finite_names]): in the worker, by the walk that finds
+   it ([Check_closure.opaque_body_refs]), and in the main process, as its
+   frame is decoded ([read_segment]). *)
 module RefMap = HMap.Make (struct
     type t = GlobRef.t
     let hash = GlobRef.UserOrd.hash
     let compare a b =
-      let c = Int.compare (hash a) (hash b) in
+      let c = GlobRef.UserOrd.compare a b in
       if c <> 0 then c else
-        let c = GlobRef.UserOrd.compare a b in
-        if c <> 0 then c else
-          let c = Int.compare (GlobRef.CanOrd.hash a) (GlobRef.CanOrd.hash b) in
-          if c <> 0 then c else GlobRef.CanOrd.compare a b
+        let c = Int.compare (GlobRef.CanOrd.hash a) (GlobRef.CanOrd.hash b) in
+        if c <> 0 then c else GlobRef.CanOrd.compare a b
   end)
 
+(* A decoded record: the opaque value of its check, and the objects of the
+   body, by number ([ids]), in the objects its segment numbered
+   ([objects]), an array that decoding only replaces by a longer copy of
+   itself, so that its last value holds every number of the segment. *)
+type body = {
+  value : Opaqueproof.opaque;
+  objects : GlobRef.t array ref;
+  ids : int array;
+}
+
 type t = {
-  mutable bodies : (Opaqueproof.opaque * GlobRef.t list) list Cmap_env.t;
-  (* for each constant, by its name, the opaque value of each record of a
-     body of that name, and the objects that record names *)
-  mutable shared : GlobRef.t RefMap.t;
-  (* one copy of each object the records name *)
+  mutable bodies : body list Cmap_env.t;
+  (* the records of the bodies of each constant, by its name *)
   mutable hits : int;
   mutable reads : int;
   (* the opaque constants the report reached whose objects it took from a
      record, and those whose body it read or tried to read *)
 }
 
-(* No record, the report reads every body it reaches; or the records,
-   before any is added. Allocates one block, so that a failure of
-   [collect], which falls back to this, allocates little. *)
-let no_records () =
-  { bodies = Cmap_env.empty; shared = RefMap.empty; hits = 0; reads = 0 }
+(* No record: the report reads every body it reaches. *)
+let no_records () = { bodies = Cmap_env.empty; hits = 0; reads = 0 }
 
-(* Each object is kept once, so that the records of a large tree take one
-   copy of each name they share: [share r obj] is the copy of [obj] that
-   [r] keeps. *)
-let share r obj = match RefMap.find_opt obj r.shared with
-  | Some obj -> obj
-  | None -> r.shared <- RefMap.add obj obj r.shared; obj
+(* Adds the record [b] of a body of the constant [kn], looking at no other
+   record. *)
+let add_record r kn b =
+  r.bodies <- Cmap_env.update kn (fun l -> Some (b :: Option.default [] l)) r.bodies
 
-(* The record of the body [o] of the constant [kn], which names [objs].
-   Adding it looks at no other record. *)
-let add_record r kn o objs =
-  r.bodies <- Cmap_env.update kn (fun l -> Some ((o, objs) :: Option.default [] l)) r.bodies
+(* Whether the records [a] and [b] name the same objects, in the same
+   order. Their objects are the copies that [share] keeps, so this compares
+   them physically. *)
+let same_objects a b =
+  let oa = !(a.objects) and ob = !(b.objects) in
+  Int.equal (Array.length a.ids) (Array.length b.ids)
+  && Array.for_all2 (fun i j -> oa.(i) == ob.(j)) a.ids b.ids
 
-(* The objects of the records of the body [o] of a constant of the name of
-   [kn]. A value can be checked twice: a declaration that a module's
-   signature and its implementation share is checked with each. Its
-   records then name the same objects. Records of one value that do not
-   are not used, and the report reads that body. The objects of the
-   records are the copies [share] keeps, so that two records of one value
-   compare physically. *)
+(* The record of the body [o] of a constant of the name of [kn]. A value
+   can be checked twice: a declaration that a module's signature and its
+   implementation share is checked with each, and its records then name the
+   same objects. Records of one value that do not are not used, and the
+   report reads that body. *)
 let find_record r kn o =
   match Cmap_env.find_opt kn r.bodies with
   | None -> None
   | Some l ->
     let rec scan found = function
       | [] -> found
-      | (o', objs) :: l when o' == o ->
+      | b :: l when b.value == o ->
         (match found with
-         | None -> scan (Some objs) l
-         | Some objs' -> if List.equal (==) objs objs' then scan found l else None)
+         | None -> scan (Some b) l
+         | Some b' -> if same_objects b b' then scan found l else None)
       | _ :: l -> scan found l
     in
     scan None l
 
 let recorded r kn o =
   match find_record r kn o with
-  | Some objs -> r.hits <- r.hits + 1; Some objs
+  | Some b ->
+    r.hits <- r.hits + 1;
+    let objects = !(b.objects) in
+    Some (CArray.map_to_list (fun k -> objects.(k)) b.ids)
   | None -> r.reads <- r.reads + 1; None
 
-(** {6 The checks the main process deferred} *)
+(** {6 The caps}
 
-(* The constant and the opaque value of each deferred check whose record
-   is asked for, the latest first, and their count: the check numbered [n]
-   is the one numbered after [n] others. Only the main process defers
-   checks, and so fills these, while it checks the libraries. A worker's
-   checks were deferred before it was forked, so their numbers are below
-   the count it inherited, and they name in the main process the constants
-   and values they name in the worker. The main process drops the list
-   once it gives up ([give_up]), as no record is used then. *)
-let deferred : (Constant.t * Opaqueproof.opaque) list ref = ref []
-let deferred_count = ref 0
+    What the report reads does not bound the records: [n] opaque constants
+    can share one stored proof that names [k] objects, and the check of
+    each of them records the [k] objects, while the report walks only the
+    bodies it reaches. So past a cap, a worker records no more, or the main
+    process gives up and the report reads every body, as it does without
+    records. What a worker holds while it makes one record needs no cap:
+    it is linear in the size of the body it has just checked. The sums at
+    the caps are in coq-commands.rst. *)
 
-(* The entries that [deferred] may hold. Each takes a cell and a pair,
-   three words each, 48 bytes on a 64-bit machine, and is kept until
-   [collect] or [give_up], whether a record of its check is made or not:
-   without a cap, a long run of cheap checks whose records are never made
-   would keep an entry for every one of them. Past [deferred_cap], 4 Mi
-   entries, about 192 MiB of list, the main process gives up
-   ([deferring]), so that what the list keeps is bounded whatever the
-   input. The constants and opaque values it names are the environment's,
-   which holds them anyway. A tree of 4,190 libraries deferred 132,828
-   checks, about 6 MiB. *)
+(* The checks the main process defers before it gives up ([deferring]):
+   4 Mi, each kept until [collect] as a cell and a pair, 48 bytes on a
+   64-bit machine, 192 MiB. *)
 let deferred_cap = 4 * 1024 * 1024
 
-(** {6 The files and the buffer}
-
-    Each worker that checks opaque bodies records to a file of its own,
-    which the main process opens for it before the fork ([open_file],
-    through [CheckWorkers.set_worker_file]): an unnamed file in /dev/shm
-    ([records_dir]), created, opened and removed at once
-    ([CheckWorkers.open_unnamed]), as the files of the workers' output are
-    made in the temporary directory. It lives while a process holds it
-    open, and the system frees it with its last descriptor, at the latest
-    when the last process that holds it exits: so nothing is left in
-    /dev/shm, however the run ends, but for a kill in the instant between
-    the creation of a file and its removal, or a file that cannot be
-    removed, as in a sandbox that forbids removing files in /dev/shm.
-    Such a file is closed at once, unused, and the main process gives up
-    ([open_file]): the one empty file is left, and no other is made. A
-    named file of the records would outlive the run with what it holds,
-    and every run would leave one for each worker, where rocqchk leaves
-    nothing in /dev/shm without records. No other user can replace the
-    file between its creation and its opening, as [start] records only in
-    a /dev/shm that no other user may write to, or that has the sticky bit.
-    A process of the same user can open it while it lives, through
-    /proc/<pid>/fd, as it can write the files of the workers' output,
-    which rocqchk has without records too; such a process is not one a
-    grade has to fear, as the grade's step runs alone, in a pid namespace
-    of its own. /dev/shm is a file system in memory: its files take
-    memory, which [worker_file_cap] bounds, and [start] records nothing
-    where rocqchk writes anything else to its file system, so that the
-    records cannot take the room that a write of rocqchk needs without
-    them, and a full /dev/shm only stops recording.
-
-    A file is a sequence of frames, each one marshalled [record], whose own
-    header gives its size ([Marshal.total_size]). The worker writes its
-    file, from its start, and records nothing more after its first failure,
-    nor once a frame would take the file past its cap, so only the last
-    frame of a file can be cut short. A write that fails empties the file
-    first ([empty_file]).
-
-    When a worker has ended successfully, the main process copies its file
-    into its own memory, as one segment of the buffer, and closes it at
-    once ([done_ok]); the file of a worker that failed, or that was killed,
-    is closed with no copy. So /dev/shm holds only the files of the workers
-    that run, until the main process sees each one end, and the records of
-    a worker that failed, whose checks do not count, never reach the
-    buffer. Once a file for a worker cannot be made, a segment would take
-    the buffer past its cap, or a copy fails, the main process gives up:
-    no record is used, nothing more is recorded, and the buffer is dropped
-    ([give_up]).
-
-    The main process opens no file for the records but the file of each
-    worker, before that worker is forked, and holds it until that worker
-    has ended: one descriptor per worker that runs, which [start] counts
-    ([room_for_files]). *)
-
-(* The room the records take, in /dev/shm while the workers run, and in
-   the memory of the main process once they have ended, and so the bytes
-   the main process decodes. What the report reads does not bound it: [n]
-   opaque constants can share one stored proof that names [k] objects, and
-   the check of each of them records the [k] objects, so that the records
-   hold [n * k] numbers, while the report walks only the bodies it
-   reaches. So a worker stops recording once its file would pass its cap
-   ([worker_file_cap]), and the main process gives up once the buffer would
-   pass its cap ([buffer_cap]): the report then reads every body, as it
-   does without records. A worker's cap is [max_file_cap], or [files_cap]
-   divided by the number of workers that may be alive at once
-   ([CheckWorkers.jobs]) where that is less, so that the files of the
-   workers alive hold at most [files_cap] in all, whatever [-j]: /dev/shm
-   is memory. The segment that the main process copies from a file is that
-   file, and the buffer holds at most [default_buffer_cap]. So the bytes of
-   the records take at most 512 MiB in all, in the files still open in
-   /dev/shm and in the main process. On a tree of 4,190 libraries they
-   took 48 MB in all, so these leave a wide margin above it. What the main
-   process makes of those bytes as it decodes them is bounded apart, and
-   takes more ([id_cap], and the sum below it); so is the cache of the
-   walk that makes the records ([Check_closure.opaque_body_refs]), 6 MiB
-   in each worker that records, on a 64-bit machine. *)
+(* The bytes of a worker's file: [max_file_cap], or [files_cap] divided by
+   the workers alive at once ([CheckWorkers.jobs]) where that is less, so
+   that the files of the workers alive hold at most 256 MiB of /dev/shm,
+   which is memory. *)
 let max_file_cap = 64 * 1024 * 1024
 let files_cap = 256 * 1024 * 1024
-let default_buffer_cap = 256 * 1024 * 1024
 
 let worker_file_cap () = min max_file_cap (files_cap / CheckWorkers.jobs ())
+
+(* The bytes the main process copies from the files of the workers before
+   it gives up ([done_ok]): 256 MiB. *)
+let default_buffer_cap = 256 * 1024 * 1024
 
 (* Test-only seam, in the style of [Check_closure]'s: a number of bytes in
    COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP lowers the cap of the
@@ -300,65 +189,54 @@ let buffer_cap () =
   | Some n when n >= 0 -> min n default_buffer_cap
   | Some _ | None -> default_buffer_cap
 
-(* The numbers of objects that the main process decodes, in all the
-   segments, may be at most [id_cap] ([read_segment]). Each becomes a cell
-   of a list that the records keep, three words, and the cap of the buffer
-   bounds them poorly: a number below 64 takes one byte in a frame, so a
-   buffer of 256 MiB can hold 256 Mi numbers, 6 GiB of cells. The objects
-   themselves are kept once each ([share]), so the objects that exist
-   bound them. Past [id_cap], 32 Mi numbers, about 768 MiB of cells on a
-   64-bit machine, the main process gives up, and the report reads every
-   body. The 48 MB of records of the tree of 4,190 libraries held far
-   fewer, by an estimate from the frame format, not a count: a frame takes
-   about 30 bytes besides its numbers (the marshal header of 20 bytes, the
-   number of the check, the headers of its arrays) and the objects it
-   names first, tens of bytes each; a number takes 1 byte below 64, 2
-   below 128, 3 below 32,768, and a worker numbers thousands of objects.
-   If half of those records are numbers, at about 2 bytes each, they hold
-   some 12 million; they would pass the cap only if some 70% of them were
-   numbers of 1 byte. *)
+(* The numbers of objects the main process decodes, in all the segments,
+   before it gives up ([read_segment]): 32 Mi, each a word of the array of
+   numbers that its record keeps, 256 MiB on a 64-bit machine. A number
+   below 64 takes one byte in a frame, so the cap of the buffer bounds
+   them poorly. *)
 let id_cap = 32 * 1024 * 1024
 
-(* What a worker holds while it makes one record has no cap of its own,
-   and needs none: it is linear in the size of the body the worker has
-   just checked, which the check held. The record has at most one entry
-   per distinct object of the body ([Check_closure.opaque_body_refs] gives
-   a set), the walk that finds them is linear in the size of the body, its
-   cache has a fixed size, and the frame of the record grows with its
-   entries; a worker's numbering keeps besides the objects its file names,
-   which the cap of its file bounds. The caps above bound what the records
-   keep from one check to the next, in /dev/shm and in memory. Each record
-   that the main process decodes adds to [bodies] a cell and a pair, and
-   to the map at most one entry; each check makes one record at most, so
-   that the deferred checks bound these too.
+(** {6 The files}
 
-   At the caps, then, by an estimate on a 64-bit machine, where a word
-   takes 8 bytes and a block one word besides its fields, the decoded
-   records keep: the cells of the lists of objects, 768 MiB ([id_cap]);
-   for each of at most [deferred_cap] records, a pair and a cell in
-   [bodies], 48 bytes, and at most two nodes of the map, of six words
-   each, one in the map of the hashes and one in a map of the names
-   ([HMap], whose maps are those of the standard library), 96 bytes, so
-   192 MiB and 384 MiB; and the array of the checks, a word for each
-   ([read_records], [values]), 32 MiB, whose pairs are those of
-   [deferred]. That is 1,376 MiB, besides the 512 MiB of the bytes of the
-   records and the 192 MiB of [deferred]. Besides these too: while
-   [values] is made, a reversed copy of the cells of [deferred], 96 MiB;
-   and one copy of each object the records name ([share]), with its entry
-   in [shared] and in the array of the objects of a segment
-   ([read_segment]), which the objects that exist bound, not a cap. These
-   bounds hold whatever the libraries hold, and libraries within them can
-   make the main process take more memory than without records: the [n]
-   constants above, whose bodies share one stored proof that the report
-   does not reach, make it keep their records, where without them it keeps
-   nothing of those bodies. *)
+    Each worker that checks opaque bodies records to a file of its own,
+    which the main process opens for it before the fork ([open_file],
+    through [CheckWorkers.set_worker_file]) and holds until that worker has
+    ended: a file in /dev/shm ([records_dir]), created, opened and removed
+    at once ([CheckWorkers.open_unnamed]). The system frees it with its last
+    descriptor, at the latest when the last process that holds it exits, so
+    nothing is left in /dev/shm however the run ends, but for a kill in the
+    instant between the creation of a file and its removal, or a file that
+    cannot be removed, as in a sandbox that forbids removing files in
+    /dev/shm: such a file is closed at once, unused, and the main process
+    gives up, so that no other is made. A named file of the records would
+    outlive the run with what it holds. No other user can replace the file
+    between its creation and its opening, as [start] records only in a
+    /dev/shm that no other user may write to, or that has the sticky bit. A
+    process of the same user can open it while it lives, through
+    /proc/<pid>/fd, as it can the files of the workers' output, which
+    rocqchk has without records too; such a process is not one a grade has
+    to fear, as the grade's step runs alone, in a pid namespace of its own.
 
-(* A record. [index] is the number of its check. Each file numbers the
-   objects its records name, 0, 1, ... in the order they are first
-   recorded: [defs] are the objects this record names first, which take
-   the next numbers in order, and [ids] are the objects of the body, by
-   number, in the order [Check_closure.opaque_body_refs] gives them. *)
-type record = {
+    A file is a sequence of frames, each one marshalled [frame], whose own
+    header gives its size ([Marshal.total_size]). The worker writes its
+    file from its start, and records nothing more after its first failure,
+    nor once a frame would take the file past its cap, so only the last
+    frame of a file can be cut short. A write that fails empties the file
+    first ([empty_file]).
+
+    When a worker has ended successfully, the main process copies its file,
+    whole, as one segment, and closes it at once ([done_ok]); the file of a
+    worker that failed, or that was killed, is closed with no copy, so the
+    records of a worker whose checks do not count never reach the main
+    process. *)
+
+(* A record, as a worker writes it. [index] is the number of its check.
+   Each file numbers the objects its records name, 0, 1, ... in the order
+   they are first recorded: [defs] are the objects this record names first,
+   which take the next numbers in order, and [ids] are the objects of the
+   body, by number, in the order [Check_closure.opaque_body_refs] gives
+   them. *)
+type frame = {
   index : int;
   defs : GlobRef.t array;
   ids : int array;
@@ -382,33 +260,48 @@ type output = {
   fd : Unix.file_descr;
   numbering : numbering;
   max_size : int;
-  (* the bytes [fd] may hold: the [file_cap] of the buffer the worker was
-     forked with *)
+  (* the bytes [fd] may hold: [worker_file_cap ()] *)
   mutable size : int;
   (* the bytes written to [fd] so far *)
 }
 
-(* The main process's buffer, from [start] to [collect]. *)
-type buffer = {
+(* The main process, from [start] to [collect]. *)
+type main = {
   cap : int;
-  (* the bytes the buffer may take: [buffer_cap ()] *)
-  file_cap : int;
-  (* the bytes the file of each worker may take: [worker_file_cap ()] *)
+  (* the bytes [segments] may take: [buffer_cap ()] *)
   mutable segments : Bytes.t list;
-  (* the segments kept so far, the latest first *)
+  (* the copies of the files of the workers, the latest first *)
   mutable size : int;
   (* the bytes of [segments] *)
-  mutable whole : bool;
-  (* false once the main process gave up ([give_up]): no record is used,
-     and nothing more is recorded *)
+  mutable deferred : (Constant.t * Opaqueproof.opaque) list;
+  (* the constant and the opaque value of each deferred check, the latest
+     first: the check numbered [n] is the one deferred after [n] others *)
+  mutable count : int;
+  (* the length of [deferred] *)
 }
 
-let buffer : buffer option ref = ref None
+(* What this process does with the records:
+   - [Off]: nothing, in a process where [start] did not run or found no
+     workers, in a worker that has no file or stopped recording, and once
+     [collect] decoded the records ([None]); or since [start] stepped
+     aside, for the reason given;
+   - [Recording]: the main process, from [start] to [collect];
+   - [Gave_up]: the main process, once it gave up, for the reason given:
+     no record is used, nothing more is recorded, and what it kept is
+     dropped;
+   - [Worker]: a worker that records to its file.
+   A worker's checks were deferred before it was forked, so their numbers
+   name in the main process the constants and values they name in the
+   worker. The reasons are the tokens of [status_line], which
+   coq-commands.rst lists. Each [Gave_up] is a constant, so that giving up
+   allocates nothing, and can follow any failure. *)
+type mode =
+  | Off of string option
+  | Recording of main
+  | Gave_up of string
+  | Worker of output
 
-(* The file this process records to, in a worker that has one, until a
-   write failed or a frame would have taken the file past its cap; [None]
-   anywhere else, the main process included. *)
-let current : output option ref = ref None
+let mode = ref (Off None)
 
 (* Every write of the records, and only those, is made with SIGXFSZ
    ignored, and the action it had is restored after. A write past the
@@ -451,37 +344,28 @@ let rec read_all fd b ofs len =
     | n -> read_all fd b (ofs + n) (len - n)
     | exception Unix.Unix_error (Unix.EINTR, _, _) -> read_all fd b ofs len
 
-(* Copies the file [fd] of a worker, whole, into [b] as one segment. An
-   empty file adds nothing. Fails, keeping nothing, if the file would take
-   [b] past its cap, which is checked before the copy is allocated. *)
-let copy_file b fd =
+exception Buffer_full
+
+(* Copies the file [fd] of a worker, whole, into [m] as one segment. An
+   empty file adds nothing. Raises [Buffer_full], keeping nothing, if the
+   file would take [m] past its cap, which is checked before the copy is
+   allocated. *)
+let copy_file m fd =
   let size = Unix.lseek fd 0 Unix.SEEK_END in
   if size > 0 then begin
-    if b.size + size > b.cap then failwith "ReportRecords.copy_file";
+    if m.size + size > m.cap then raise Buffer_full;
     ignore (Unix.lseek fd 0 Unix.SEEK_SET);
     let seg = Bytes.create size in
     read_all fd seg 0 size;
-    b.segments <- seg :: b.segments;
-    b.size <- b.size + size
+    m.segments <- seg :: m.segments;
+    m.size <- m.size + size
   end
 
 (** {6 Recording} *)
 
-(* In the main process: no record is used, and nothing more is recorded,
-   so that the report reads every body it reaches: [deferring] numbers no
-   more checks, [open_file] makes no more files, and [done_ok] copies none
-   ([whole]). The constants and opaque values of the deferred checks, which
-   no record will be matched to, are dropped, and so is the buffer. It
-   allocates nothing, so that it can follow any failure. *)
-let give_up () =
-  deferred := [];
-  match !buffer with
-  | Some b -> b.whole <- false; b.segments <- []; b.size <- 0
-  | None -> ()
-
 (* The frame of the record of check [index], whose body names the objects
    [objs], in the numbering [n]: the objects [n] has no number for yet
-   take the next ones. *)
+   take the next ones, in the order of [objs]. *)
 let make_frame n index objs =
   let defs = ref [] in
   let number obj = match RefMap.find_opt obj n.numbers with
@@ -493,133 +377,137 @@ let make_frame n index objs =
       defs := obj :: !defs;
       k
   in
-  let ids = Array.of_list (List.map number objs) in
-  Marshal.to_bytes { index; defs = Array.of_list (List.rev !defs); ids } []
+  let ids = CArray.map_of_list number objs in
+  Marshal.to_bytes { index; defs = CArray.rev_of_list !defs; ids } []
 
-(* The second stage of the hook, in whichever process checked the body [c]
-   of check [index], in [env]: a worker with a file records it there, and
-   any other process, the main one included, has none ([current]) and does
-   nothing. It raises nothing but an interrupt, which is the user's. Any
-   failure stops the recording in that worker only, and so does a frame
-   that would take its file past its cap; a write that fails empties the
-   file first ([empty_file]), and the report then reads the bodies that
-   worker checked. A body that names an object whose names do not end
-   within the bound of [Check_closure.finite_names] is not recorded, and
+(* The second stage, in whichever process checked the body [c] of check
+   [index], in [env]: a worker with a file records it there, and any other
+   process, the main one included, does nothing. Any failure stops the
+   recording in that worker only, and so does a frame that would take its
+   file past its cap; a write that fails empties the file first
+   ([empty_file]), and the report then reads the bodies that worker
+   checked. A body that names an object whose names are not finite
+   ([Check_closure.opaque_body_refs] gives [None]) is not recorded, and
    none of its objects is numbered: the report reads that body, and the
    worker goes on recording the next ones. *)
 let record index env c =
-  match !current with
-  | None -> ()
-  | Some o ->
-    try
-      match Check_closure.opaque_body_refs env c with
-      | None -> ()
-      | Some objs ->
-        let frame = make_frame o.numbering index objs in
-        let size = Bytes.length frame in
-        if o.size + size > o.max_size then current := None
-        else begin
-          (try write_all o.fd frame 0 size with
-           | Sys.Break as e -> raise e
-           | e -> empty_file o.fd; raise e);
-          o.size <- o.size + size
-        end
-    with
-    | Sys.Break as e -> raise e
-    | _ -> current := None
+  match !mode with
+  | Worker o ->
+    (try
+       match Check_closure.opaque_body_refs env c with
+       | None -> ()
+       | Some objs ->
+         let frame = make_frame o.numbering index objs in
+         let size = Bytes.length frame in
+         if o.size + size > o.max_size then mode := Off None
+         else begin
+           (try write_all o.fd frame 0 size with
+            | Sys.Break as e -> raise e
+            | e -> empty_file o.fd; raise e);
+           o.size <- o.size + size
+         end
+     with
+     | Sys.Break as e -> raise e
+     | _ -> mode := Off None)
+  | Off _ | Recording _ | Gave_up _ -> ()
 
 (* The second stage of a check that is not recorded. *)
-let no_record _ _ = ()
+let unrecorded _ _ = ()
 
-(* The first stage of the hook, in the process that defers the check of
-   the opaque [o] of the constant [kn], the main process: it numbers the
-   check, and the second stage carries the number. Every opaque is
-   recorded, with substitutions or without: the key alone, the name of the
-   constant and the very value, decides which record the report uses. The
-   copies that the report makes itself are read: its implementation view
-   substitutes the structure of each module it looks into ([Check_closure]'s
-   [fields_of_mp], through [Modops.subst_structure]), and a copy made there
-   with a substitution is a new value, which no record matches. It runs
-   while the main process checks, and raises nothing but an interrupt: if
-   anything fails here, or once [deferred] would pass [deferred_cap], the
-   main process gives up, and the check runs with no second stage. Once
-   the main process gave up, it adds nothing to [deferred]. *)
+(* The first stage, in the main process. Every opaque is recorded, with
+   substitutions or without: the key alone, the name of the constant and
+   the very value, decides which record the report uses. If anything fails
+   here, or once the deferred checks would pass [deferred_cap], the main
+   process gives up, and the check runs with no second stage. *)
 let deferring kn o =
-  match !buffer with
-  | Some b when b.whole ->
-    let n = !deferred_count in
-    if n >= deferred_cap then (give_up (); no_record)
+  match !mode with
+  | Recording m ->
+    let n = m.count in
+    if n >= deferred_cap then (mode := Gave_up "deferred cap"; unrecorded)
     else
       (try
-         deferred := (kn, o) :: !deferred;
-         deferred_count := n + 1;
+         m.deferred <- (kn, o) :: m.deferred;
+         m.count <- n + 1;
          record n
        with
        | Sys.Break as e -> raise e
-       | _ -> give_up (); no_record)
-  | Some _ | None -> no_record
+       | _ -> mode := Gave_up "defer failure"; unrecorded)
+  | Off _ | Gave_up _ | Worker _ -> unrecorded
 
 (** {6 The files of the workers}
 
     None of these raises anything but an interrupt, as
     [CheckWorkers.set_worker_file] asks. *)
 
-(* The directory of the workers' files: a file system in memory, which
-   rocqchk writes nothing else to where it records ([start]). *)
+(* The directory of the workers' files: a file system in memory, on which
+   [start] records only where rocqchk writes nothing else there. *)
 let records_dir = "/dev/shm"
 
 (* In the main process, before each fork: a file for the worker, or none
    once the main process gave up. A file that cannot be made gives up for
    the whole run, as the other failures do: had the main process gone on
    without it, nothing else would end the recording where no file can be
-   made at all, as in a /dev/shm whose room or inodes are used up, and
-   [deferred] would grow with every check while no record is made. So
-   does a file that can be made but not removed, which
-   [CheckWorkers.open_unnamed] closes and does not give: going on would
-   leave a named file in /dev/shm for each worker. *)
+   made at all, as in a /dev/shm whose room or inodes are used up, and the
+   deferred checks would grow while no record is made. So does a file that
+   can be made but not removed, which [CheckWorkers.open_unnamed] closes
+   and does not give: going on would leave a named file in /dev/shm for
+   each worker. *)
 let open_file () =
-  match !buffer with
-  | Some b when b.whole ->
+  match !mode with
+  | Recording _ ->
     (match CheckWorkers.open_unnamed ~temp_dir:records_dir with
      | Some _ as file -> file
-     | None -> give_up (); None
-     | exception (Sys.Break as e) -> give_up (); raise e
-     | exception _ -> give_up (); None)
-  | Some _ | None -> None
+     | None -> mode := Gave_up "file failure"; None
+     | exception (Sys.Break as e) -> mode := Gave_up "file failure"; raise e
+     | exception _ -> mode := Gave_up "file failure"; None)
+  | Off _ | Gave_up _ | Worker _ -> None
 
-(* In a worker, right after the fork. The buffer is not its to fill: it
-   drops its copy, and records to its own file, if it has one, with a
-   numbering of its own, up to the cap of a worker's file that the main
-   process set. *)
+(* In a worker, right after the fork: what the main process keeps is not
+   its own, and it records to its own file, if it has one, with a numbering
+   of its own. *)
 let in_child fd =
-  let max_size = match !buffer with Some b -> b.file_cap | None -> 0 in
-  current := None;
-  buffer := None;
-  Option.iter (fun fd ->
-      current := Some { fd; numbering = numbering (); max_size; size = 0 }) fd
+  mode :=
+    (match fd with
+     | Some fd ->
+       Worker { fd; numbering = numbering (); max_size = worker_file_cap (); size = 0 }
+     | None -> Off None)
 
 (* In the main process, once the worker whose file is [fd] has ended
-   successfully: the file is copied into the buffer ([copy_file]), and
-   closed at once, whatever happens. Any failure but an interrupt gives
-   up; nothing is allocated outside the handler. *)
+   successfully: the file is copied ([copy_file]), and closed at once,
+   whatever happens. Any failure but an interrupt gives up. *)
 let done_ok fd =
-  match !buffer with
-  | Some b when b.whole ->
-    (match copy_file b fd with
+  match !mode with
+  | Recording m ->
+    (match copy_file m fd with
      | () -> CheckWorkers.close_fd fd
-     | exception (Sys.Break as e) -> give_up (); CheckWorkers.close_fd fd; raise e
-     | exception _ -> give_up (); CheckWorkers.close_fd fd)
-  | Some _ | None -> CheckWorkers.close_fd fd
+     | exception Buffer_full ->
+       mode :=
+         (if m.cap < default_buffer_cap then Gave_up "buffer cap (test)"
+          else Gave_up "buffer cap");
+       CheckWorkers.close_fd fd
+     | exception (Sys.Break as e) ->
+       mode := Gave_up "copy failure"; CheckWorkers.close_fd fd; raise e
+     | exception _ -> mode := Gave_up "copy failure"; CheckWorkers.close_fd fd)
+  | Off _ | Gave_up _ | Worker _ -> CheckWorkers.close_fd fd
 
-(** {6 The main process, around the run} *)
+(** {6 Starting} *)
 
-(* The soft limit on the descriptors of this process (RLIMIT_NOFILE,
-   [ulimit -n]): the first number of the line "Max open files" of
-   /proc/self/limits, [max_int] where it says "unlimited". Fails if the
-   file cannot be read, or holds no such line, or no number there. *)
-let open_files_limit () =
-  let prefix = "Max open files" in
-  let ch = open_in "/proc/self/limits" in
+(* Raised where [start] steps aside, with the reason. *)
+exception Step_aside of string
+
+(* [f ()], or a step aside for [reason] where it fails but for an
+   interrupt, or for want of memory or stack, which [start] takes as a
+   failure of its own. *)
+let or_step_aside reason f =
+  try f () with
+  | (Sys.Break | Out_of_memory | Stack_overflow) as e -> raise e
+  | _ -> raise (Step_aside reason)
+
+(* The words of the first line of [file] that starts with [prefix], after
+   that prefix, split at spaces and tabs. Fails if the file cannot be read,
+   or holds no such line. *)
+let proc_words file ~prefix =
+  let ch = open_in file in
   let line =
     Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
         let rec find () =
@@ -629,7 +517,14 @@ let open_files_limit () =
         find ())
   in
   let rest = String.sub line (String.length prefix) (String.length line - String.length prefix) in
-  match List.filter (fun s -> s <> "") (String.split_on_char ' ' rest) with
+  let words = String.split_on_char ' ' (String.map (fun c -> if Char.equal c '\t' then ' ' else c) rest) in
+  List.filter (fun s -> not (String.equal s "")) words
+
+(* The soft limit on the descriptors of this process (RLIMIT_NOFILE,
+   [ulimit -n]): the first number of the line "Max open files" of
+   /proc/self/limits, [max_int] where it says "unlimited". *)
+let open_files_limit () =
+  match proc_words "/proc/self/limits" ~prefix:"Max open files" with
   | "unlimited" :: _ -> max_int
   | n :: _ ->
     (match int_of_string_opt n with
@@ -656,124 +551,167 @@ let open_descriptors dev =
   Array.length fds - 1, Array.exists on_dev fds
 
 (* The file system of [records_dir], which must be a directory that this
-   process may create files in: fails if it is not, or if it cannot be
-   looked at, as where there is no /dev/shm. It fails too where users other
-   than its owner may write to it and it has no sticky bit: such a user
-   could remove and replace a file of the records between its creation and
-   its opening ([CheckWorkers.open_unnamed]), and then see or change what a
-   worker records. *)
+   process may create files in, and in which no other user can remove and
+   replace a file of the records between its creation and its opening
+   ([CheckWorkers.open_unnamed]), and then see or change what a worker
+   records: one that users other than its owner may write to must have the
+   sticky bit. *)
 let records_device () =
-  let st = Unix.stat records_dir in
+  let st = or_step_aside "no /dev/shm" (fun () -> Unix.stat records_dir) in
+  if st.Unix.st_kind <> Unix.S_DIR then raise (Step_aside "no /dev/shm");
   let perm = st.Unix.st_perm in
-  if st.Unix.st_kind <> Unix.S_DIR
-  || (perm land 0o022 <> 0 && perm land 0o1000 = 0)
-  then failwith "ReportRecords.records_device";
-  Unix.access records_dir [Unix.W_OK; Unix.X_OK];
+  if perm land 0o022 <> 0 && perm land 0o1000 = 0 then
+    raise (Step_aside "/dev/shm writable by others");
+  or_step_aside "/dev/shm not writable" (fun () ->
+      Unix.access records_dir [Unix.W_OK; Unix.X_OK]);
   st.Unix.st_dev
 
-(* Whether the temporary directory (TMPDIR), in which the files of the
-   workers' output are made ([CheckWorkers.open_capture]), is on the file
-   system [dev]. A directory that cannot be looked at is one in which no
-   file can be made either, and so on none. *)
+(* Whether the directory in which the files of the workers' output are made
+   ([CheckWorkers.capture_dir]) is on the file system [dev]. A directory
+   that cannot be looked at is one in which no file can be made either, and
+   so on none. *)
 let temp_dir_on dev =
-  match Unix.stat (Filename.get_temp_dir_name ()) with
+  match Unix.stat (CheckWorkers.capture_dir ()) with
   | st -> st.Unix.st_dev = dev
   | exception Unix.Unix_error _ -> false
 
 (* Whether the system's table of open files has room for [need] more, by
    /proc/sys/fs/file-nr ("allocated unused max"): its size less the files
    open in it, read unsigned, as the size may be LONG_MAX, which is past
-   [max_int]. The limit of this process ([room_for_files]) does not count
-   the files of other processes: in a system whose table is nearly full,
-   the files of the records could take the last places, and a later open
-   that rocqchk needs, of a library say, would fail where it succeeds
-   without records. Without that file, the room in the system's table
-   cannot be known, even where a table is there and the file is only
-   hidden: so where it does not exist, as where it cannot be read or
-   parsed, this fails, and then nothing is recorded. Other processes that
-   fill the table while rocqchk runs make the outcome of a run without
-   records depend on them too, which no check at the start can cover. *)
-let system_room need =
-  let fd = Unix.openfile "/proc/sys/fs/file-nr" [Unix.O_RDONLY; Unix.O_CLOEXEC] 0 in
-  let ch = try Unix.in_channel_of_descr fd with e -> CheckWorkers.close_fd fd; raise e in
-  let line = Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () -> input_line ch) in
+   [max_int]. The limit of this process does not count the files of other
+   processes: in a system whose table is nearly full, the files of the
+   records could take the last places, and a later open that rocqchk needs,
+   of a library say, would fail where it succeeds without records. Fails
+   where the file cannot be read or parsed: without it, as where a sandbox
+   hides it, the room cannot be known. *)
+let file_table_room need =
   let number s =
     if String.equal s "" || not (String.for_all (fun c -> '0' <= c && c <= '9') s)
-    then failwith "ReportRecords.system_room";
+    then failwith "ReportRecords.file_table_room";
     Int64.of_string ("0u" ^ s)
   in
-  let words = String.split_on_char ' ' (String.map (fun c -> if Char.equal c '\t' then ' ' else c) line) in
-  match List.filter (fun s -> not (String.equal s "")) words with
+  match proc_words "/proc/sys/fs/file-nr" ~prefix:"" with
   | [allocated; _; size] ->
     let allocated = number allocated and size = number size in
     Int64.unsigned_compare allocated size <= 0
     && Int64.unsigned_compare (Int64.sub size allocated) (Int64.of_int need) >= 0
-  | _ -> failwith "ReportRecords.system_room"
+  | _ -> failwith "ReportRecords.file_table_room"
 
-(* Whether the files the workers may need with their files of records, one
-   each, fit: below the soft limit on open files less the [held]
-   descriptors this process already holds, the descriptors of this process
-   ([CheckWorkers.descriptors_for_workers]); and in the system's table of
-   open files ([system_room]), the open files of this process and of its
-   workers ([CheckWorkers.open_files_for_workers]). The two counts differ:
-   the limit is on the descriptors of this process alone, and a file that
-   a worker opens itself, as a library's while it reads its table, takes a
-   place in the system's table and no descriptor of this process. The
-   descriptors held already, those inherited and those rocqchk opened
-   before the libraries are loaded, are not free for any of these: so the
-   room is the limit less them, not the limit. Under less room, a
-   descriptor or an open file the recorder took could be the one a later
+(* FD_SETSIZE on Linux: [Unix.select] refuses a descriptor numbered at or
+   above it, and [CheckWorkers.wait_for_messages] selects on the report
+   pipes of the workers, which then waits worse. The descriptor that the
+   records add for each worker must not take a report pipe there where,
+   without records, the pipes stay below it. *)
+let fd_setsize = 1024
+
+(* Steps aside unless the files that the workers may need with their files
+   of records fit: the descriptors of this process
+   ([CheckWorkers.descriptors_for_workers]) below the soft limit on open
+   files less the [held] descriptors this process already holds, and all of
+   them numbered below [fd_setsize], as descriptors take the lowest free
+   numbers; and the open files of this process and of its workers
+   ([CheckWorkers.open_files_for_workers]) in the system's table of open
+   files ([file_table_room]). The two counts differ: a file that a worker
+   opens itself, as a library's while it reads its table, takes a place in
+   the system's table and no descriptor of this process. The descriptors
+   held already, those inherited and those rocqchk opened before the
+   libraries are loaded, are not free for any of these. Under less room, a
+   descriptor or an open file the records took could be the one a later
    pipe, file of output or library load needs, in this process or in a
-   worker, which would then fail where it succeeds without records. Fails
-   if the limit or the table cannot be read. *)
+   worker, which would then fail where it succeeds without records. *)
 let room_for_files held =
-  open_files_limit () - held >= CheckWorkers.descriptors_for_workers ~extra_per_worker:1
-  && system_room (CheckWorkers.open_files_for_workers ~extra_per_worker:1)
+  let need = CheckWorkers.descriptors_for_workers () in
+  let limit = or_step_aside "no /proc/self/limits" open_files_limit in
+  if limit - held < need then raise (Step_aside "no room for descriptors");
+  if held + need > fd_setsize then raise (Step_aside "FD_SETSIZE");
+  let room = or_step_aside "no file-nr" (fun () ->
+      file_table_room (CheckWorkers.open_files_for_workers ()))
+  in
+  if not room then raise (Step_aside "no room in file table")
 
-(* The conditions of coq-commands.rst that [start] checks itself (its
-   caller checks the others: see reportRecords.mli). [records_dir] is a
-   directory this process may create files in, in which no other user can
-   replace one ([records_device]), on another file system than every file
-   rocqchk writes without records, so that the records cannot take the
-   room one of those writes needs: that of the temporary directory, in
-   which the files of the workers' output are made, and that of each
-   descriptor this process holds, such as its standard output and error
-   (those are all the files rocqchk writes, but for those of the test
-   seams and of -compare, with which nothing is recorded); and the
-   descriptors of the records fit ([room_for_files]). Opens nothing but
-   the directory /proc/self/fd and the files /proc/self/limits and
-   /proc/sys/fs/file-nr, each closed at once. If anything fails but an
-   interrupt, nothing is recorded. [buffer] is set last: until then, and
-   if anything fails, [deferring], [open_file] and [done_ok] do nothing. *)
-let start () =
-  try
-    let dev = records_device () in
-    let held, held_on_dev = open_descriptors dev in
-    if not held_on_dev && not (temp_dir_on dev) && room_for_files held then begin
-      let b = { cap = buffer_cap (); file_cap = worker_file_cap (); segments = [];
-                size = 0; whole = true } in
-      CheckWorkers.set_worker_file { CheckWorkers.open_file; in_child; done_ok };
-      Mod_checking.set_opaque_check_hook deferring;
-      buffer := Some b
-    end
-  with
-  | Sys.Break as e -> raise e
-  | _ -> buffer := None
+(* The recorder, where each condition that [start] checks holds, or a step
+   aside for the first that does not. [records_dir] must be on another file
+   system than every file rocqchk writes without records, so that the
+   records cannot take the room one of those writes needs, and a full
+   /dev/shm only stops recording: that of the directory of the workers'
+   output, and that of each descriptor this process holds, such as its
+   standard output and error (those are all the files rocqchk writes, but
+   for those of the test seams and of -compare, with which nothing is
+   recorded). Opens nothing but the directory /proc/self/fd and the files
+   /proc/self/limits and /proc/sys/fs/file-nr, each closed at once. *)
+let recording () =
+  let dev = records_device () in
+  let held, held_on_dev = or_step_aside "no /proc/self/fd" (fun () -> open_descriptors dev) in
+  if held_on_dev then raise (Step_aside "descriptor on /dev/shm");
+  if temp_dir_on dev then raise (Step_aside "TMPDIR on /dev/shm");
+  room_for_files held;
+  Check_closure.prepare_opaque_body_refs ();
+  CheckWorkers.set_worker_file { CheckWorkers.open_file; in_child; done_ok };
+  Recording { cap = buffer_cap (); segments = []; size = 0; deferred = []; count = 0 }
 
-(* The records of one segment, in order, for the constants and opaque
+(* Nothing is recorded without workers. Nor with -compare: the comparison,
+   which comes after the report, reads opaque bodies through the same
+   accessor ([CheckLibrary.indirect_accessor]), which keeps each table it
+   reads in the main process; a body the report took from a record would
+   leave its table unread there, so that the comparison could read the
+   library file again where, without records, it uses the table the report
+   read. Nor with -merge-inductives or -merge-inductives-verbose
+   ([Indmerge.enabled]): after a merge, the opaque values of the final
+   environment are new values, which no record would match. *)
+let start ~compare =
+  if CheckWorkers.parallel () then begin
+    let m =
+      if compare then Off (Some "compare")
+      else if Indmerge.enabled () then Off (Some "merge-inductives")
+      else
+        try recording () with
+        | Sys.Break as e -> raise e
+        | Step_aside reason -> Off (Some reason)
+        | _ -> Off (Some "start failed")
+    in
+    mode := m
+  end
+
+(** {6 After the run} *)
+
+(* The one copy of [obj] that [shared] keeps, so that the records keep one
+   copy of each object they name, and two records of one value compare
+   physically ([same_objects]). *)
+let share shared obj =
+  match RefMap.find_opt obj !shared with
+  | Some obj -> obj
+  | None -> shared := RefMap.add obj obj !shared; obj
+
+exception Too_many_ids
+
+(* The frame at [ofs] in the segment [seg], and its size, where a whole one
+   is there. *)
+let next_frame seg ofs =
+  let left = Bytes.length seg - ofs in
+  if left < Marshal.header_size then None
+  else
+    match Marshal.total_size seg ofs with
+    | exception (Failure _ | Invalid_argument _) -> None
+    | size when size > left -> None
+    | size ->
+      match (Marshal.from_bytes seg ofs : frame) with
+      | exception (Failure _ | Invalid_argument _) -> None
+      | r -> Some (r, size)
+
+(* The records of the segment [seg], in order, for the constants and opaque
    values [values] of the checks, by number. A frame cut short, or one
    whose record or numbers are wrong, ends the segment: what follows it
    cannot be told apart from what it holds. So does a frame that names
-   first an object whose names do not end within the bound of
-   [Check_closure.finite_names], which is checked for each such object
-   before any of them is kept or compared ([share]); the objects it names
-   by number were checked with the frame that named them first. The
-   records read before it are whole, and kept. [decoded] counts the
-   numbers of objects decoded so far, in all the segments: one that would
-   take it past [id_cap] raises, and then no record is used. *)
-let read_segment records values decoded b =
+   first an object whose names are not finite ([CheckNames.finite_names]),
+   which is checked for each such object before any of them is kept or
+   compared ([share]); the objects it names by number were checked with
+   the frame that named them first. The records read before it are whole,
+   and kept. [decoded] counts the numbers of objects decoded so far, in all
+   the segments: one that would take it past [id_cap] raises
+   [Too_many_ids]. *)
+let read_segment records values shared decoded seg =
   let objects = ref [||] and known = ref 0 in
-  let add (r : record) =
+  let add (r : frame) =
     let n = Array.length r.defs in
     if n > 0 then begin
       if !known + n > Array.length !objects then begin
@@ -781,7 +719,7 @@ let read_segment records values decoded b =
         Array.blit !objects 0 a 0 !known;
         objects := a
       end;
-      Array.iteri (fun j obj -> (!objects).(!known + j) <- share records obj) r.defs;
+      Array.iteri (fun j obj -> (!objects).(!known + j) <- share shared obj) r.defs;
       known := !known + n
     end;
     if r.index < 0 || r.index >= Array.length values
@@ -789,60 +727,48 @@ let read_segment records values decoded b =
     then false
     else begin
       let count = !decoded + Array.length r.ids in
-      if count > id_cap then failwith "ReportRecords.read_segment";
+      if count > id_cap then raise Too_many_ids;
       decoded := count;
-      let objs = Array.fold_right (fun k objs -> (!objects).(k) :: objs) r.ids [] in
-      let kn, o = values.(r.index) in
-      add_record records kn o objs;
+      let kn, value = values.(r.index) in
+      add_record records kn { value; objects; ids = r.ids };
       true
     end
   in
   let rec frames ofs =
-    let left = Bytes.length b - ofs in
-    if left >= Marshal.header_size then
-      match Marshal.total_size b ofs with
-      | exception (Failure _ | Invalid_argument _) -> ()
-      | size when size > left -> ()
-      | size ->
-        match (Marshal.from_bytes b ofs : record) with
-        | exception (Failure _ | Invalid_argument _) -> ()
-        | r ->
-          if Array.for_all Check_closure.finite_names r.defs && add r then frames (ofs + size)
+    match next_frame seg ofs with
+    | Some (r, size) when Array.for_all CheckNames.finite_names r.defs && add r ->
+      frames (ofs + size)
+    | Some _ | None -> ()
   in
   frames 0
 
-(* The records of the segments of [b], in order, for the checks [checks],
-   latest first: none if the main process gave up, or if no worker left
-   any. The segments are taken out of the buffer before they are
-   decoded. *)
-let read_records b checks =
+(* The records of the segments of [m], in order: none if no worker left
+   any. *)
+let read_records m =
   let records = no_records () in
-  if b.whole && not (CList.is_empty b.segments) then begin
-    let values = Array.of_list (List.rev checks) and decoded = ref 0 in
-    let segments = List.rev b.segments in
-    b.segments <- [];
-    List.iter (read_segment records values decoded) segments
+  if not (CList.is_empty m.segments) then begin
+    let values = CArray.rev_of_list m.deferred
+    and shared = ref RefMap.empty and decoded = ref 0 in
+    List.iter (read_segment records values shared decoded) (List.rev m.segments)
   end;
   records
 
-(* Everything after the run that allocates is inside the handlers: any
-   failure but an interrupt leaves no record, and if even the empty
-   records cannot be made, [None], with which the report reads every body
-   as well. The buffer is dropped whatever happens. *)
 let collect () =
-  match !buffer with
-  | None -> None
-  | Some b ->
-    buffer := None;
-    let checks = !deferred in
-    deferred := [];
-    deferred_count := 0;
-    try Some (read_records b checks) with
+  match !mode with
+  | Off _ | Worker _ -> None
+  | Gave_up _ -> Some (no_records ())
+  | Recording m ->
+    mode := Off None;
+    try Some (read_records m) with
     | Sys.Break as e -> raise e
-    | _ ->
-      try Some (no_records ()) with
-      | Sys.Break as e -> raise e
-      | _ -> None
+    | Too_many_ids -> mode := Gave_up "id cap"; Some (no_records ())
+    | _ -> mode := Gave_up "read failure"; Some (no_records ())
+
+let status_line () =
+  match !mode with
+  | Off (Some reason) -> Some ("rocqchk: statement report: records off: " ^ reason)
+  | Gave_up reason -> Some ("rocqchk: statement report: records given up: " ^ reason)
+  | Off None | Recording _ | Worker _ -> None
 
 (* Test-only seam, in the style of [Check_closure]'s: a test sets this to a
    file, to which the main process writes "<hits> <reads>" after the

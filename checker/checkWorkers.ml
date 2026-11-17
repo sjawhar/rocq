@@ -641,13 +641,13 @@ let pr_batch b =
 
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
 
-(* A file created in [temp_dir], by default the temporary directory,
-   opened, then removed, so that nothing is left of it on disk once its
-   last descriptor is closed; [None] if it cannot be created or opened.
-   One that cannot be removed is still named: it is kept open all the same
-   if [named], and closed otherwise, so that there is none. *)
-let open_temp ~named ?temp_dir () =
-  match Filename.temp_file ?temp_dir "rocqchk" ".out" with
+(* A file created in [temp_dir], opened, then removed, so that nothing is
+   left of it on disk once its last descriptor is closed; [None] if it
+   cannot be created or opened. One that cannot be removed is still named:
+   it is kept open all the same if [keep_if_named], and closed otherwise,
+   so that there is none. *)
+let open_temp ~keep_if_named ~temp_dir =
+  match Filename.temp_file ~temp_dir "rocqchk" ".out" with
   | exception Sys_error _ -> None
   | name ->
     let fd =
@@ -656,13 +656,15 @@ let open_temp ~named ?temp_dir () =
     in
     match Sys.remove name with
     | () -> fd
-    | exception Sys_error _ -> if named then fd else (Option.iter close_fd fd; None)
+    | exception Sys_error _ -> if keep_if_named then fd else (Option.iter close_fd fd; None)
+
+let capture_dir () = Filename.get_temp_dir_name ()
 
 (* An unnamed file for what a worker prints: created, opened, then
    removed; one that cannot be removed is used all the same, named. *)
-let open_capture () = open_temp ~named:true ()
+let open_capture () = open_temp ~keep_if_named:true ~temp_dir:(capture_dir ())
 
-let open_unnamed ~temp_dir = open_temp ~named:false ~temp_dir ()
+let open_unnamed ~temp_dir = open_temp ~keep_if_named:false ~temp_dir
 
 (* The two files a worker prints to, or neither of them. *)
 let open_output () =
@@ -708,7 +710,7 @@ let worker_file_in_child file =
 
 (* A worker that failed or was killed: its file is closed, and nothing is
    told of it. *)
-let close_file w =
+let close_extra_file w =
   Option.iter close_fd w.file;
   w.file <- None
 
@@ -716,13 +718,13 @@ let close_file w =
    pipe ([close_report]): its output and its extra file. *)
 let close_files w =
   close_output w;
-  close_file w
+  close_extra_file w
 
 (* The worker [w] ended successfully: [done_ok] takes its file. *)
 let file_done w =
   match w.file, !worker_file with
   | Some fd, Some f -> w.file <- None; f.done_ok fd
-  | _ -> close_file w
+  | _ -> close_extra_file w
 
 (* The descriptors [deal] has opened for batches it has not forked yet. *)
 let prepared_fds : Unix.file_descr list ref = ref []
@@ -1201,49 +1203,32 @@ let deal ?(walk = false) k size =
            batches)
 
 (* The descriptors that the main process may hold at once for its workers,
-   each given [extra_per_worker] files of a client's ([set_worker_file]),
    with room for the rest of the run. At most [jobs ()] workers are alive
    at once, counting the batches that [deal] has prepared and not forked
    yet: [dispatch] and [finish] deal no more batches than there are free
    slots, and the slot of the worker of [validate_tables] is kept for it.
-   Each worker holds, from the moment its batch is prepared until it is
-   reaped, at most [4 + extra_per_worker]: the two ends of its report pipe,
-   its two output files and its extra files. The peak is in [deal], which
-   opens the first four of every batch it prepares before it forks any;
-   [spawn] then opens the extra files while the write end of the report is
-   still open, and closes that end right after the fork. The 1 is the file
-   of progress of the worker of [validate_tables], which the main process
-   opens before that worker is forked and keeps after it has ended; the 64
-   leave room for the library files the main process opens. *)
-let descriptors_for_workers ~extra_per_worker =
-  (4 + extra_per_worker) * jobs () + 1 + 64
+   Each holds, from the moment its batch is prepared until it is reaped, at
+   most 5: the two ends of its report pipe, its two output files ([deal]
+   opens these four for every batch it prepares before it forks any), and
+   its extra file ([spawn], while the write end of the report is still
+   open). The 1 is the file of progress of the worker of [validate_tables],
+   which the main process keeps after that worker has ended; the 64 leave
+   room for the library files the main process opens. *)
+let descriptors_for_workers () = 5 * jobs () + 1 + 64
 
 (* The open files that the main process and its workers may hold at once,
-   each worker given [extra_per_worker] files of a client's
-   ([set_worker_file]), as the system's table of open files counts them
-   (/proc/sys/fs/file-nr): each open file once, however many descriptors
-   of however many processes name it. So the descriptors that a worker
-   inherits by the fork, or makes with [dup2] ([run_worker]), add none,
-   but a file a worker opens itself takes a place there, and none among
-   the descriptors of the main process ([descriptors_for_workers]). As
-   there, at most [jobs ()] workers are alive at once, the worker of
-   [validate_tables] among them. Each holds, from the moment its batch is
-   prepared until it is reaped, at most [5 + extra_per_worker]: the two
-   ends of its report pipe, which are two open files ([deal] or [spawn],
-   [Unix.pipe]); its two output files ([deal] or [spawn], [open_output]);
-   the library file it opens while it reads a table
-   (CheckLibrary.read_opaque_table, [open_in_bin]), which it closes before
-   it reads another; and its extra files ([spawn], [open_worker_file]).
-   The worker of [validate_tables] holds the same, but for the extra file,
-   which its batch, of reads of tables alone, does not get ([spawn]): it
-   is counted with one all the same. The first 1 is the library file the
-   main process reads, one at a time (CheckLibrary.intern_from_file and
-   CheckLibrary.read_opaque_table); the second, the file of progress of
-   the worker of [validate_tables] ([validate_tables], [open_capture]);
-   the 64, the room that [descriptors_for_workers] leaves for the rest of
-   the run. *)
-let open_files_for_workers ~extra_per_worker =
-  (5 + extra_per_worker) * jobs () + 1 + 1 + 64
+   as the system's table of open files counts them: each open file once,
+   however many descriptors of however many processes name it, so the
+   descriptors a worker inherits or makes with [dup2] ([run_worker]) add
+   none. Each of the at most [jobs ()] workers holds at most 6: the 5 of
+   [descriptors_for_workers] (the worker of [validate_tables] has no extra
+   file, and is counted with one all the same), and the library file it
+   opens while it reads a table (CheckLibrary.read_opaque_table), which it
+   closes before it reads another. The first 1 is the library file the main
+   process reads, one at a time; the second, the file of progress of the
+   worker of [validate_tables]; the 64, the room of
+   [descriptors_for_workers]. *)
+let open_files_for_workers () = 6 * jobs () + 1 + 1 + 64
 
 (* Hands out the batches a new job makes possible, at most once every
    [window] seconds. *)
@@ -1378,7 +1363,7 @@ let finish () =
   if !max_workers > 0 then begin
     (* The main process checks nothing from now on, so one more worker
        can run. *)
-    let slots = !max_workers + 1 in
+    let slots = jobs () in
     (* A worker that stops early, or releases a tail, queues checks again,
        so the queue is only known to be empty when no worker is left. *)
     while not (Queue.is_empty queue) || not (CList.is_empty !running) do

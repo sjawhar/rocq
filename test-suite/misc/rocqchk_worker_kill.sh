@@ -38,7 +38,8 @@
 # request file of one line, with which each worker that checks a proof
 # also records its objects to a file of its own, where the conditions of
 # ReportRecords.start hold (checker/reportRecords.ml): the same lines and
-# the same exit code are asked of both runs.
+# the same exit code are asked of both runs, and the second must print no
+# report.
 set -eu
 : "${BIN:=$(dirname "$(command -v rocq)")/}"
 export PATH="$BIN:$PATH"
@@ -219,5 +220,8 @@ kill_case kill
 # closed with no copy, and the run fails as above, with no report.
 echo 'l1 WKill.Lib.l1 -' > "$d/kill.req"
 kill_case kill-report -statement-report "$d/kill.req"
+if grep -q 'STATEMENT REPORT' "$d/kill-report.log"; then
+  cat "$d/kill-report.log" >&2; fail "kill-report: rocqchk printed a report after a worker was killed"
+fi
 
 exit 0

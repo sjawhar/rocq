@@ -119,21 +119,24 @@ let cache_size = 1 lsl 18
 
 (* The node last walked at each slot, and the generation it was walked in.
    Each walk takes a new generation ([fresh_gen]), so that it sees no entry
-   of another. The slots the current generation wrote are noted too, the
-   first [touched_count] of [touched], so that [forget] can empty them. *)
+   of another. Where [noting], the slots the current generation wrote are
+   noted too, the first [touched_count] of [touched], so that [forget] can
+   empty them: only the cache of [opaque_body_refs] needs that. *)
 type walk_cache = {
   keys : Constr.t array;
   gens : int array;
   mutable gen : int;
+  noting : bool;
   touched : int array;
   mutable touched_count : int;
 }
 
-let walk_cache () = {
+let walk_cache ~noting = {
   keys = Array.make cache_size Constr.mkProp;
   gens = Array.make cache_size (-1);
   gen = 0;
-  touched = Array.make cache_size 0;
+  noting;
+  touched = (if noting then Array.make cache_size 0 else [||]);
   touched_count = 0;
 }
 
@@ -149,7 +152,7 @@ let seen cache gen c =
   let g = cache.gens.(i) in
   if Int.equal g gen && cache.keys.(i) == c then true
   else begin
-    if not (Int.equal g gen) then begin
+    if cache.noting && not (Int.equal g gen) then begin
       cache.touched.(cache.touched_count) <- i;
       cache.touched_count <- cache.touched_count + 1
     end;
@@ -332,127 +335,49 @@ let refs_to_list (public, implementation) =
   List.map (fun obj -> Public, obj) (GlobRef.Set_env.elements public)
   @ List.map (fun obj -> Implementation, obj) (GlobRef.Set_env.elements implementation)
 
-(* The walk keeps its own list of terms to visit, so its depth does not depend
-   on the depth of the terms. A term retains the declaration view that typed
-   it. The inductive of a [match] and of a projection, and the primitive type
-   of a literal or an array, are objects the term relies on even though no
-   subterm names them. [add] adds each object to [refs]: [add_ref], but for
-   [opaque_body_refs], which checks the object's names first. *)
-let rec walk add env cache gen refs = function
-  | [] -> refs
-  | (view, c) :: todo ->
-    let open Constr in
-    let retro = Environ.retroknowledge env in
-    match kind c with
-    | Rel _ | Var _ | Sort _ | Meta _ | Evar _ -> walk add env cache gen refs todo
-    | Int _ ->
-      walk add env cache gen (add_prim add view retro.Retroknowledge.retro_int63 refs) todo
-    | Float _ ->
-      walk add env cache gen (add_prim add view retro.Retroknowledge.retro_float64 refs) todo
-    | String _ ->
-      walk add env cache gen (add_prim add view retro.Retroknowledge.retro_string refs) todo
-    | Const (kn, _) -> walk add env cache gen (add view (GlobRef.ConstRef kn) refs) todo
-    | Ind ((mind, _), _) | Construct (((mind, _), _), _) ->
-      walk add env cache gen (add_mind add view mind refs) todo
-    | Cast _ | Prod _ | Lambda _ | LetIn _ | App _ | Proj _ | Case _ | Fix _ | CoFix _ | Array _ ->
-      if seen cache gen c then walk add env cache gen refs todo
-      else
-        let refs = match kind c with
-          | Case (ci, _, _, _, _, _, _) -> add_mind add view (fst ci.ci_ind) refs
-          | Proj (p, _, _) -> add_mind add view (Projection.mind p) refs
-          | Array _ -> add_prim add view retro.Retroknowledge.retro_array refs
-          | _ -> refs
-        in
-        walk add env cache gen refs (fold (fun todo c -> (view, c) :: todo) todo c)
-
-(** {6 Finite names}
-
-    A library file can hold a name that has no end: a module path whose
-    parent is itself, or a directory path whose list loops, as the validator
-    lets cyclic values through ([val_gen] in checker/validate.ml). Two
-    copies of such a name, equal at every depth but not the same value,
-    compare for ever: [ModPath.compare], [DirPath.compare] and their [equal]
-    recurse, and stop early only on the same value. A check that passes can
-    leave such a name in a body, as a canonical name: the kernel reads both
-    names of the first leaf of each user name it types, and takes the later
-    leaves of that user name from its cache ([HConstr]), whose canonical
-    names it never reads; nor does the report's walk, which compares objects
-    by their user names. The records copy names ([Marshal]) and compare
-    them, canonical names included ([RefMap] in reportRecords.ml), so each
-    object that a record names is first checked here, before it is compared
-    with any other: in the worker, by the walk that finds it
-    ([opaque_body_refs]); in the main process, as its record is decoded
-    ([ReportRecords]). *)
-
-(* The steps that [finite_names] may take for one kernel name. A step is a
-   module of its module path ([MPdot]), the root of that path ([MPfile] or
-   [MPbound]), or an identifier of the directory path at that root; the
-   user name and the canonical name of a constant or an inductive each
-   have this bound. A name that coqc writes takes a step for each module
-   its declaration is nested in and for each identifier of its library's
-   logical path, or of the directory path of the functor parameter it is
-   declared under: a few tens at most, so that 4096 is far above any. A
-   cycle, of modules or in the list of a directory path, goes on past any
-   bound, and so does a chain longer than the bound: either fails. *)
-let name_steps = 4096
-
-(* [n] less a step for each identifier of [l], or [-1] once that would go
-   below 0: at most [n + 1] calls, whatever [l] is. *)
-let rec dirpath_left n = function
-  | [] -> n
-  | _ :: l -> if n <= 0 then -1 else dirpath_left (n - 1) l
-
-(* [n] less the steps of the module path [mp], or [-1] once that would go
-   below 0: at most [n + 1] calls, whatever [mp] is. *)
-let rec modpath_left n mp =
-  if n <= 0 then -1
-  else match mp with
-    | ModPath.MPfile dp -> dirpath_left (n - 1) (DirPath.repr dp)
-    | ModPath.MPbound mbid ->
-      let _, _, dp = MBId.repr mbid in
-      dirpath_left (n - 1) (DirPath.repr dp)
-    | ModPath.MPdot (mp, _) -> modpath_left (n - 1) mp
-
-(* The kernel names found finite so far in this process: at each slot, the
-   last one found there, or [no_kernel_name]. A name's slot is picked by
-   the hash it carries ([KerName.hash]), which is read, not computed, and
-   the name is taken as finite without a walk only where the slot holds
-   that very value ([==]): that value's module path was walked to its end
-   within [name_steps], and a name never changes, so it still ends there.
-   Names are compared physically only, so names that share a hash, as a
-   forged library can make them all do, only take each other's slot, and
-   are walked again. The occurrences of a constant in a body usually share
-   its name, which is then walked once, and again only after another name
-   took its slot, instead of at each occurrence. Nothing empties the
-   cache, and nothing needs to: it holds names, which never change, and
-   keeps alive at most [finite_slots] of them, each of which ends within
-   the bound. A worker inherits the cache of the main process with its
-   memory, where the names in it are the same values. *)
-let finite_slots = 4096
-
-let no_kernel_name = KerName.make ModPath.dummy (Id.of_string "dummy")
-
-let finite_kernel_names = Array.make finite_slots no_kernel_name
-
-let finite_kernel_name kn =
-  let i = KerName.hash kn land (finite_slots - 1) in
-  finite_kernel_names.(i) == kn
-  || (modpath_left name_steps (KerName.modpath kn) >= 0
-      && (finite_kernel_names.(i) <- kn; true))
-
-let finite_names = function
-  | GlobRef.VarRef _ -> true
-  | GlobRef.ConstRef c ->
-    finite_kernel_name (Constant.user c) && finite_kernel_name (Constant.canonical c)
-  | GlobRef.IndRef (mind, _) | GlobRef.ConstructRef ((mind, _), _) ->
-    finite_kernel_name (MutInd.user mind) && finite_kernel_name (MutInd.canonical mind)
+(* The objects that the terms [todo] mention, each added with [add]:
+   [add_ref], but for [opaque_body_refs], which checks the object's names
+   first. The walk takes a new generation of [cache], and keeps its own
+   list of terms to visit, so its depth does not depend on the depth of the
+   terms. A term retains the declaration view that typed it. The inductive
+   of a [match] and of a projection, and the primitive type of a literal or
+   an array, are objects the term relies on even though no subterm names
+   them. *)
+let walk add env cache todo =
+  let gen = fresh_gen cache in
+  let retro = Environ.retroknowledge env in
+  let rec go refs = function
+    | [] -> refs
+    | (view, c) :: todo ->
+      let open Constr in
+      match kind c with
+      | Rel _ | Var _ | Sort _ | Meta _ | Evar _ -> go refs todo
+      | Int _ -> go (add_prim add view retro.Retroknowledge.retro_int63 refs) todo
+      | Float _ -> go (add_prim add view retro.Retroknowledge.retro_float64 refs) todo
+      | String _ -> go (add_prim add view retro.Retroknowledge.retro_string refs) todo
+      | Const (kn, _) -> go (add view (GlobRef.ConstRef kn) refs) todo
+      | Ind ((mind, _), _) | Construct (((mind, _), _), _) ->
+        go (add_mind add view mind refs) todo
+      | Cast _ | Prod _ | Lambda _ | LetIn _ | App _ | Proj _ | Case _ | Fix _ | CoFix _ | Array _ ->
+        if seen cache gen c then go refs todo
+        else
+          let refs = match kind c with
+            | Case (ci, _, _, _, _, _, _) -> add_mind add view (fst ci.ci_ind) refs
+            | Proj (p, _, _) -> add_mind add view (Projection.mind p) refs
+            | Array _ -> add_prim add view retro.Retroknowledge.retro_array refs
+            | _ -> refs
+          in
+          go refs (fold (fun todo c -> (view, c) :: todo) todo c)
+  in
+  go empty_refs todo
 
 exception Name_not_finite
 
-(* [add_ref] for an object whose names are finite, checked before
-   [GlobRef.Set_env.add] compares them with those of any other object. *)
+(* [add_ref] for an object whose names are finite
+   ([CheckNames.finite_names]), checked before [GlobRef.Set_env.add]
+   compares them with those of any other object. *)
 let add_finite view obj refs =
-  if finite_names obj then add_ref view obj refs else raise Name_not_finite
+  if CheckNames.finite_names obj then add_ref view obj refs else raise Name_not_finite
 
 (* The objects [walk] adds for the term [c] alone, in one view: the walk
    itself, so that the two cannot drift apart. A walk that starts from a
@@ -471,21 +396,22 @@ let add_finite view obj refs =
    prints them, by their user names only ([GlobRef.Map_env],
    [Environ.lookup_constant], [Constant.to_string]).
 
-   Each object is checked before it is added, and so before it is compared
-   with any other ([add_finite]): the first one whose names are not finite
-   ends the walk, and the body has no objects to record, [None].
+   The first object whose names are not finite ends the walk, and the body
+   has no objects to record, [None].
 
-   The cache of these walks is the process's own, made at its first call:
-   three arrays of [cache_size] words, 6 MiB on a 64-bit machine, in each
-   worker that records. Each call takes a new generation of it, so that no
-   call sees the entries of another, and empties the slots it wrote once it
-   is done ([forget]): a worker checks one body after another, and the
-   cache would otherwise keep the last body it walked alive. *)
-let body_walk_cache = lazy (walk_cache ())
+   The cache of these walks, 6 MiB on a 64-bit machine, is made once:
+   [prepare_opaque_body_refs] makes it in the main process before any
+   worker is forked, so that the workers share it until they write to it.
+   Each call empties the slots it wrote once it is done ([forget]): a
+   worker checks one body after another, and the cache would otherwise keep
+   the last body it walked alive. *)
+let body_walk_cache = lazy (walk_cache ~noting:true)
+
+let prepare_opaque_body_refs () = ignore (Lazy.force body_walk_cache)
 
 let opaque_body_refs env c =
   let cache = Lazy.force body_walk_cache in
-  match walk add_finite env cache (fresh_gen cache) empty_refs [Public, c] with
+  match walk add_finite env cache [Public, c] with
   | public, _ -> forget cache; Some (GlobRef.Set_env.elements public)
   | exception Name_not_finite -> forget cache; None
   | exception e ->
@@ -562,9 +488,9 @@ let constant_node st view kn =
        body unreadable. Then a body that a check recorded is not read: the
        walk of the type alone, with the recorded objects added in the
        declaration's view, makes the same references as the walk of the type
-       and the body ([opaque_body_refs]). The names of the recorded objects
-       are finite: the main process checked them as it decoded them
-       ([finite_names]), before any was compared. *)
+       and the body ([opaque_body_refs]). The main process checked the
+       names of the recorded objects as it decoded them
+       ([CheckNames.finite_names]), before any was compared. *)
     let body, recorded, axiom = match cb.const_body with
       | Def c -> [declaration_view, c], [], false
       | OpaqueDef o ->
@@ -578,8 +504,7 @@ let constant_node st view kn =
            [], [], true)
       | Undef _ | Primitive _ | Symbol _ -> [], [], true
     in
-    let refs = walk add_ref st.env st.cache (fresh_gen st.cache) empty_refs
-        ((declaration_view, cb.const_type) :: body) in
+    let refs = walk add_ref st.env st.cache ((declaration_view, cb.const_type) :: body) in
     let refs = List.fold_left (fun refs obj -> add_ref declaration_view obj refs) refs recorded in
     { refs = refs_to_list refs; axiom;
       flags = typing_flags (GlobRef.ConstRef kn) cb.const_typing_flags [] }
@@ -594,7 +519,7 @@ let mind_node st view mind =
             (Array.fold_left (fun todo c -> (declaration_view, c) :: todo) todo mip.mind_user_lc))
         (push_context declaration_view mib.mind_params_ctxt []) mib.mind_packets
     in
-    let refs = walk add_ref st.env st.cache (fresh_gen st.cache) empty_refs todo in
+    let refs = walk add_ref st.env st.cache todo in
     Array.iter (fun mip ->
         if not (CheckNames.valid_id mip.mind_typename) then
           CErrors.user_err
@@ -835,7 +760,7 @@ let no_record _ _ = None
 let new_state ?(recorded = no_record) env access = {
   env; access; recorded; fields = ModPath.Map.empty;
   public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
-  cache = walk_cache ();
+  cache = walk_cache ~noting:false;
 }
 
 let print ?recorded env access requests =

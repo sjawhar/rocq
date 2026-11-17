@@ -899,15 +899,20 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   (4,194,304) opaque proofs to check; until then it keeps an entry for
   each of those, at most 192 MiB. What the main process decodes from the
   records, at most 32 Mi objects for at most 4 Mi proofs, takes besides up
-  to 1,376 MiB: a list cell for each object named, 768 MiB; the records
-  and the map that finds them by name, 576 MiB; and an array of the
-  proofs, 32 MiB. With the 512 MiB and the 192 MiB above, that is
-  2,080 MiB in all. These figures are estimates for a 64-bit machine, from
-  the data that ``rocqchk`` keeps. Beyond them, the main process keeps a
-  copy of each object that the records name, which the objects that the
-  libraries declare bound, not a cap, and each worker that records keeps
-  a cache of 6 MiB. Libraries within these bounds can make ``rocqchk`` use
-  more memory with the records than without them: for instance, many
+  to 928 MiB: the numbers of the objects that each record names, 288 MiB;
+  the records and the map that finds them by name, 608 MiB; and an array
+  of the proofs, 32 MiB. With the 512 MiB and the 192 MiB above, that is
+  1,632 MiB in all. The main process also keeps one copy of each object
+  that the records name: at most one for each object number it decodes,
+  so at most 32 Mi, and fewer in fact, as each copy takes at least some
+  14 bytes of the 256 MiB it copies, which leaves room for about 19 Mi of
+  them. Each takes about 120 bytes or more, with its entries in the arrays
+  and the map that decoding uses, so up to about 2 GiB more. Before the
+  first worker starts, the main process also makes a cache of 6 MiB, which
+  each worker that records copies in part, as it writes to it. These
+  figures are estimates for a 64-bit machine, from the data that
+  ``rocqchk`` keeps. Libraries within these bounds can make ``rocqchk``
+  use more memory with the records than without them: for instance, many
   opaque proofs that each name many objects, which the report does not
   reach, are recorded all the same. A limit on the size of files
   (``ulimit -f``) that the records meet costs only records: such a write
@@ -924,11 +929,14 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   take no room on a file system that ``rocqchk`` writes to without them,
   and a full ``/dev/shm`` only stops recording; or where the limit on open
   files (``ulimit -n``), less the files already open as ``rocqchk``
-  starts, is below ``5 n + 65`` with ``-j n``; or where the room left in
-  the system's table of open files, which counts as well the files that
-  the workers open themselves, is below ``6 n + 66``; or where
-  ``rocqchk`` cannot read that limit from ``/proc/self/limits``, those
-  files from ``/proc/self/fd``, or that room from
+  starts, is below ``5 n + 65`` with ``-j n``; or where the files already
+  open, plus ``5 n + 65``, are more than 1,024 (``FD_SETSIZE``): the main
+  process waits for its workers with ``select``, which takes no file
+  numbered 1,024 or more, and the records add a file for each worker; or
+  where the room left in the system's table of open files, which counts as
+  well the files that the workers open themselves, is below ``6 n + 66``;
+  or where ``rocqchk`` cannot read that limit from ``/proc/self/limits``,
+  those files from ``/proc/self/fd``, or that room from
   ``/proc/sys/fs/file-nr``: without that file, as where a sandbox hides
   it, the room in the system's table cannot be known. In all these
   cases the report reads the proofs as it does without ``-j``. Where
@@ -939,6 +947,64 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   Other processes that fill the system's table of open files while
   ``rocqchk`` runs can make it fail, with or without records: no check at
   its start can foresee them.
+
+  Where ``-j`` starts workers but the records are not used, ``rocqchk``
+  prints one line on its standard error, just before the report, outside
+  the report and the summary of ``-o``:
+
+  .. code-block:: text
+
+     rocqchk: statement report: records off: REASON
+     rocqchk: statement report: records given up: REASON
+
+  The first form says that nothing was recorded, the second that the main
+  process gave up recording after it started; either way the report read
+  every proof it reached, as it does without ``-j``. There is no such line
+  where the records were used, without ``-j``, or without
+  ``-statement-report``. The two forms and their reasons are a stable
+  interface: a program may read them to tell whether a run took the
+  references of the proofs from the records. The reasons of
+  ``records off`` are:
+
+  - ``compare``, ``merge-inductives``: the run has ``-compare``, or
+    ``-merge-inductives`` or ``-merge-inductives-verbose``;
+  - ``no /dev/shm``: ``/dev/shm`` does not exist, cannot be looked at, or
+    is not a directory;
+  - ``/dev/shm writable by others``: other users can write to
+    ``/dev/shm``, and it does not have the sticky bit;
+  - ``/dev/shm not writable``: ``rocqchk`` cannot create files in
+    ``/dev/shm``;
+  - ``no /proc/self/fd``: ``rocqchk`` cannot list, or look at, the files
+    it holds open;
+  - ``descriptor on /dev/shm``: one of those files is on the file system of
+    ``/dev/shm``;
+  - ``TMPDIR on /dev/shm``: ``TMPDIR`` is on that file system;
+  - ``no /proc/self/limits``: ``rocqchk`` cannot read its limit on open
+    files;
+  - ``no room for descriptors``: that limit, less the files open, is below
+    ``5 n + 65``;
+  - ``FD_SETSIZE``: the files open, plus ``5 n + 65``, are more than 1,024;
+  - ``no file-nr``: ``/proc/sys/fs/file-nr`` does not exist, cannot be
+    read, or does not hold three numbers;
+  - ``no room in file table``: the room it gives is below ``6 n + 66``;
+  - ``start failed``: anything else failed as the records were set up.
+
+  The reasons of ``records given up`` are:
+
+  - ``deferred cap``: the main process gave the workers more than 4 Mi
+    opaque proofs to check;
+  - ``defer failure``: it could not note an opaque proof it gave a worker;
+  - ``file failure``: it could not make, or could not remove, the file of a
+    worker in ``/dev/shm``;
+  - ``buffer cap``: the records it copied would pass 256 MiB, and
+    ``buffer cap (test)`` where a test of the test suite lowered that cap;
+  - ``copy failure``: it could not copy the file of a worker;
+  - ``id cap``: the records name more than 32 Mi objects in all;
+  - ``read failure``: it could not decode the records.
+
+  A worker that stops recording on its own, as when its file would pass its
+  cap or a write to that file fails, loses its own records only, and adds
+  no line: the report reads the proofs whose records are lost.
 
   The report is the same as without ``-j``, but for one case: a library
   file that changes or vanishes on disk while ``rocqchk`` runs can change

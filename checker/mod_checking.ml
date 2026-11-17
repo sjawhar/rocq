@@ -96,17 +96,6 @@ let indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ref
 
 let set_indirect_accessor f = indirect_accessor := f
 
-(* The statement report's recorder of checked opaque bodies ([ReportRecords];
-   see [set_opaque_check_hook]). Its first stage runs where the check of an
-   opaque is deferred, in the main process, so that the main process can
-   find that constant and that opaque again. Once installed, it stays: the
-   recorder decides itself, at each call, whether it records. *)
-let opaque_check_hook :
-  (Constant.t -> Opaqueproof.opaque -> (env -> Constr.t -> unit)) ref =
-  ref (fun _ _ _ _ -> ())
-
-let set_opaque_check_hook f = opaque_check_hook := f
-
 let register_opacified_constant env opac kn cb =
   let rec gather_consts s c =
     match Constr.kind c with
@@ -289,10 +278,11 @@ let check_constant_declaration env st kn cb =
        waits. The process that runs the check reads the table it needs
        ([CheckLibrary.indirect_accessor]), and a check handed back cooks
        again in the process that runs it. With -j 1, [defer] runs the
-       closure at once, so the order of effects is as before. The report's
-       recorder is told of the check here, and of its success by the check
-       itself ([opaque_check_hook]); by default neither does anything. *)
-    let checked = !opaque_check_hook kn o in
+       closure at once, so the order of effects is as before. The
+       statement report's recorder numbers the check here, and the check
+       tells it of its success ([ReportRecords.deferring]); where nothing is
+       recorded, neither does anything. *)
+    let checked = ReportRecords.deferring kn o in
     CheckWorkers.defer kn (fun () ->
         let c, env = cook o in
         check env c ();

@@ -124,14 +124,18 @@ val capture_available : unit -> bool
 (** Whether a worker can now be given the two files its output is kept
     in until it is printed. *)
 
+val capture_dir : unit -> string
+(** The directory in which the files of the workers' output are made: the
+    temporary directory (TMPDIR). *)
+
 val open_unnamed : temp_dir:string -> Unix.file_descr option
 (** An unnamed file, open for reading and writing: created in [temp_dir],
     opened, then removed, so that nothing is left of it on disk once its
     last descriptor is closed, as the files of the workers' output are
-    made in the temporary directory (TMPDIR). [None] if it cannot be made,
-    or cannot be removed: then its descriptor is closed, and the file, empty
-    and named, is left in [temp_dir]. Unlike this, a file of the workers'
-    output that cannot be removed is used all the same. *)
+    made in [capture_dir ()]. [None] if it cannot be made, or cannot be
+    removed: then its descriptor is closed, and the file, empty and named,
+    is left in [temp_dir]. Unlike this, a file of the workers' output that
+    cannot be removed is used all the same. *)
 
 val close_fd : Unix.file_descr -> unit
 (** Closes the descriptor, ignoring a Unix error. *)
@@ -145,8 +149,9 @@ type worker_file = {
   (** In each worker, right after the fork, before its first job: the
       file [open_file] gave for it, or [None] if it has none. *)
   done_ok : Unix.file_descr -> unit;
-  (** In the main process, once the worker has ended successfully, as
-      [finish] accepts it: its file, which [done_ok] must close. *)
+  (** In the main process, once the worker has ended successfully, when it
+      is reaped, in [dispatch] or [finish]: its file, which [done_ok] must
+      close. *)
 }
 
 val set_worker_file : worker_file -> unit
@@ -161,21 +166,21 @@ val set_worker_file : worker_file -> unit
     three may raise anything but [Sys.Break], and [in_child] nothing at
     all. *)
 
-val descriptors_for_workers : extra_per_worker:int -> int
+val descriptors_for_workers : unit -> int
 (** The descriptors that the main process may hold at once for the workers
-    that [-j] allows, each given [extra_per_worker] files more
-    ([set_worker_file]), with room for the library files it opens: a client
-    that gives workers files checks, before any is forked, that this many
-    are free below the limit on the descriptors of the process. *)
+    that [-j] allows, each with the one extra file of [set_worker_file],
+    with room for the library files it opens: a client that gives workers
+    files checks, before any is forked, that this many are free below the
+    limit on the descriptors of the process. *)
 
-val open_files_for_workers : extra_per_worker:int -> int
+val open_files_for_workers : unit -> int
 (** The open files that the main process and the workers that [-j] allows
     may hold at once, as the system's table of open files counts them
-    (/proc/sys/fs/file-nr), each worker given [extra_per_worker] files more:
-    besides the files of [descriptors_for_workers], those that the workers
-    open themselves, as a library's while a worker reads its table. A
-    client that gives workers files checks, before any is forked, that the
-    system's table has this many places left. *)
+    (/proc/sys/fs/file-nr), each worker with the one extra file of
+    [set_worker_file]: besides the files of [descriptors_for_workers], those
+    that the workers open themselves, as a library's while a worker reads
+    its table. A client that gives workers files checks, before any is
+    forked, that the system's table has this many places left. *)
 
 val validate_tables : (Names.DirPath.t * (unit -> unit)) list -> unit
 (** [validate_tables tables] starts one worker that runs each read, in

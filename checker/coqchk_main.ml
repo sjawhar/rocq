@@ -820,16 +820,16 @@ let run_compare env =
 let main () =
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
-  (* When to call [ReportRecords.start], and why: see reportRecords.mli. *)
-  if Option.has_some !statement_report && CheckWorkers.parallel ()
-     && Option.is_empty !compare_config && not (Indmerge.enabled ()) then
-    ReportRecords.start ();
+  (* When the records are used, and why: see reportRecords.mli. *)
+  if Option.has_some !statement_report then
+    ReportRecords.start ~compare:(Option.has_some !compare_config);
   let senv, opac = run senv in
   let env = Safe_typing.env_of_safe_env senv in
   (* Every worker has finished by now ([CheckWorkers.finish]): a failed run
      has exited. *)
   let records = ReportRecords.collect () in
   Option.iter (fun requests ->
+      Option.iter (fun line -> Feedback.msg_notice (str line)) (ReportRecords.status_line ());
       print_statement_report ?recorded:(Option.map ReportRecords.recorded records) env requests;
       Option.iter ReportRecords.test_counts records)
     !statement_report;
