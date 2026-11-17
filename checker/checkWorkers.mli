@@ -166,7 +166,16 @@ val descriptors_for_workers : extra_per_worker:int -> int
     that [-j] allows, each given [extra_per_worker] files more
     ([set_worker_file]), with room for the library files it opens: a client
     that gives workers files checks, before any is forked, that this many
-    are free. *)
+    are free below the limit on the descriptors of the process. *)
+
+val open_files_for_workers : extra_per_worker:int -> int
+(** The open files that the main process and the workers that [-j] allows
+    may hold at once, as the system's table of open files counts them
+    (/proc/sys/fs/file-nr), each worker given [extra_per_worker] files more:
+    besides the files of [descriptors_for_workers], those that the workers
+    open themselves, as a library's while a worker reads its table. A
+    client that gives workers files checks, before any is forked, that the
+    system's table has this many places left. *)
 
 val validate_tables : (Names.DirPath.t * (unit -> unit)) list -> unit
 (** [validate_tables tables] starts one worker that runs each read, in

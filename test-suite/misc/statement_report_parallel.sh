@@ -432,19 +432,26 @@ report() {
 
 # no_records_here: why rocqchk records nothing on this machine, by the
 # conditions of ReportRecords.start (coq-commands.rst) that this test can
-# see, or nothing where none of them holds. A run at -j 3 needs 80
-# descriptors free for the recorder to start: the count of
-# CheckWorkers.descriptors_for_workers ~extra_per_worker:1, whose formula
-# in checkWorkers.ml is (4 + extra_per_worker) * jobs () + 1 + 64, with
-# jobs () = 3 at -j 3, so (4 + 1) * 3 + 1 + 64 = 80. They must be free
-# below the soft limit on open files (ulimit -n) less the descriptors open,
-# which rocqchk counts in /proc/self/fd less the one of that listing
-# (ReportRecords.open_descriptors), as this test counts those of its
-# shell, which the runs below inherit; and in the system's table of open
-# files, by /proc/sys/fs/file-nr, without which rocqchk records nothing.
-# Cases (n) and (p) check the limit of a run less the descriptors open.
+# see, or nothing where none of them holds. No descriptor open may be on
+# the file system of /dev/shm: rocqchk looks at each one it lists in
+# /proc/self/fd, but the listing's own (ReportRecords.open_descriptors),
+# and this test at each one its shell holds, which the runs below
+# inherit. A run at -j 3 needs 80 descriptors free for the recorder to
+# start: the count of CheckWorkers.descriptors_for_workers
+# ~extra_per_worker:1, whose formula in checkWorkers.ml is
+# (4 + extra_per_worker) * jobs () + 1 + 64, with jobs () = 3 at -j 3, so
+# (4 + 1) * 3 + 1 + 64 = 80. They must be free below the soft limit on
+# open files (ulimit -n) less the descriptors open, which rocqchk counts in
+# /proc/self/fd less the one of that listing, as this test counts those of
+# its shell. The run needs besides 84 places left in the system's table of
+# open files, by /proc/sys/fs/file-nr, without which rocqchk records
+# nothing: the count of CheckWorkers.open_files_for_workers
+# ~extra_per_worker:1, whose formula is
+# (5 + extra_per_worker) * jobs () + 1 + 1 + 64, so
+# (5 + 1) * 3 + 1 + 1 + 64 = 84. Cases (n) and (p) check the limit of a
+# run less the descriptors open.
 no_records_here() {
-  local perm shm dir limit fds held allocated max
+  local perm shm dir limit self fds fd dev held allocated max
   if [ ! -d /dev/shm ] || [ ! -w /dev/shm ] || [ ! -x /dev/shm ]; then
     echo "/dev/shm is not a directory that rocqchk may create files in"; return
   fi
@@ -462,8 +469,20 @@ no_records_here() {
     echo "/proc/self/limits or /proc/self/fd cannot be read"; return
   fi
   limit=$(ulimit -Sn)
+  self=$BASHPID
   fds=(/proc/self/fd/*)
   held=$(( ${#fds[@]} - 1 ))
+  # Each descriptor by its number in this shell, as /proc/self names stat's
+  # own descriptors in stat; the listing's own is closed by now, and so
+  # skipped, as rocqchk skips its own.
+  for fd in "${fds[@]}"; do
+    fd=/proc/$self/fd/${fd##*/}
+    [ -e "$fd" ] || continue
+    dev=$(stat -L -c %d "$fd") || { echo "descriptor ${fd##*/} cannot be looked at"; return; }
+    if [ "$dev" = "$shm" ]; then
+      echo "descriptor ${fd##*/} is open on the file system of /dev/shm"; return
+    fi
+  done
   case $limit in
     unlimited) ;;
     ''|*[!0-9]*) echo "the limit on open files cannot be read"; return ;;
@@ -481,8 +500,8 @@ no_records_here() {
   case $allocated$max in
     ''|*[!0-9]*) echo "/proc/sys/fs/file-nr holds no numbers"; return ;;
   esac
-  if (( max - allocated < 80 )); then
-    echo "the system's table of open files has fewer than 80 places left"; return
+  if (( max - allocated < 84 )); then
+    echo "the system's table of open files has fewer than 84 places left"; return
   fi
 }
 

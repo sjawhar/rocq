@@ -882,19 +882,32 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   and its removal, as with the files that hold the output of the workers.
 
   The records take memory, as ``/dev/shm`` is a file system in memory, and
-  they are bounded. A worker records no more once its file would pass
-  64 MiB, or 256 MiB divided by *n* with ``-j n`` where that is less, so
-  that the files of the workers that run hold at most 256 MiB in all. If
-  the records copied into the main process would pass 256 MiB, or name more
-  than 32 Mi objects in all (counted with repetitions), none is used. So
-  the records take at most 512 MiB in all, besides a cache of 6 MiB (on a
-  64-bit machine) in each worker that records. The main process also stops
-  recording, and uses no record, where it cannot make the file of a
-  worker, or once it has given the workers more than 4 Mi (4,194,304)
-  opaque proofs to check. A limit on the size of files (``ulimit -f``)
-  that the records meet costs only records: such a write fails, instead of
-  killing ``rocqchk``, and the report reads the proofs whose records are
-  lost.
+  they are bounded, whatever the libraries hold. A worker records no more
+  once its file would pass 64 MiB, or 256 MiB divided by *n* with ``-j n``
+  where that is less, so that the files of the workers that run hold at
+  most 256 MiB in all. If the records copied into the main process would
+  pass 256 MiB, or name more than 32 Mi objects in all (counted with
+  repetitions), none is used. So the bytes of the records, in the files
+  still open and in the main process, take at most 512 MiB. The main
+  process also stops recording, and uses no record, where it cannot make
+  the file of a worker, or once it has given the workers more than 4 Mi
+  (4,194,304) opaque proofs to check; until then it keeps an entry for
+  each of those, at most 192 MiB. What the main process decodes from the
+  records, at most 32 Mi objects for at most 4 Mi proofs, takes besides up
+  to 1,376 MiB: a list cell for each object named, 768 MiB; the records
+  and the map that finds them by name, 576 MiB; and an array of the
+  proofs, 32 MiB. With the 512 MiB and the 192 MiB above, that is
+  2,080 MiB in all. These figures are estimates for a 64-bit machine, from
+  the data that ``rocqchk`` keeps. Beyond them, the main process keeps a
+  copy of each object that the records name, which the objects that the
+  libraries declare bound, not a cap, and each worker that records keeps
+  a cache of 6 MiB. Libraries within these bounds can make ``rocqchk`` use
+  more memory with the records than without them: for instance, many
+  opaque proofs that each name many objects, which the report does not
+  reach, are recorded all the same. A limit on the size of files
+  (``ulimit -f``) that the records meet costs only records: such a write
+  fails, instead of killing ``rocqchk``, and the report reads the proofs
+  whose records are lost.
 
   Nothing is recorded with ``-compare``, ``-merge-inductives`` or
   ``-merge-inductives-verbose``. Nor is anything recorded where
@@ -906,11 +919,13 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   take no room on a file system that ``rocqchk`` writes to without them,
   and a full ``/dev/shm`` only stops recording; or where the limit on open
   files (``ulimit -n``), less the files already open as ``rocqchk``
-  starts, or the room left in the system's table of open files, is below
-  ``5 n + 65`` with ``-j n``, or ``rocqchk`` cannot read that limit from
-  ``/proc/self/limits``, those files from ``/proc/self/fd``, or that room
-  from ``/proc/sys/fs/file-nr``: without that file, as where a sandbox
-  hides it, the room in the system's table cannot be known. In all these
+  starts, is below ``5 n + 65`` with ``-j n``; or where the room left in
+  the system's table of open files, which counts as well the files that
+  the workers open themselves, is below ``6 n + 66``; or where
+  ``rocqchk`` cannot read that limit from ``/proc/self/limits``, those
+  files from ``/proc/self/fd``, or that room from
+  ``/proc/sys/fs/file-nr``: without that file, as where a sandbox hides
+  it, the room in the system's table cannot be known. In all these
   cases the report reads the proofs as it does without ``-j``. Where
   ``rocqchk`` can make files in ``/dev/shm`` but not remove them, as in a
   sandbox that forbids removing files there, the one empty file it made

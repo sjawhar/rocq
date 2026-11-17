@@ -35,13 +35,14 @@
     Nothing here prints anything, and nothing here can fail a check or the
     run: the hook and the entry points raise nothing but an interrupt, and
     every failure falls back to reading the body. The records take bounded
-    room ([worker_file_cap], [buffer_cap], [id_cap], [deferred_cap]), a
-    write of a record past the limit on the size of a file fails instead of
-    killing the process ([write_all]), a write that fails gives back the
-    room its file took ([empty_file]), and nothing is recorded where the
-    files of the records would share a file system with a file rocqchk
-    writes without them, or where the descriptors they take could be ones
-    rocqchk needs without them ([start]). Whatever the library files hold,
+    room ([worker_file_cap], [buffer_cap], [id_cap], [deferred_cap], and
+    the sum after [id_cap]), a write of a record past the limit on the size
+    of a file fails instead of killing the process ([write_all]), a write
+    that fails gives back the room its file took ([empty_file]), and
+    nothing is recorded where the files of the records would share a file
+    system with a file rocqchk writes without them, or where the
+    descriptors and open files they take could be ones rocqchk needs
+    without them ([start]). Whatever the library files hold,
     finding the records of a body costs a lookup in a map ordered by names
     and a walk of the records of that name ([t]), and finding an object
     among those the records name, a lookup in such a map ([RefMap]).
@@ -265,13 +266,14 @@ let deferred_cap = 4 * 1024 * 1024
    ([CheckWorkers.jobs]) where that is less, so that the files of the
    workers alive hold at most [files_cap] in all, whatever [-j]: /dev/shm
    is memory. The segment that the main process copies from a file is that
-   file, and the buffer holds at most [default_buffer_cap]. So the records
-   take at most 512 MiB in all, in /dev/shm and in the main process. On a
-   tree of 4,190 libraries they took 48 MB in all, so these leave a wide
-   margin above it. What the decoding keeps in memory is bounded apart
-   ([id_cap]), and so is the cache of the walk that makes the records
-   ([Check_closure.opaque_body_refs]), 6 MiB in each worker that records,
-   on a 64-bit machine. *)
+   file, and the buffer holds at most [default_buffer_cap]. So the bytes of
+   the records take at most 512 MiB in all, in the files still open in
+   /dev/shm and in the main process. On a tree of 4,190 libraries they
+   took 48 MB in all, so these leave a wide margin above it. What the main
+   process makes of those bytes as it decodes them is bounded apart, and
+   takes more ([id_cap], and the sum below it); so is the cache of the
+   walk that makes the records ([Check_closure.opaque_body_refs]), 6 MiB
+   in each worker that records, on a 64-bit machine. *)
 let max_file_cap = 64 * 1024 * 1024
 let files_cap = 256 * 1024 * 1024
 let default_buffer_cap = 256 * 1024 * 1024
@@ -317,7 +319,28 @@ let id_cap = 32 * 1024 * 1024
    keep from one check to the next, in /dev/shm and in memory. Each record
    that the main process decodes adds to [bodies] a cell and a pair, and
    to the map at most one entry; each check makes one record at most, so
-   that the deferred checks bound these too. *)
+   that the deferred checks bound these too.
+
+   At the caps, then, by an estimate on a 64-bit machine, where a word
+   takes 8 bytes and a block one word besides its fields, the decoded
+   records keep: the cells of the lists of objects, 768 MiB ([id_cap]);
+   for each of at most [deferred_cap] records, a pair and a cell in
+   [bodies], 48 bytes, and at most two nodes of the map, of six words
+   each, one in the map of the hashes and one in a map of the names
+   ([HMap], whose maps are those of the standard library), 96 bytes, so
+   192 MiB and 384 MiB; and the array of the checks, a word for each
+   ([read_records], [values]), 32 MiB, whose pairs are those of
+   [deferred]. That is 1,376 MiB, besides the 512 MiB of the bytes of the
+   records and the 192 MiB of [deferred]. Besides these too: while
+   [values] is made, a reversed copy of the cells of [deferred], 96 MiB;
+   and one copy of each object the records name ([share]), with its entry
+   in [shared] and in the array of the objects of a segment
+   ([read_segment]), which the objects that exist bound, not a cap. These
+   bounds hold whatever the libraries hold, and libraries within them can
+   make the main process take more memory than without records: the [n]
+   constants above, whose bodies share one stored proof that the report
+   does not reach, make it keep their records, where without them it keeps
+   nothing of those bodies. *)
 
 (* A record. [index] is the number of its check. Each file numbers the
    objects its records name, 0, 1, ... in the order they are first
@@ -670,19 +693,25 @@ let system_room need =
     && Int64.unsigned_compare (Int64.sub size allocated) (Int64.of_int need) >= 0
   | _ -> failwith "ReportRecords.system_room"
 
-(* Whether the descriptors the workers may need with their files of
-   records ([CheckWorkers.descriptors_for_workers], one file each) fit
-   below the soft limit on open files less the [held] descriptors this
-   process already holds, and in the system's table of open files. The
+(* Whether the files the workers may need with their files of records, one
+   each, fit: below the soft limit on open files less the [held]
+   descriptors this process already holds, the descriptors of this process
+   ([CheckWorkers.descriptors_for_workers]); and in the system's table of
+   open files ([system_room]), the open files of this process and of its
+   workers ([CheckWorkers.open_files_for_workers]). The two counts differ:
+   the limit is on the descriptors of this process alone, and a file that
+   a worker opens itself, as a library's while it reads its table, takes a
+   place in the system's table and no descriptor of this process. The
    descriptors held already, those inherited and those rocqchk opened
    before the libraries are loaded, are not free for any of these: so the
    room is the limit less them, not the limit. Under less room, a
-   descriptor the recorder took could be the one a later pipe, file of
-   output or library load needs, which would then fail where it succeeds
-   without records. Fails if the limit or the table cannot be read. *)
+   descriptor or an open file the recorder took could be the one a later
+   pipe, file of output or library load needs, in this process or in a
+   worker, which would then fail where it succeeds without records. Fails
+   if the limit or the table cannot be read. *)
 let room_for_files held =
-  let need = CheckWorkers.descriptors_for_workers ~extra_per_worker:1 in
-  open_files_limit () - held >= need && system_room need
+  open_files_limit () - held >= CheckWorkers.descriptors_for_workers ~extra_per_worker:1
+  && system_room (CheckWorkers.open_files_for_workers ~extra_per_worker:1)
 
 (* The conditions of coq-commands.rst that [start] checks itself (its
    caller checks the others: see reportRecords.mli). [records_dir] is a

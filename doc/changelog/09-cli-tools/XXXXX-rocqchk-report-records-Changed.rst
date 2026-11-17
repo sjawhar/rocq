@@ -2,8 +2,12 @@
   With ``-j n``, ``rocqchk -statement-report`` takes the references of
   each opaque proof that a worker checked from that worker, which records
   them as it checks the proof, instead of reading and walking each of
-  those proofs again in the main process. The records take at most
-  512 MiB of memory, in ``/dev/shm`` and then in the main process; nothing
+  those proofs again in the main process. The records take bounded
+  memory, whatever the libraries hold: at most 512 MiB for their bytes, in
+  ``/dev/shm`` and then in the main process, and about 1.5 GiB more in the
+  main process as it keeps track of them and decodes them (on a 64-bit
+  machine, besides a copy of each object they name); libraries within
+  those bounds can make ``rocqchk`` use more memory than before. Nothing
   is recorded with ``-compare`` or ``-merge-inductives``, nor where the
   records would share a file system with a file ``rocqchk`` writes, or
   take open files it may need.

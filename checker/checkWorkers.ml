@@ -1218,6 +1218,33 @@ let deal ?(walk = false) k size =
 let descriptors_for_workers ~extra_per_worker =
   (4 + extra_per_worker) * jobs () + 1 + 64
 
+(* The open files that the main process and its workers may hold at once,
+   each worker given [extra_per_worker] files of a client's
+   ([set_worker_file]), as the system's table of open files counts them
+   (/proc/sys/fs/file-nr): each open file once, however many descriptors
+   of however many processes name it. So the descriptors that a worker
+   inherits by the fork, or makes with [dup2] ([run_worker]), add none,
+   but a file a worker opens itself takes a place there, and none among
+   the descriptors of the main process ([descriptors_for_workers]). As
+   there, at most [jobs ()] workers are alive at once, the worker of
+   [validate_tables] among them. Each holds, from the moment its batch is
+   prepared until it is reaped, at most [5 + extra_per_worker]: the two
+   ends of its report pipe, which are two open files ([deal] or [spawn],
+   [Unix.pipe]); its two output files ([deal] or [spawn], [open_output]);
+   the library file it opens while it reads a table
+   (CheckLibrary.read_opaque_table, [open_in_bin]), which it closes before
+   it reads another; and its extra files ([spawn], [open_worker_file]).
+   The worker of [validate_tables] holds the same, but for the extra file,
+   which its batch, of reads of tables alone, does not get ([spawn]): it
+   is counted with one all the same. The first 1 is the library file the
+   main process reads, one at a time (CheckLibrary.intern_from_file and
+   CheckLibrary.read_opaque_table); the second, the file of progress of
+   the worker of [validate_tables] ([validate_tables], [open_capture]);
+   the 64, the room that [descriptors_for_workers] leaves for the rest of
+   the run. *)
+let open_files_for_workers ~extra_per_worker =
+  (5 + extra_per_worker) * jobs () + 1 + 1 + 64
+
 (* Hands out the batches a new job makes possible, at most once every
    [window] seconds. *)
 let dispatch () =
