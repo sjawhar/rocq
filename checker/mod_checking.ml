@@ -96,18 +96,10 @@ let indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ref
 
 let set_indirect_accessor f = indirect_accessor := f
 
-(* The statement report's recorder of checked opaque bodies (see
-   [ReportRecords]), in two stages. [!opaque_check_hook o] is called when
-   the check of the opaque body [o] is deferred, in the process that defers
-   it, which is the main process: that is where the recorder can name [o]
-   so that the main process finds it again. The function it returns is
-   called by the deferred check, in whichever process runs it, right after
-   the check of the cooked body [c] returned normally, with the environment
-   [c] was checked in and [c]. Nothing calls it for a check that raised.
-   Neither stage may raise anything but an interrupt, and neither reads or
-   changes anything that is checked. The default does nothing, so that
-   without the recorder (at -j 1, or without -statement-report) the check
-   is the one it always was. *)
+(* The statement report's recorder of checked opaque bodies ([ReportRecords];
+   see [set_opaque_check_hook]). Its first stage runs where the check of an
+   opaque is deferred, in the main process, so that the main process can
+   find that opaque again. *)
 let no_opaque_check_hook _ _ _ = ()
 
 let opaque_check_hook : (Opaqueproof.opaque -> (env -> Constr.t -> unit)) ref =

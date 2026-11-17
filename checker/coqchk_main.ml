@@ -820,14 +820,9 @@ let run_compare env =
 let main () =
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
-  (* With workers, the processes that check opaque bodies record what the
-     report needs of them, and the report takes it instead of reading those
-     bodies again (ReportRecords). Its lines are the same, but for the one
-     difference ReportRecords states: a body that a worker recorded is not
-     read again, so a library file that changes on disk during the run
-     makes no warning for it. The records move the report's walk of each
-     body into the workers, which run side by side; at -j 1 there are none,
-     nothing is recorded, and the run is the one it always was. *)
+  (* With workers, the report takes the objects of each opaque body a check
+     recorded instead of reading it again (ReportRecords); at -j 1 nothing
+     is recorded. *)
   if Option.has_some !statement_report && CheckWorkers.parallel () then
     ReportRecords.start ();
   let senv, opac = run senv in

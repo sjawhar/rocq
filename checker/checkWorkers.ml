@@ -638,8 +638,7 @@ let pr_batch b =
   | _ -> pr_tasks b
 
 (* An unnamed file: created, opened, then removed, so that nothing is left
-   of it on disk once its last descriptor is closed. For what a worker
-   prints, and for the extra files of [set_worker_file]. *)
+   of it on disk once its last descriptor is closed. *)
 let open_capture () =
   match Filename.temp_file "rocqchk" ".out" with
   | exception Sys_error _ -> None
@@ -653,15 +652,16 @@ let open_capture () =
 
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
 
-(* The two files a worker prints to, or neither of them. *)
-let open_output () =
+(* Two files of [open_capture], in that order, or neither of them: the two
+   files a worker prints to. *)
+let open_capture_pair () =
   match open_capture (), open_capture () with
   | Some out, Some err -> Some (out, err)
   | out, err -> Option.iter close_fd out; Option.iter close_fd err; None
 
 (* Whether a worker can be given its two files now. *)
 let capture_available () =
-  match open_output () with
+  match open_capture_pair () with
   | Some (out, err) -> close_fd out; close_fd err; true
   | None -> false
 
@@ -669,9 +669,10 @@ let close_output w =
   Option.iter (fun (out, err) -> close_fd out; close_fd err) w.output;
   w.output <- None
 
-(* One extra file per worker, for a client of this module: each worker is
-   given one before it is forked, and the main process hands it to
-   [done_ok] once the worker has ended successfully. *)
+(* One extra file per worker, for a client of this module: each worker
+   whose batch holds a check of an opaque proof is given one before it is
+   forked, and the main process hands it to [done_ok] once the worker has
+   ended successfully. *)
 type worker_file = {
   open_file : unit -> Unix.file_descr option;
   in_child : Unix.file_descr option -> unit;
@@ -704,8 +705,7 @@ let close_file w =
 let file_done w =
   match w.file, !worker_file with
   | Some fd, Some f -> w.file <- None; f.done_ok fd
-  | Some _, None -> close_file w
-  | None, _ -> ()
+  | _ -> close_file w
 
 (* The descriptors [deal] has opened for batches it has not forked yet. *)
 let prepared_fds : Unix.file_descr list ref = ref []
@@ -746,12 +746,13 @@ let spawn ?(releasable = true) ?prepared tasks =
     pending_request := false;
     let output = match prepared with
       | Some (_, _, output) -> Some output
-      | None -> open_output ()
+      | None -> open_capture_pair ()
     in
     (* Unlike the output files, the extra file is not prepared by [deal]: a
        worker can do without it, so its absence is no reason to hold a batch
-       back, and it is opened here on both paths. *)
-    let file = open_worker_file () in
+       back, and it is opened here on both paths. A batch of reads of tables
+       alone checks no opaque body, and has none ([set_worker_file]). *)
+    let file = if batch.proofs > 0 then open_worker_file () else None in
     (* This worker's own descriptors are no longer another's to close. *)
     let mine = report :: report_out ::
                (match output with Some (out, err) -> [out; err] | None -> []) in
@@ -1148,7 +1149,7 @@ let deal ?(walk = false) k size =
     else match Unix.pipe ~cloexec:true () with
       | exception Unix.Unix_error _ -> Error ()
       | report, report_out ->
-        match open_output () with
+        match open_capture_pair () with
         | Some output -> Ok (Some (report, report_out, output))
         | None -> close_fd report; close_fd report_out; Error ()
   in

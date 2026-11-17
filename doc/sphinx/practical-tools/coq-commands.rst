@@ -875,10 +875,12 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   into. The records are kept in temporary files that exist only while
   ``rocqchk`` runs (in ``TMPDIR``, by default ``/tmp``, and removed from
   it as soon as they are opened): no directory is made and nothing is left
-  behind. The report is the same as without ``-j``, but for one case: a
-  proof that a worker checked is not read again, so a library file that
-  changes or vanishes on disk during the run does not make the report warn
-  that this proof could not be read, and report it as an axiom.
+  behind, unless ``rocqchk`` is killed in the instant between the creation
+  of such a file and its removal, as with the files that hold the output
+  of the workers. The report is the same as without ``-j``, but for one
+  case: a proof that a worker checked is not read again, so a library file
+  that changes or vanishes on disk during the run does not make the report
+  warn that this proof could not be read, nor report it as an axiom.
 
 Environment variable ``$ROCQLIB`` can be set to override the location of
 the standard library.

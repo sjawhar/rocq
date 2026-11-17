@@ -24,7 +24,9 @@
     made with a substitution is a new value, which no record names.
 
     The records are kept in unnamed temporary files, which exist only while
-    rocqchk runs: nothing is left on disk, however the run ends.
+    rocqchk runs: nothing is left on disk, however the run ends, but for a
+    kill in the instant between the creation of a file and its removal, as
+    for the files of the workers' output ([CheckWorkers.open_capture]).
 
     The report's lines, and every other byte of the output, are the ones
     the report prints without records, and so is the exit status, with one

@@ -281,12 +281,14 @@ report() {
 report a -Q "$d/lib" SRPar -norec SRPar.A
 has a-j1 'axiom via SRPar.A.ax'
 has a-j1 'statement typed SRPar.A.uses_ax SRPar.A.via match 1 1'
-# The debug line, which -d checker-workers prints after the report; that
-# option also turns the default path off.
+# The debug line, which -d checker-workers prints after the report, gives
+# the numbers the run wrote; that option also turns the default path off.
 run a-d3 3 -d checker-workers -statement-report "$d/a.req" -Q "$d/lib" SRPar -norec SRPar.A
 same a-j1 a-d3 0 "(a) -j 3 -d checker-workers"
+counts a-d3
+[ "$hits" -gt 0 ] || { cat "$d/a-d3.err" >&2; fail "(a) -j 3 -d checker-workers: no body taken from the records"; }
 tr -s ' \n\t' ' ' < "$d/a-d3.err" |
-  grep -q '\[checker-workers\] statement report: [1-9][0-9]* opaque bodies from records, [0-9]* read' \
+  grep -qF "[checker-workers] statement report: $hits opaque bodies from records, $reads read" \
   || { cat "$d/a-d3.err" >&2; fail "(a) -j 3 -d checker-workers: no debug line of the report"; }
 
 # (b)

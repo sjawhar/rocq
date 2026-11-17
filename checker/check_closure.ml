@@ -728,16 +728,19 @@ let test_fault () =
 (* Each opaque body is read: none has a record. *)
 let no_record _ = None
 
-let print ?(recorded = no_record) env access requests =
+(* A state with nothing reached yet, and a walk cache of its own. *)
+let new_state ?(recorded = no_record) env access = {
+  env; access; recorded; fields = ModPath.Map.empty;
+  public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
+  cache = walk_cache ();
+}
+
+let print ?recorded env access requests =
   let index =
     Environ.fold_constants (fun c _ acc -> CString.Map.add (Constant.to_string c) c acc)
       env CString.Map.empty
   in
-  let st = {
-    env; access; recorded; fields = ModPath.Map.empty;
-    public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
-    cache = walk_cache ();
-  } in
+  let st = new_state ?recorded env access in
   line "STATEMENT REPORT";
   test_fault ();
 
@@ -771,11 +774,7 @@ let print ?(recorded = no_record) env access requests =
 
 type closure_state = state
 
-let closure_state env access = {
-  env; access; recorded = no_record; fields = ModPath.Map.empty;
-  public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
-  cache = walk_cache ();
-}
+let closure_state env access = new_state env access
 
 let axioms_and_flags st kn =
   let axioms, flags = closure st (GlobRef.ConstRef kn) in

@@ -91,17 +91,19 @@ let no_records () = {
   bodies = OpaqueTbl.create 4096; shared = RefTbl.create 4096; hits = 0; reads = 0;
 }
 
+(* Each object is kept once, so that the records of a large tree take one
+   copy of each name they share: [share r obj] is the copy of [obj] that
+   [r] keeps. *)
+let share r obj = match RefTbl.find_opt r.shared obj with
+  | Some obj -> obj
+  | None -> RefTbl.add r.shared obj obj; obj
+
 (* A value can be checked twice: a declaration that a module's signature
    and its implementation share is checked with each. Its records then name
    the same objects. Records of one value that do not are not used, and the
-   report reads that body. Each object is kept once, so that the records of
-   a large tree take one copy of each name they share. *)
+   report reads that body. The objects of [objs] are the copies [share]
+   keeps, so that two records of one value compare physically. *)
 let add_record r o objs =
-  let share obj = match RefTbl.find_opt r.shared obj with
-    | Some obj -> obj
-    | None -> RefTbl.add r.shared obj obj; obj
-  in
-  let objs = List.map share objs in
   match OpaqueTbl.find_opt r.bodies o with
   | None -> OpaqueTbl.add r.bodies o (Some objs)
   | Some (Some objs') when List.equal (==) objs objs' -> ()
@@ -136,12 +138,12 @@ let deferred_count = ref 0
 
     Each process records to a file of its own: the main process to [own],
     for the checks it runs itself (those of a batch it could not fork), and
-    each worker to the file [CheckWorkers] opened for it before the fork
-    ([CheckWorkers.set_worker_file]). A file is a sequence of frames, each
-    one marshalled [record], whose own header gives its size
-    ([Marshal.total_size]). One process writes the file, from its start,
-    and records nothing more after its first failure, so only the last
-    frame of a file can be cut short.
+    each worker that checks opaque bodies to the file [CheckWorkers] opened
+    for it before the fork ([CheckWorkers.set_worker_file]). A file is a
+    sequence of frames, each one marshalled [record], whose own header
+    gives its size ([Marshal.total_size]). One process writes the file,
+    from its start, and records nothing more after its first failure, so
+    only the last frame of a file can be cut short.
 
     When a worker has ended successfully, the main process copies its file
     to [spool] as one segment, and closes it: the length of the file on 8
@@ -188,8 +190,6 @@ type files = {
 }
 
 let files : files option ref = ref None
-
-let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
 
 let rec write_all fd b ofs len =
   if len > 0 then
@@ -294,14 +294,15 @@ let open_file () =
 let in_child fd =
   current := None;
   (match !files with
-   | Some f -> files := None; close_fd f.spool; close_fd f.own
+   | Some f ->
+     files := None; CheckWorkers.close_fd f.spool; CheckWorkers.close_fd f.own
    | None -> ());
   Option.iter (fun fd -> current := Some (output fd)) fd
 
 (* In the main process, once the worker whose file is [fd] has ended
    successfully. *)
 let done_ok fd =
-  Fun.protect ~finally:(fun () -> close_fd fd) (fun () ->
+  Fun.protect ~finally:(fun () -> CheckWorkers.close_fd fd) (fun () ->
       match !files with
       | Some f when f.spool_whole ->
         (try append_segment f.spool fd with
@@ -312,19 +313,19 @@ let done_ok fd =
 (** {6 The main process, around the run} *)
 
 let start () =
-  match CheckWorkers.open_capture (), CheckWorkers.open_capture () with
-  | Some spool, Some own ->
+  match CheckWorkers.open_capture_pair () with
+  | Some (spool, own) ->
     files := Some { spool; own; spool_whole = true };
     current := Some (output own);
     CheckWorkers.set_worker_file { CheckWorkers.open_file; in_child; done_ok };
     Mod_checking.set_opaque_check_hook deferring
-  | spool, own -> Option.iter close_fd spool; Option.iter close_fd own
+  | None -> ()
 
-(* The records of one segment, in order. A frame cut short, or one whose
-   record or numbers are wrong, ends the segment: what follows it cannot be
-   told apart from what it holds. The records read before it are whole,
-   and kept. *)
-let read_segment records deferred b =
+(* The records of one segment, in order, for the opaque values [values] of
+   the checks, by number. A frame cut short, or one whose record or numbers
+   are wrong, ends the segment: what follows it cannot be told apart from
+   what it holds. The records read before it are whole, and kept. *)
+let read_segment records values b =
   let objects = ref [||] and known = ref 0 in
   let add (r : record) =
     let n = Array.length r.defs in
@@ -334,15 +335,15 @@ let read_segment records deferred b =
         Array.blit !objects 0 a 0 !known;
         objects := a
       end;
-      Array.blit r.defs 0 !objects !known n;
+      Array.iteri (fun j obj -> (!objects).(!known + j) <- share records obj) r.defs;
       known := !known + n
     end;
-    if r.index < 0 || r.index >= Array.length deferred
+    if r.index < 0 || r.index >= Array.length values
        || Array.exists (fun k -> k < 0 || k >= !known) r.ids
     then false
     else begin
       let objs = Array.fold_right (fun k objs -> (!objects).(k) :: objs) r.ids [] in
-      add_record records deferred.(r.index) objs;
+      add_record records values.(r.index) objs;
       true
     end
   in
@@ -361,7 +362,7 @@ let read_segment records deferred b =
 
 (* Every segment of the spool, in order. The spool is whole: a segment
    that is not raises, and then no record is used. *)
-let read_spool deferred spool =
+let read_spool values spool =
   let records = no_records () in
   let size = Unix.lseek spool 0 Unix.SEEK_END in
   ignore (Unix.lseek spool 0 Unix.SEEK_SET);
@@ -374,7 +375,7 @@ let read_spool deferred spool =
       if n <= 0 || n > left - segment_header then failwith "ReportRecords.read_spool";
       let b = Bytes.create n in
       read_all spool b 0 n;
-      read_segment records deferred b;
+      read_segment records values b;
       segments (left - segment_header - n)
     end
   in
@@ -391,7 +392,8 @@ let collect () =
     let values = Array.of_list (List.rev !deferred) in
     deferred := [];
     deferred_count := 0;
-    Fun.protect ~finally:(fun () -> close_fd f.spool; close_fd f.own) @@ fun () ->
+    Fun.protect ~finally:(fun () ->
+        CheckWorkers.close_fd f.spool; CheckWorkers.close_fd f.own) @@ fun () ->
     let records =
       if not f.spool_whole then no_records ()
       else

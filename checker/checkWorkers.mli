@@ -129,13 +129,21 @@ val open_capture : unit -> Unix.file_descr option
     it on disk once its last descriptor is closed. [None] if it cannot be
     made. *)
 
+val open_capture_pair : unit -> (Unix.file_descr * Unix.file_descr) option
+(** Two files of [open_capture], in the order they are made, or neither:
+    [None], having closed the one made, if either cannot be made. *)
+
+val close_fd : Unix.file_descr -> unit
+(** Closes the descriptor, ignoring a Unix error. *)
+
 type worker_file = {
   open_file : unit -> Unix.file_descr option;
-  (** In the main process, before each worker is forked: a file for that
-      worker, unnamed as [open_capture] makes one, or none. *)
+  (** In the main process, before each worker whose batch holds a check of
+      an opaque proof is forked: a file for that worker, unnamed as
+      [open_capture] makes one, or none. *)
   in_child : Unix.file_descr option -> unit;
   (** In each worker, right after the fork, before its first job: the
-      file [open_file] gave for it. *)
+      file [open_file] gave for it, or [None] if it has none. *)
   done_ok : Unix.file_descr -> unit;
   (** In the main process, once the worker has ended successfully, as
       [finish] accepts it: its file, which [done_ok] must close. *)
@@ -143,13 +151,15 @@ type worker_file = {
 
 val set_worker_file : worker_file -> unit
 (** [set_worker_file f], in the main process before any worker is forked:
-    from now on each worker has one extra file, through which it can hand
-    something to the main process. The main process holds the file while
-    the worker runs, and no other worker keeps it open. The file of a
-    worker that fails, or that [abort] kills, is closed with no call. A
-    batch that the main process checks itself, because it could not fork,
-    has no file. None of the three may raise anything but [Sys.Break], and
-    [in_child] nothing at all. *)
+    from now on each worker whose batch holds a check of an opaque proof
+    has one extra file, through which it can hand something to the main
+    process; a batch of reads of tables alone checks no opaque proof, and
+    has none. The main process holds the file while the worker runs, and
+    no other worker keeps it open. The file of a worker that fails, or that
+    [abort] kills, is closed with no call. A batch that the main process
+    checks itself, because it could not fork, has no file. None of the
+    three may raise anything but [Sys.Break], and [in_child] nothing at
+    all. *)
 
 val validate_tables : (Names.DirPath.t * (unit -> unit)) list -> unit
 (** [validate_tables tables] starts one worker that runs each read, in
