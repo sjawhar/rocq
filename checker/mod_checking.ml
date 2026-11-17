@@ -96,6 +96,17 @@ let indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ref
 
 let set_indirect_accessor f = indirect_accessor := f
 
+(* Prototype C7 (measurement only, never merged): called in the process that
+   checked an opaque body, right after its check returned normally, with the
+   constant, its opaque, the environment the body was checked in and the
+   cooked body itself. A no-op unless [Coqchk_main] installs the statement
+   report's recorder, which raises nothing. *)
+let opaque_checked_hook :
+  (Constant.t -> Opaqueproof.opaque -> env -> Constr.t -> unit) ref =
+  ref (fun _ _ _ _ -> ())
+
+let set_opaque_checked_hook f = opaque_checked_hook := f
+
 let register_opacified_constant env opac kn cb =
   let rec gather_consts s c =
     match Constr.kind c with
@@ -279,7 +290,10 @@ let check_constant_declaration env st kn cb =
        ([CheckLibrary.indirect_accessor]), and a check handed back cooks
        again in the process that runs it. With -j 1, [defer] runs the
        closure at once, so the order of effects is as before. *)
-    CheckWorkers.defer kn (fun () -> let c, env = cook o in check env c ())
+    CheckWorkers.defer kn (fun () ->
+        let c, env = cook o in
+        check env c ();
+        !opaque_checked_hook kn o env c)
   in
   retro, st
 

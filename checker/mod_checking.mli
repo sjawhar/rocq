@@ -10,6 +10,15 @@
 
 val set_indirect_accessor : (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) -> unit
 
+val set_opaque_checked_hook :
+  (Names.Constant.t -> Opaqueproof.opaque -> Environ.env -> Constr.t -> unit) -> unit
+(** Prototype C7 (measurement only, never merged): [set_opaque_checked_hook f]
+    makes the check of each opaque body call [f kn o env c] in the process that
+    runs it, right after the check of [c] returned normally: [kn] is the
+    constant, [o] its opaque, [env] the environment [c] was checked in and [c]
+    the cooked body that was checked. Nothing calls it for a check that
+    raised. [f] must raise nothing. Default: does nothing. *)
+
 val compile_module_bytecode : Environ.env -> Vmlibrary.t -> Names.ModPath.t ->
   'a Mod_declarations.generic_module_body ->
   Vmlibrary.t * 'a Mod_declarations.generic_module_body

@@ -23,8 +23,37 @@ val read_requests : string -> request list
     are skipped. A tab or carriage return on any line is an error.
     @raise CErrors.UserError on any other line. *)
 
-val print : Environ.env -> (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ->
-  request list -> unit
+type opaque_records
+(** Prototype C7 (measurement only, never merged): the objects that the checks
+    of opaque bodies recorded, which the report takes instead of reading and
+    walking those bodies again. *)
+
+val opaque_body_refs : Environ.env -> Constr.t -> Names.GlobRef.t list
+(** [opaque_body_refs env c]: the objects that the report's walk adds for the
+    term [c], with the primitive types that [env] registers for its literals
+    and arrays: each constant it names, the first inductive of each block that
+    an inductive, a constructor, a [match] or a projection names, and the
+    registered type of each literal and array. It is the walk itself, run on
+    [c] alone. Each object is given once, as the walk's set of objects keeps
+    it. *)
+
+val opaque_records : unit -> opaque_records
+(** No record. *)
+
+val add_opaque_record : opaque_records -> Names.Constant.t -> Names.DirPath.t -> int ->
+  Names.GlobRef.t list -> unit
+(** [add_opaque_record r kn dp i objs]: a check of the opaque body of [kn],
+    whose opaque has no substitution and names the proof [i] of the table of
+    the library [dp], found that [opaque_body_refs] gives [objs] for it. Two
+    records of one proof under one constant that give different objects are
+    both dropped. *)
+
+val note_opaque_records_read : opaque_records -> files:int -> seconds:float -> unit
+(** How many files the records were read from, and in how many seconds, for
+    the statistics of ROCQCHK_REPORT_STATS. *)
+
+val print : ?records:opaque_records -> Environ.env ->
+  (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) -> request list -> unit
 (** Print the report, one line per message on the feedback channel:
 
     {v
@@ -75,7 +104,15 @@ END STATEMENT REPORT
     the constant [g] of a module [Q] of the library [R.P] and the constant
     [g] of the library [R.P.Q] both print [R.P.Q.g]. No grader may check
     these lines against a permitted list by name; [rocqchk -compare] judges
-    each axiom and flag by the object itself ([axioms_and_flags]). *)
+    each axiom and flag by the object itself ([axioms_and_flags]).
+
+    Prototype C7: given [records], an opaque body that a record names
+    ([add_opaque_record]), under the same constant, with no substitution and
+    the same library and index, is not read: its objects are the recorded
+    ones. The lines are the same. With ROCQCHK_REPORT_STATS set, the file it
+    names also gets the line [RECORDS hits <n> misses <m> files <f> records
+    <r> read_s <t>]: the opaque constants reached with and without a usable
+    record, and the reading of the records. *)
 
 (** {6 The closure, for [rocqchk -compare]} *)
 

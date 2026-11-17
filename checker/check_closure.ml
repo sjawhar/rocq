@@ -108,9 +108,48 @@ let index_fields fields =
 let find_module fields label = Id.Map.find_opt label fields.modules
 let find_constant fields label = Id.Map.find_opt label fields.constants
 let find_mind fields label = Id.Map.find_opt label fields.minds
+
+(** {6 Records of checked opaque bodies}
+
+    Prototype C7 (measurement only, never merged). The process that checks
+    an opaque body records the objects that the walk below adds for that body
+    ([opaque_body_refs]), with the constant and the library and index of its
+    stored proof; the report takes them instead of reading and walking the
+    body again ([recorded_refs]). *)
+
+(* Keyed by user name, as the environment is. *)
+module ConstTbl = Hashtbl.Make (struct
+    type t = Constant.t
+    let equal = Constant.UserOrd.equal
+    let hash = Constant.UserOrd.hash
+  end)
+
+(* Two objects equal here have both names equal: one can stand for the other
+   anywhere. *)
+module RefTbl = Hashtbl.Make (struct
+    type t = GlobRef.t
+    let equal a b = GlobRef.UserOrd.equal a b && GlobRef.CanOrd.equal a b
+    let hash = GlobRef.UserOrd.hash
+  end)
+
+type opaque_records = {
+  bodies : (DirPath.t * int * GlobRef.t list option) list ConstTbl.t;
+  (* for each constant, the library and index of each stored proof that a
+     check recorded under its name, with the objects its body references, or
+     [None] when two records of that proof disagree *)
+  shared : GlobRef.t RefTbl.t;
+  (* one copy of each object the records name *)
+  mutable count : int;
+  mutable files : int;
+  mutable read_s : float;
+  (* how many records were read, from how many files, in how many seconds *)
+}
+
 type state = {
   env : Environ.env;
   access : Opaqueproof.opaque -> Opaqueproof.opaque_proofterm;
+  records : opaque_records option;
+  (* the recorded objects of checked opaque bodies, for the report only *)
   mutable fields : field_index ModPath.Map.t;
   (* the indexed fields of the implementation of each module looked up so far *)
   mutable public_nodes : node GlobRef.Map_env.t;
@@ -324,6 +363,28 @@ let rec walk st gen refs = function
         in
         walk st gen refs (fold (fun todo c -> (view, c) :: todo) todo c)
 
+(* Prototype C7: the objects [walk] adds for the term [c] alone, in one view,
+   with the primitive types that [env] registers. A walk that starts from a
+   declaration's type and its body [c] adds the objects of the type and, in
+   the declaration's view, exactly these: [seen] only skips a node already
+   walked, whose objects are added already. The cache of these walks is the
+   process's own, made at the first call; each call takes a new generation
+   of it, before it walks, so that no call can see another's entries. *)
+let body_walk_cache =
+  lazy (Array.make cache_size Constr.mkProp, Array.make cache_size (-1), ref 0)
+
+let opaque_body_refs env c =
+  let keys, gens, gen = Lazy.force body_walk_cache in
+  incr gen;
+  let st = {
+    env; access = (fun _ -> CErrors.anomaly (Pp.str "opaque_body_refs reads no body."));
+    records = None; fields = ModPath.Map.empty;
+    public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
+    gen = !gen; keys; gens;
+  } in
+  let public, _ = walk st !gen empty_refs [Public, c] in
+  GlobRef.Set_env.elements public
+
 let push_context view ctx todo =
   List.fold_left (fun todo d ->
       Context.Rel.Declaration.fold_constr (fun c todo -> (view, c) :: todo) d todo)
@@ -384,7 +445,12 @@ let add_stats kn opaque t_access t_walk =
     a.(0) <- a.(0) +. 1.; a.(1) <- a.(1) +. t_access; a.(2) <- a.(2) +. t_walk end
   else begin a.(3) <- a.(3) +. 1.; a.(4) <- a.(4) +. t_walk end
 
-let write_stats () =
+(* Prototype C7: the opaque constants the report reached whose objects it
+   took from a record, and those whose body it read. *)
+let record_hits = ref 0
+let record_misses = ref 0
+
+let write_stats records =
   match Sys.getenv_opt "ROCQCHK_REPORT_STATS" with
   | None -> ()
   | Some f ->
@@ -393,8 +459,70 @@ let write_stats () =
        Hashtbl.iter (fun r a ->
            Printf.fprintf oc "%s %.0f %.3f %.3f %.0f %.3f\n" r a.(0) a.(1) a.(2) a.(3) a.(4))
          report_stats;
+       let files, n, read_s = match records with
+         | Some r -> r.files, r.count, r.read_s
+         | None -> 0, 0, 0.
+       in
+       Printf.fprintf oc "RECORDS hits %d misses %d files %d records %d read_s %.3f\n"
+         !record_hits !record_misses files n read_s;
        close_out oc
      with Sys_error _ -> ())
+
+let opaque_records () = {
+  bodies = ConstTbl.create 4096; shared = RefTbl.create 4096;
+  count = 0; files = 0; read_s = 0.;
+}
+
+(* A proof that one constant names twice, in a module's signature and in its
+   implementation, is recorded twice; the records then name the same objects.
+   If they do not, they are not two checks of one body, and neither is used:
+   the report reads that body. Each object is kept once, so that the records
+   of a large tree take one copy of each name they share. *)
+let add_opaque_record r kn dp i objs =
+  r.count <- r.count + 1;
+  let share obj = match RefTbl.find_opt r.shared obj with
+    | Some obj -> obj
+    | None -> RefTbl.add r.shared obj obj; obj
+  in
+  let objs = List.map share objs in
+  let same (dp', i', _) = Int.equal i i' && DirPath.equal dp dp' in
+  let bodies = Option.default [] (ConstTbl.find_opt r.bodies kn) in
+  let bodies = match List.find_opt same bodies with
+    | None -> (dp, i, Some objs) :: bodies
+    | Some (_, _, Some objs') when List.equal (==) objs objs' -> bodies
+    | Some _ -> (dp, i, None) :: List.filter (fun b -> not (same b)) bodies
+  in
+  ConstTbl.replace r.bodies kn bodies
+
+let note_opaque_records_read r ~files ~seconds =
+  r.files <- files;
+  r.read_s <- seconds
+
+(* Prototype C7: the objects that a check recorded for the opaque body [o] of
+   [kn], when the body it checked is the one [st.access o] would read. [o]
+   has no substitution, so its body is its stored proof as its cooking
+   information cooks it ([CheckLibrary.indirect_accessor]), and the record
+   names the same stored proof, by library and index, under the same
+   constant. The stored proof is the library's file as the main process
+   hashed it, which every process that reads it checks. The cooking
+   information is not compared: a stored proof gets its cooking information
+   when its section closes, before any module can hold it, and a module that
+   copies it substitutes it. Two records of one proof under one constant that
+   disagree are not used ([add_opaque_record]). *)
+let recorded_refs st kn o =
+  match st.records with
+  | None -> None
+  | Some r ->
+    let (sub, _, dp, i) = Opaqueproof.repr o in
+    if not (List.is_empty sub) then None
+    else
+      let i = Opaqueproof.repr_handle i in
+      match ConstTbl.find_opt r.bodies kn with
+      | None -> None
+      | Some bodies ->
+        match List.find_opt (fun (dp', i', _) -> Int.equal i i' && DirPath.equal dp dp') bodies with
+        | Some (_, _, objs) -> objs
+        | None -> None
 
 let constant_node st view kn =
   match lookup_constant st view kn with
@@ -413,20 +541,33 @@ let constant_node st view kn =
        warning, which names the constant. *)
     let t0 = if stats_on then Unix.gettimeofday () else 0. in
     let opaque = match cb.const_body with OpaqueDef _ -> true | _ -> false in
-    let body, axiom = match cb.const_body with
-      | Def c -> [declaration_view, c], false
+    let body, recorded, axiom = match cb.const_body with
+      | Def c -> [declaration_view, c], None, false
       | OpaqueDef o ->
-        (match (test_unreadable_opaque kn; st.access o) with
-         | c, _ -> [declaration_view, c], false
+        (* Prototype C7: a body that a check recorded is not read; the walk
+           of the type alone, and the recorded objects in the declaration's
+           view, make the same references as the walk of the type and the
+           body. *)
+        let read () = match recorded_refs st kn o with
+          | Some _ as recorded -> [], recorded
+          | None -> let c, _ = st.access o in [declaration_view, c], None
+        in
+        (match (test_unreadable_opaque kn; read ()) with
+         | body, recorded -> body, recorded, false
          | exception e when CErrors.noncritical e ->
            Feedback.msg_warning
              Pp.(str "Statement report: the opaque body of " ++ str (Constant.to_string kn)
                  ++ str " could not be read, so it is reported as an axiom: " ++ CErrors.print e);
-           [], true)
-      | Undef _ | Primitive _ | Symbol _ -> [], true
+           [], None, true)
+      | Undef _ | Primitive _ | Symbol _ -> [], None, true
     in
+    if opaque then incr (if Option.has_some recorded then record_hits else record_misses);
     let t1 = if stats_on then Unix.gettimeofday () else 0. in
     let refs = walk st (fresh_gen st) empty_refs ((declaration_view, cb.const_type) :: body) in
+    let refs = match recorded with
+      | None -> refs
+      | Some objs -> List.fold_left (fun refs obj -> add_ref declaration_view obj refs) refs objs
+    in
     if stats_on then add_stats kn opaque (t1 -. t0) (Unix.gettimeofday () -. t1);
     { refs = refs_to_list refs; axiom;
       flags = typing_flags (GlobRef.ConstRef kn) cb.const_typing_flags [] }
@@ -675,7 +816,7 @@ let test_fault () =
   | Some "1" -> CErrors.user_err Pp.(str "test statement-report failure")
   | None | Some _ -> ()
 
-let print env access requests =
+let print ?records env access requests =
   let pt0 = Unix.gettimeofday () in
   let total () =
     let a = Array.make 5 0. in
@@ -686,7 +827,7 @@ let print env access requests =
       env CString.Map.empty
   in
   let st = {
-    env; access; fields = ModPath.Map.empty;
+    env; access; records; fields = ModPath.Map.empty;
     public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty; gen = 0;
     keys = Array.make cache_size Constr.mkProp; gens = Array.make cache_size (-1);
   } in
@@ -714,7 +855,7 @@ let print env access requests =
     requests;
   line "END STATEMENT REPORT";
   if stats_on then total ();
-  write_stats ()
+  write_stats records
 
 (** {6 The closure, for [rocqchk -compare]} *)
 
@@ -725,7 +866,7 @@ let print env access requests =
 type closure_state = state
 
 let closure_state env access = {
-  env; access; fields = ModPath.Map.empty;
+  env; access; records = None; fields = ModPath.Map.empty;
   public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty; gen = 0;
   keys = Array.make cache_size Constr.mkProp; gens = Array.make cache_size (-1);
 }

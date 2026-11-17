@@ -722,9 +722,9 @@ let tune_report_gc () =
     | Some n -> { gc with Gc.space_overhead = n } | None -> gc in
   Gc.set gc
 
-let print_statement_report env requests =
+let print_statement_report ?records env requests =
   tune_report_gc ();
-  try Check_closure.print env CheckLibrary.indirect_accessor requests
+  try Check_closure.print ?records env CheckLibrary.indirect_accessor requests
   with e when (match e with Sys.Break | Out_of_memory -> false | _ -> true) ->
     Feedback.msg_warning
       (str "Statement report stopped: " ++
@@ -864,20 +864,168 @@ let collect_report_child () =
 
 (* The child's messages, sent as they were first emitted, or else the report
    computed here. *)
-let print_report env requests =
+let print_report ?records env requests =
   match collect_report_child () with
   | Some captured ->
     List.iter (fun fb ->
         Feedback.feedback ~did:fb.Feedback.doc_id ~id:fb.Feedback.span_id
           ~route:fb.Feedback.route fb.Feedback.contents)
       captured
-  | None -> print_statement_report env requests
+  | None -> print_statement_report ?records env requests
 
 let report_child_enabled () =
   CheckWorkers.parallel ()
   && (match Sys.getenv_opt "ROCQCHK_REPORT_CHILD" with
       | Some "0" -> false
       | Some _ | None -> true)
+
+(* Prototype C7 (measurement only, never merged). With workers and a
+   statement report, each process that checks an opaque body whose opaque has
+   no substitution writes the record [(kn, dp, index, objects)] of that body
+   ([Check_closure.opaque_body_refs]) to a file of its own, [<pid>.refs], in a
+   fresh directory only this user can enter. Once every worker has finished
+   and every check has passed, the main process reads the records, removes
+   the directory, and the report takes the objects of each recorded body from
+   them instead of reading and walking the body ([Check_closure.print]).
+   ROCQCHK_REPORT_REFS=0 turns this off. The report child is off with it: it
+   would run before the records exist. *)
+type refs_record = Constant.t * DirPath.t * int * GlobRef.t list
+
+type refs_dir = { dir : string; owner : int }
+
+let refs_dir = ref None
+
+(* The file this process writes its records to, with the pid that opened it:
+   a worker inherits the main process's, and opens its own. A raw descriptor,
+   to which each record goes whole as soon as it is made, so that nothing
+   waits in a buffer: a worker leaves without flushing ([CheckWorkers]), and
+   a channel inherited from the main process would be flushed by the worker
+   too. Opened to append, so that a worker that gets the pid of one that has
+   exited adds to its file instead of emptying it. *)
+let refs_out : (int * Unix.file_descr) option ref = ref None
+
+(* The pid of a process whose recording failed: it records nothing more. *)
+let refs_stopped = ref None
+
+let refs_enabled () =
+  match Sys.getenv_opt "ROCQCHK_REPORT_REFS" with
+  | Some "0" -> false
+  | Some _ | None -> true
+
+let rec write_all fd b ofs len =
+  if len > 0 then
+    match Unix.single_write fd b ofs len with
+    | n -> write_all fd b (ofs + n) (len - n)
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> write_all fd b ofs len
+
+(* The hook of [Mod_checking], in whichever process checked the body. It
+   raises nothing: a failure only stops the recording in this process, whose
+   bodies the report then reads. *)
+let record_refs dir kn o env c =
+  let pid = Unix.getpid () in
+  let stopped = match !refs_stopped with Some p -> Int.equal p pid | None -> false in
+  if not stopped then
+    try
+      let (sub, _, dp, i) = Opaqueproof.repr o in
+      if CList.is_empty sub then begin
+        let fd = match !refs_out with
+          | Some (p, fd) when Int.equal p pid -> fd
+          | Some _ | None ->
+            let file = Filename.concat dir (string_of_int pid ^ ".refs") in
+            let fd = Unix.openfile file
+                [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND; Unix.O_CLOEXEC] 0o600 in
+            refs_out := Some (pid, fd);
+            fd
+        in
+        let record : refs_record =
+          (kn, dp, Opaqueproof.repr_handle i, Check_closure.opaque_body_refs env c) in
+        let b = Marshal.to_bytes record [] in
+        write_all fd b 0 (Bytes.length b)
+      end
+    with _ -> refs_stopped := Some pid
+
+(* A fresh directory named after this process, or [None]. *)
+let make_refs_dir () =
+  let rng = Random.State.make_self_init () in
+  let owner = Unix.getpid () in
+  let rec attempt n =
+    if Int.equal n 0 then None
+    else
+      let dir = Filename.concat (Filename.get_temp_dir_name ())
+          (Printf.sprintf "rocqchk_refs_%d_%08x" owner (Random.State.bits rng)) in
+      match Unix.mkdir dir 0o700 with
+      | () -> Some { dir; owner }
+      | exception Unix.Unix_error (Unix.EEXIST, _, _) -> attempt (n - 1)
+      | exception Unix.Unix_error _ -> None
+  in
+  attempt 10
+
+let close_main_refs_out owner =
+  match !refs_out with
+  | Some (p, fd) when Int.equal p owner ->
+    refs_out := None;
+    (try Unix.close fd with Unix.Unix_error _ -> ())
+  | Some _ | None -> ()
+
+(* At exit, and once the records are read. Only the main process, which made
+   the directory, acts: a worker inherits this, but leaves through its own
+   exit. *)
+let remove_refs_dir () =
+  match !refs_dir with
+  | Some d when Int.equal (Unix.getpid ()) d.owner ->
+    refs_dir := None;
+    close_main_refs_out d.owner;
+    let files = try Sys.readdir d.dir with Sys_error _ -> [||] in
+    Array.iter (fun f -> remove_noerr (Filename.concat d.dir f)) files;
+    (try Unix.rmdir d.dir with Unix.Unix_error _ -> ())
+  | Some _ | None -> ()
+
+(* Before the run, in the main process: whether the records are on. *)
+let start_refs_records () =
+  match make_refs_dir () with
+  | None -> false
+  | Some d ->
+    refs_dir := Some d;
+    at_exit remove_refs_dir;
+    Mod_checking.set_opaque_checked_hook (record_refs d.dir);
+    true
+
+(* After the run, once every worker has finished: the records of every
+   process, then the directory is removed. A record cut short ends the
+   reading of its file; a file that cannot be opened gives no record. If the
+   reading itself fails, there are no records, and the report reads every
+   body. *)
+let collect_refs_records () =
+  match !refs_dir with
+  | None -> None
+  | Some d ->
+    Mod_checking.set_opaque_checked_hook (fun _ _ _ _ -> ());
+    close_main_refs_out d.owner;
+    let t0 = Unix.gettimeofday () in
+    let read () =
+      let records = Check_closure.opaque_records () in
+      let files = try Sys.readdir d.dir with Sys_error _ -> [||] in
+      let nfiles = ref 0 in
+      Array.iter (fun f ->
+          if Filename.check_suffix f ".refs" then
+            match open_in_bin (Filename.concat d.dir f) with
+            | exception Sys_error _ -> ()
+            | ic ->
+              incr nfiles;
+              let rec loop () =
+                match (input_value ic : refs_record) with
+                | (kn, dp, i, objs) -> Check_closure.add_opaque_record records kn dp i objs; loop ()
+                | exception (End_of_file | Failure _ | Sys_error _) -> ()
+              in
+              Fun.protect ~finally:(fun () -> close_in_noerr ic) loop)
+        files;
+      Check_closure.note_opaque_records_read records ~files:!nfiles
+        ~seconds:(Unix.gettimeofday () -. t0);
+      records
+    in
+    let records = try Some (read ()) with e when CErrors.noncritical e -> None in
+    remove_refs_dir ();
+    records
 
 (* The comparator's verdict is the point of the run, not evidence beside it:
    a run that could not complete -- a challenge file whose sha256 differs, a
@@ -998,13 +1146,18 @@ let main () =
   tune_main_gc ();
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
+  let records_on = match !statement_report with
+    | Some _ when CheckWorkers.parallel () && refs_enabled () -> start_refs_records ()
+    | Some _ | None -> false
+  in
   (match !statement_report with
-   | Some requests when report_child_enabled () ->
+   | Some requests when not records_on && report_child_enabled () ->
      CheckLibrary.set_final_env_hook (start_report_child requests)
    | Some _ | None -> ());
   let senv, opac = run senv in
   let env = Safe_typing.env_of_safe_env senv in
-  Option.iter (print_report env) !statement_report;
+  let records = collect_refs_records () in
+  Option.iter (print_report ?records env) !statement_report;
   run_compare env;
   (* A summary the walk of mod_impl.ml could not complete is refused with a
      user error, reported as a check's error is. *)
