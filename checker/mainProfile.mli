@@ -18,9 +18,10 @@
     has taken so far (measured by the runtime's GC timing hooks). At its
     exit it writes [path] as a profiler trace ([NewProfile]'s format, one
     "B" and one "E" event per span) and [path.totals], one line of
-    [key=value] pairs. A worker forked by [CheckWorkers] records no span
-    ([in_child]); it appends one line to [path.workers] when it exits
-    ([worker_exit]). *)
+    [key=value] pairs. A worker forked by [CheckWorkers] records no event
+    ([in_child]): it sums, for each kind of span, the wall time and GC time
+    spent in it, the innermost span taking the time, and appends one line
+    to [path.workers] when it exits ([worker_exit]). *)
 
 type span =
 | Load            (** reading a library or a table of opaque proofs *)
@@ -28,7 +29,8 @@ type span =
 | Cook            (** cooking opaque bodies *)
 | Universes       (** a library's universes, and [Safe_typing.import] *)
 | Wait            (** waiting for workers *)
-| Check           (** the kernel check of a library, and of an inductive *)
+| Check           (** the kernel check of a library, of an inductive, and
+                      of a deferred opaque proof *)
 | Deal            (** [CheckWorkers.deal] *)
 | Output          (** printing what workers printed, or what was held *)
 | Intern          (** the intern of the libraries *)
@@ -37,7 +39,8 @@ type span =
 | Validate        (** the validation of a marshalled value *)
 
 val span : span -> (unit -> 'a) -> 'a
-(** [span s f] is [f ()], recorded as the span [s] when profiling. *)
+(** [span s f] is [f ()], recorded as the span [s] in the main process
+    when profiling, and summed by kind in a worker. *)
 
 val fork : (unit -> int) -> int
 (** [fork f] is [f ()], where [f] is [Unix.fork]: recorded as the span
@@ -45,11 +48,11 @@ val fork : (unit -> int) -> int
     is recorded; the child must call [in_child] first. *)
 
 val in_child : unit -> unit
-(** In a process just forked: record no span from now on, and count the
-    garbage collector's time, and the wall time for [worker_exit], from
-    here. *)
+(** In a process just forked: record no event from now on, sum the spans
+    by kind instead, and count the garbage collector's time, the wall time
+    and the Gc counters for [worker_exit] from here. *)
 
 val worker_exit : size:int -> completed:int -> code:int -> unit
 (** In a worker, just before it exits with [code], having completed
     [completed] of the [size] checks of its batch: appends one line to
-    [path.workers]. Never raises. *)
+    [path.workers], with one write. Never raises. *)

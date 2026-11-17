@@ -280,7 +280,9 @@ let check_constant_declaration env st kn cb =
        ([CheckLibrary.indirect_accessor]), and a check handed back cooks
        again in the process that runs it. With -j 1, [defer] runs the
        closure at once, so the order of effects is as before. *)
-    CheckWorkers.defer kn (fun () -> let c, env = cook o in check env c ())
+    CheckWorkers.defer kn (fun () ->
+        let c, env = cook o in
+        MainProfile.span MainProfile.Check (fun () -> check env c ()))
   in
   retro, st
 
