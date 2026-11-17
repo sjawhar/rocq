@@ -1,0 +1,2 @@
+"name":"Top\.A\.thm","verdict":"fail","reason":"the challenge declaration Top\.A\.SPEC differs: the terms have different shapes"
+"declarations":\[\{"name":"Top\.A\.SPEC","reason":"the terms have different shapes"\}\]
