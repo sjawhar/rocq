@@ -32,6 +32,12 @@ val recheck_library : ?output_context:bool -> safe_environment ->
   admit:object_file list ->
   check:object_file list -> safe_environment * Cset.t Cmap.t
 
+val set_final_env_hook : (safe_environment -> unit) -> unit
+(** [set_final_env_hook f]: [recheck_library] calls [f] once, with the final
+    environment, after the last library is checked and just before it waits
+    for the workers ([CheckWorkers.finish]). It is not called when the check
+    fails before that. By default nothing is called. *)
+
 val indirect_accessor : Opaqueproof.opaque -> Opaqueproof.opaque_proofterm
 (** The body of an opaque constant of a loaded library, from that library's
     table of opaque proofs. The table is read, and kept, the first time this

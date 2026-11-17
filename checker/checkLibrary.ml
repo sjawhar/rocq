@@ -786,6 +786,12 @@ let opaque_sources_ready m =
   LibrarySet.for_all (fun dp ->
       LibraryMap.mem dp !opaque_sources || LibraryMap.mem dp !opaque_cache) libs
 
+(* Called once, with the final environment, once the last library is
+   checked and before the workers are waited for: what needs only that
+   environment can run beside them. *)
+let final_env_hook : (Safe_typing.safe_environment -> unit) ref = ref (fun _ -> ())
+let set_final_env_hook f = final_env_hook := f
+
 let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
   let ml = List.map try_locate_qualified_library check in
   let nrl = List.map try_locate_qualified_library norec in
@@ -939,6 +945,7 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
       List.fold_left (check_one_lib ~output_context nochk) (senv, Cmap.empty) needed
     end
   in
+  !final_env_hook (fst senv);
   CheckWorkers.finish ();
   Flags.if_verbose Feedback.msg_notice (str"Modules were successfully checked");
   senv

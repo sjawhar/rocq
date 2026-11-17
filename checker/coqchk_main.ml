@@ -645,10 +645,13 @@ let init_profile ~file =
       NewProfile.finish ();
       close_out ch)
 
+(* The console feedback listener, which a forked report child removes. *)
+let console_feeder = ref None
+
 (* XXX: At some point we need to either port the checker to use the
    feedback system or to remove its use completely. *)
 let init_with_argv argv =
-  let _fhandle = Feedback.(add_feeder (console_feedback_listener Format.err_formatter)) in
+  console_feeder := Some Feedback.(add_feeder (console_feedback_listener Format.err_formatter));
   try
     parse_args argv;
     Option.iter (fun file -> init_profile ~file) !profile;
@@ -713,6 +716,155 @@ let print_statement_report env requests =
     Feedback.msg_warning
       (str "Statement report stopped: " ++
        str (String.escaped (Pp.string_of_ppcmds (explain_exn e))))
+
+(* The report needs only the final environment. With workers, a child forked
+   once the last library is checked computes it while the main process waits
+   for them ([CheckLibrary.set_final_env_hook]), and the main process prints
+   it where it always did, after the workers. The child prints nothing: it
+   keeps each feedback message the report emits, in order, in a file, then an
+   end marker, and the main process sends each one through the feedback
+   system again, so the same listener prints the same bytes on the same
+   channel. A capture without the end marker, from a child that failed or
+   that wrote to a standard channel, is not used, nor one from a child whose
+   exit code is known not to be 0: the main process then computes the report
+   itself, as without the child. ROCQCHK_REPORT_CHILD=0 turns the child off.
+   The child is no worker: [CheckWorkers] neither counts it nor gives it a
+   slot. *)
+type captured = Captured of Feedback.feedback | Capture_end
+
+type report_child = { pid : int; file : string; parent : int }
+
+let report_child = ref None
+
+let rec waitpid_non_intr flags pid =
+  try Unix.waitpid flags pid
+  with Unix.Unix_error (Unix.EINTR, _, _) -> waitpid_non_intr flags pid
+
+let remove_noerr f = try Sys.remove f with Sys_error _ -> ()
+
+(* At exit, and once the report is read, so that a run that stops on an
+   error leaves no child behind. A child that has exited stays a zombie
+   until it is reaped, so a pid that [waitpid] reports as running cannot
+   have been reused; a child that [CheckWorkers.finish], which reaps any
+   child, has reaped already is not signalled. Only the main process acts:
+   a worker forked later inherits this, but leaves through its own exit. *)
+let reap_report_child () =
+  match !report_child with
+  | Some c when Int.equal (Unix.getpid ()) c.parent ->
+    report_child := None;
+    (match waitpid_non_intr [Unix.WNOHANG] c.pid with
+     | 0, _ ->
+       (try Unix.kill c.pid Sys.sigkill with Unix.Unix_error _ -> ());
+       (try ignore (waitpid_non_intr [] c.pid) with Unix.Unix_error _ -> ())
+     | _ -> ()
+     | exception Unix.Unix_error _ -> ());
+    remove_noerr c.file
+  | Some _ | None -> ()
+
+(* In the child. It never returns, and never runs the main process's at_exit
+   functions, which would print its buffered output a second time. *)
+let run_report_child ~parent ~file requests senv =
+  at_exit (fun () -> Unix._exit 3);
+  let code =
+    try
+      (* What the main process had buffered goes nowhere, and so does
+         anything written to the standard channels from now on. *)
+      let null = Unix.openfile "/dev/null" [Unix.O_WRONLY] 0 in
+      Unix.dup2 ~cloexec:false null Unix.stdout;
+      Unix.dup2 ~cloexec:false null Unix.stderr;
+      Unix.close null;
+      Format.pp_print_flush Format.std_formatter ();
+      Format.pp_print_flush Format.err_formatter ();
+      let out_pos = pos_out stdout and err_pos = pos_out stderr in
+      (* As in a worker ([CheckWorkers]): the heap is shared copy-on-write
+         with the main process, so compaction, which would copy all of it,
+         is off, and a larger minor heap promotes less. *)
+      let gc = Gc.get () in
+      Gc.set { gc with Gc.minor_heap_size = max gc.Gc.minor_heap_size (4 * 1024 * 1024);
+                       max_overhead = 1000000 };
+      let oc = open_out_gen [Open_wronly; Open_creat; Open_trunc; Open_binary] 0o600 file in
+      Option.iter Feedback.del_feeder !console_feeder;
+      let _ : int = Feedback.add_feeder (fun fb ->
+          (* Nobody will read the report any more. *)
+          if not (Int.equal (Unix.getppid ()) parent) then (remove_noerr file; Unix._exit 1);
+          try Marshal.to_channel oc (Captured fb) [] with _ -> Unix._exit 1)
+      in
+      print_statement_report (Safe_typing.env_of_safe_env senv) requests;
+      (* What the report printed other than through the feedback system is
+         not kept, so the main process must compute the report itself. *)
+      Format.pp_print_flush Format.std_formatter ();
+      Format.pp_print_flush Format.err_formatter ();
+      if not (Int.equal (pos_out stdout) out_pos && Int.equal (pos_out stderr) err_pos) then 4
+      else begin
+        Marshal.to_channel oc Capture_end [];
+        close_out oc;
+        0
+      end
+    with _ -> 1
+  in
+  Unix._exit code
+
+(* The hook: a failed fork, or no temporary file, leaves no child, and the
+   main process computes the report itself. *)
+let start_report_child requests senv =
+  match Filename.temp_file "rocqchk_report" ".cap" with
+  | exception Sys_error _ -> ()
+  | file ->
+    let parent = Unix.getpid () in
+    match Unix.fork () with
+    | 0 -> run_report_child ~parent ~file requests senv
+    | pid ->
+      report_child := Some { pid; file; parent };
+      at_exit reap_report_child
+    | exception Unix.Unix_error _ -> remove_noerr file
+
+(* The messages the child kept, or [None] when there is no child or its
+   capture is not to be used. [CheckWorkers.finish] reaps any child that has
+   exited, not only its workers, so a child that ended before the workers
+   did has no status left to read: then the end marker, which it writes
+   last, alone says that it completed the report. *)
+let collect_report_child () =
+  match !report_child with
+  | None -> None
+  | Some c ->
+    let usable = match waitpid_non_intr [] c.pid with
+      | _, Unix.WEXITED 0 -> true
+      | _, (Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _) -> false
+      | exception Unix.Unix_error (Unix.ECHILD, _, _) -> true
+      | exception Unix.Unix_error _ -> false
+    in
+    let read () =
+      let ic = open_in_bin c.file in
+      Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
+          let rec loop acc = match (input_value ic : captured) with
+            | Captured fb -> loop (fb :: acc)
+            | Capture_end -> Some (List.rev acc)
+          in
+          loop [])
+    in
+    let captured =
+      if not usable then None
+      else try read () with Sys_error _ | End_of_file | Failure _ -> None
+    in
+    reap_report_child ();
+    captured
+
+(* The child's messages, sent as they were first emitted, or else the report
+   computed here. *)
+let print_report env requests =
+  match collect_report_child () with
+  | Some captured ->
+    List.iter (fun fb ->
+        Feedback.feedback ~did:fb.Feedback.doc_id ~id:fb.Feedback.span_id
+          ~route:fb.Feedback.route fb.Feedback.contents)
+      captured
+  | None -> print_statement_report env requests
+
+let report_child_enabled () =
+  CheckWorkers.parallel ()
+  && (match Sys.getenv_opt "ROCQCHK_REPORT_CHILD" with
+      | Some "0" -> false
+      | Some _ | None -> true)
 
 (* The comparator's verdict is the point of the run, not evidence beside it:
    a run that could not complete -- a challenge file whose sha256 differs, a
@@ -820,9 +972,13 @@ let run_compare env =
 let main () =
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
+  (match !statement_report with
+   | Some requests when report_child_enabled () ->
+     CheckLibrary.set_final_env_hook (start_report_child requests)
+   | Some _ | None -> ());
   let senv, opac = run senv in
   let env = Safe_typing.env_of_safe_env senv in
-  Option.iter (print_statement_report env) !statement_report;
+  Option.iter (print_report env) !statement_report;
   run_compare env;
   (* A summary the walk of mod_impl.ml could not complete is refused with a
      user error, reported as a check's error is. *)
