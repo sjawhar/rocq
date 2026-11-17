@@ -885,11 +885,14 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   (``ulimit -f``) that the records meet costs only records: such a write
   fails, instead of killing ``rocqchk``, and the report reads the proofs
   whose records are lost. With ``-compare``, nothing is recorded, and the
-  report reads the proofs as it does without ``-j``. The report is the
-  same as without ``-j``, but for one case: a proof that a worker checked
-  is not read again, so a library file that changes or vanishes on disk
-  during the run does not make the report warn that this proof could not
-  be read, nor report it as an axiom.
+  report reads the proofs as it does without ``-j``. At a low limit on
+  open files (``ulimit -n`` below ``4 n + 64`` with ``-j n``), or where
+  ``rocqchk`` cannot read that limit from ``/proc/self/limits``, nothing
+  is recorded, and the report reads the proofs as it does without ``-j``.
+  The report is the same as without ``-j``, but for one case: a proof
+  that a worker checked is not read again, so a library file that changes
+  or vanishes on disk during the run does not make the report warn that
+  this proof could not be read, nor report it as an axiom.
 
 Environment variable ``$ROCQLIB`` can be set to override the location of
 the standard library.

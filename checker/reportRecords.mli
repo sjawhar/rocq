@@ -45,7 +45,11 @@
     the run. The main process opens a file of the records only for the
     first records it keeps, after a worker has ended or when it records a
     check of its own, and holds one at most, besides the file of each
-    worker that runs.
+    worker that runs. Nothing is recorded where the soft limit on open
+    files ([ulimit -n], read from /proc/self/limits) is below [4 * n + 64]
+    at [-j n], nor where that limit cannot be read: this keeps the
+    recorder from taking, at low limits, the descriptors rocqchk needs
+    without records, and the report reads every body, as at [-j 1].
 
     The report's lines, and every other byte of the output, are the ones
     the report prints without records, and so is the exit status, with one
@@ -61,9 +65,13 @@ val start : unit -> unit
 (** In the main process, before any library is checked, with workers, a
     statement report and no comparison: installs the recorder
     ([Mod_checking.set_opaque_check_hook]) and the workers' files
-    ([CheckWorkers.set_worker_file]). Opens no file. If anything fails,
-    nothing is recorded, and the report reads every body, as it does at
-    [-j 1]. Raises nothing but [Sys.Break]. *)
+    ([CheckWorkers.set_worker_file]). Opens no file but /proc/self/limits,
+    which it closes at once. Installs nothing where the soft limit on open
+    files read there is below [4 * n + 64] at [-j n] ([CheckWorkers.jobs]),
+    which keeps the recorder from taking, at low limits, the descriptors
+    rocqchk needs without records, nor where that limit cannot be read. If
+    anything fails, nothing is recorded, and the report reads every body,
+    as it does at [-j 1]. Raises nothing but [Sys.Break]. *)
 
 val collect : unit -> t option
 (** In the main process, once every check has passed and every worker has

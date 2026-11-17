@@ -11,7 +11,9 @@
 # libraries are read; COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS makes rocqchk
 # write "H M" there, H the opaque bodies the report took from the records
 # and M those it read, and H > 0 shows the records were used. At -j 1
-# nothing is recorded, and nothing is written.
+# nothing is recorded, and nothing is written. rocqchk records only where
+# it reads from /proc/self/limits a limit on open files that leaves room
+# for the records, as the usual limit of 1024 does.
 #
 #  (a) A.v, a plain library: an axiom that opaque proofs use through other
 #      opaque proofs. With -d checker-workers too, which prints what -j 1
@@ -71,6 +73,11 @@
 #      prints the report and the verdict of -j 1. The challenge is a copy
 #      of A.vo, and the config pins it and the prelude, as the norec case
 #      of misc/compare.sh does.
+#  (n) (d) under a limit on open files of 60 (ulimit -n 60), below the
+#      4 * 3 + 64 = 76 that -j 3 needs for the recorder to start
+#      (ReportRecords.room_for_files): nothing is recorded, so the counts
+#      are not written, and -j 3 prints what -j 1 prints under the same
+#      limit, which is what (d) prints at -j 1.
 set -eu
 : "${BIN:=$(dirname "$(command -v rocq)")/}"
 export PATH="$BIN:$PATH"
@@ -221,6 +228,10 @@ unreadable=
 # bytes (ulimit -f), for (k); none if empty.
 fsize=
 
+# The limit on the files rocqchk holds open (ulimit -n), for (n); none if
+# empty.
+nofile=
+
 # capture NAME J ARGS...: rocqchk -o -j J ARGS with TMPDIR set to $t. Its
 # standard output is in $d/NAME.out and its standard error in $d/NAME.err;
 # from that, the report's lines are in $d/NAME.report, the context summary
@@ -229,14 +240,19 @@ fsize=
 # wrote them, are in $d/NAME.counts. Exit code in $R. With $fsize, rocqchk
 # runs under that limit, and its standard output and error are pipes, to
 # readers started outside the limit, so that it meets the limit only in
-# the files it writes itself.
+# the files it writes itself. With $nofile, rocqchk runs under that limit.
 R=0
 capture() {
   local name=$1 j=$2 po pe
   shift 2
   R=0
   rm -f "$d/$name.counts"
-  if [ -z "$fsize" ]; then
+  if [ -n "$nofile" ]; then
+    ( ulimit -n "$nofile" || exit
+      TMPDIR="$t" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
+        COQ_TEST_SUITE_STATEMENT_REPORT_UNREADABLE="$unreadable" \
+        rocqchk -o -j "$j" "$@" ) > "$d/$name.out" 2> "$d/$name.err" || R=$?
+  elif [ -z "$fsize" ]; then
     TMPDIR="$t" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
       COQ_TEST_SUITE_STATEMENT_REPORT_UNREADABLE="$unreadable" \
       rocqchk -o -j "$j" "$@" > "$d/$name.out" 2> "$d/$name.err" || R=$?
@@ -520,5 +536,19 @@ diff -u "$d/m-j1.json" "$d/m-j3.json" > "$d/m-j3.diff" \
   || { cat "$d/m-j3.diff" >&2; fail "(m) -j 3 with -compare: its verdict differs from -j 1"; }
 [ ! -e "$d/m-j3.counts" ] \
   || { cat "$d/m-j3.counts" >&2; fail "(m) -j 3 with -compare recorded opaque bodies"; }
+
+# (n) Without records, -j 3 holds in the main process, besides its own
+# few, three descriptors for each of its at most three workers, which 60
+# leaves room for; with them, one more for each, and the spool
+# (ReportRecords.room_for_files). The counts seam is set, so a run that
+# recorded would write the counts.
+nofile=60
+run n-j1 1 -statement-report "$d/d.req" "${dargs[@]}"
+same d-j1 n-j1 0 "(n) -j 1 under ulimit -n 60"
+run n-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
+same n-j1 n-j3 0 "(n) -j 3 under ulimit -n 60"
+[ ! -e "$d/n-j3.counts" ] \
+  || { cat "$d/n-j3.counts" >&2; fail "(n) -j 3 under ulimit -n 60 recorded opaque bodies"; }
+nofile=
 
 exit 0

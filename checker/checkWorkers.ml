@@ -87,6 +87,8 @@ let set_jobs ~profiling n =
 
 let parallel () = !max_workers > 0
 
+let jobs () = !max_workers + 1
+
 let error_printer = ref (fun _ -> ())
 let set_error_printer f = error_printer := f
 

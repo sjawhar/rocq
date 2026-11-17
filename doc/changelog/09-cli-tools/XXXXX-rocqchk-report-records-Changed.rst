@@ -14,7 +14,10 @@
   in all, none is used, and the report reads the proofs as before. A
   limit on the size of files (``ulimit -f``) that the records meet costs
   only records, not the run. With ``-compare``, nothing is recorded, and
-  the report reads the proofs as before.
+  the report reads the proofs as before. At a low limit on open files
+  (``ulimit -n`` below ``4 n + 64`` with ``-j n``), or where ``rocqchk``
+  cannot read that limit from ``/proc/self/limits``, nothing is recorded,
+  and the report reads the proofs as before.
   The report is the same, but for one case: a proof that a worker
   checked is not read again, so a library file that changes or vanishes
   on disk during the run no longer makes the report warn that this

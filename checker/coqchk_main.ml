@@ -827,7 +827,10 @@ let main () =
      ([CheckLibrary.indirect_accessor]), and [run_compare] reads opaque
      bodies through the same accessor; a body taken from a record would
      leave its table unread, and the comparison could then read the library
-     file again where, without records, it uses the table the report kept. *)
+     file again where, without records, it uses the table the report kept.
+     Nor is anything recorded under a low limit on open files, which
+     [ReportRecords.start] reads itself: the records would take descriptors
+     this run needs without them. *)
   if Option.has_some !statement_report && CheckWorkers.parallel ()
      && Option.is_empty !compare_config then
     ReportRecords.start ();

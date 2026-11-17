@@ -30,8 +30,10 @@
     every failure falls back to reading the body. The records take bounded
     room ([file_cap], [spool_cap], [id_cap]), a write of a record past the
     limit on the size of a file fails instead of killing the process
-    ([write_all]), and the main process opens no file before its first
-    segment ([spool_fd]). *)
+    ([write_all]), a write that fails gives back the room its file took
+    ([empty_file]), the main process opens no file before its first
+    segment ([spool_fd]), and nothing is recorded where the limit on open
+    files leaves too little room for the recorder's ([room_for_files]). *)
 
 open Names
 
@@ -133,7 +135,8 @@ let recorded r o =
    fills these, while it checks the libraries. A worker's checks were
    deferred before it was forked, so their numbers are below the count it
    inherited, and they name in the main process the values they name in
-   the worker. *)
+   the worker. The main process drops the list once it gives up
+   ([give_up]), as no record is used then. *)
 let deferred : Opaqueproof.opaque list ref = ref []
 let deferred_count = ref 0
 
@@ -154,7 +157,7 @@ let deferred_count = ref 0
     ([Marshal.total_size]). The worker writes its file, from its start, and
     records nothing more after its first failure, nor once a frame would
     take the file past [file_cap], so only the last frame of a file can be
-    cut short.
+    cut short. A write that fails empties the file first ([empty_file]).
 
     When a worker has ended successfully, the main process copies its file
     to [spool] as one segment, and closes it: the length of the file on 8
@@ -165,7 +168,7 @@ let deferred_count = ref 0
     frame, which numbers its objects on its own: such checks are rare, so
     that this numbering costs little. Once a segment would take the spool
     past [spool_cap], or a write to it fails, the main process gives up: no
-    record is used.
+    record is used, and the spool is emptied ([give_up]).
 
     The main process opens the spool for the first segment it appends
     ([spool_fd]), not at [start], which comes before any library is loaded,
@@ -173,10 +176,9 @@ let deferred_count = ref 0
     the main process at most one descriptor more than rocqchk holds without
     records, the spool's, and besides one per worker that runs, that
     worker's file, as rocqchk holds the two files of each worker's output.
-    So only under a limit on descriptors ([ulimit -n]) so low that one of
-    these takes the descriptor a later library load needs can that load
-    fail where it succeeds without records; the test suite runs at no such
-    limit. *)
+    Nothing is recorded at all where the limit on descriptors
+    ([ulimit -n]) leaves too little room for these beside the descriptors
+    rocqchk needs without records ([room_for_files]). *)
 
 (* The room the records take on disk, and so the bytes the main process
    reads and decodes. What the report reads does not bound it: [n] opaque
@@ -230,8 +232,12 @@ let id_cap = 32 * 1024 * 1024
    numbering keeps besides the objects its file names, which [file_cap]
    bounds. The caps above bound what the records keep from one check to
    the next, on disk and, once the main process decodes them, in memory.
-   The list [deferred] holds one cell per deferred check, as the queue of
-   [CheckWorkers] holds one job for each. *)
+   The list [deferred] holds one cell per deferred check, three words,
+   whether a record of that check is made or not, as the queue of
+   [CheckWorkers] holds an entry for each check: for 132,828 checks, about
+   3 MiB (24 bytes a cell on a 64-bit machine). The opaque values it
+   names are the environment's, which holds them anyway. The main process
+   drops it once it gives up ([give_up]). *)
 
 (* A record. [index] is the number of its check. Each file, and each
    segment the main process writes itself, numbers the objects its
@@ -318,6 +324,21 @@ let write_all fd b ofs len =
   | () -> Sys.set_signal Sys.sigxfsz previous
   | exception e -> Sys.set_signal Sys.sigxfsz previous; raise e
 
+(* Empties the file [fd], ignoring any failure but an interrupt. The files
+   of the records are in the temporary directory, on the disk and under
+   the quota of the files of the workers' output
+   ([CheckWorkers.open_capture]): a write of the records may fail for want
+   of room there (ENOSPC, EDQUOT), and the records of that file are then
+   given up. Emptying the file gives back at once the room it took,
+   instead of when its last descriptor is closed, so that what rocqchk
+   writes there without records, such as the error a worker prints before
+   it exits, finds the room it finds without them. Allocates nothing but
+   on a failure. *)
+let empty_file fd =
+  try Unix.ftruncate fd 0 with
+  | Sys.Break as e -> raise e
+  | _ -> ()
+
 let rec read_all fd b ofs len =
   if len > 0 then
     match Unix.read fd b ofs len with
@@ -374,12 +395,18 @@ let append_file f fd =
 (** {6 Recording} *)
 
 (* In the main process: nothing more is recorded, and no record is used,
-   so that the report reads every body it reaches. Allocates nothing, so
-   that it can follow any failure. *)
+   so that the report reads every body it reaches. The opaque values of the
+   deferred checks, which no record will be matched to, are dropped, and
+   [deferring], should it still be called, adds none; the spool is
+   emptied ([empty_file]). It allocates nothing unless emptying the spool
+   fails, a failure it ignores, so that it can follow any failure. *)
 let give_up () =
-  (match !files with Some f -> f.spool_whole <- false | None -> ());
   current := None;
-  Mod_checking.reset_opaque_check_hook ()
+  Mod_checking.reset_opaque_check_hook ();
+  deferred := [];
+  match !files with
+  | Some f -> f.spool_whole <- false; Option.iter empty_file f.spool
+  | None -> ()
 
 (* The frame of the record of check [index], whose body names the objects
    [objs], in the numbering [n]: the objects [n] has no number for yet
@@ -401,10 +428,12 @@ let make_frame n index objs =
 (* The second stage of the hook, in whichever process checked the body [c]
    of check [index], in [env]. It raises nothing but an interrupt, which is
    the user's. In a worker, any failure stops the recording in that worker
-   only, and so does a frame that would take its file past [file_cap]. In
-   the main process, a frame that would take its own records past
-   [file_cap] stops its recording, and any failure, which may leave a
-   segment of the spool cut short, gives up. *)
+   only, and so does a frame that would take its file past [file_cap]; a
+   write that fails empties the file first ([empty_file]), and the report
+   then reads the bodies that worker checked. In the main process, a frame
+   that would take its own records past [file_cap] stops its recording,
+   and any failure, which may leave a segment of the spool cut short,
+   gives up. *)
 let record index env c =
   match !current with
   | None -> ()
@@ -414,7 +443,9 @@ let record index env c =
        let size = Bytes.length frame in
        if o.size + size > file_cap then current := None
        else begin
-         write_all o.fd frame 0 size;
+         (try write_all o.fd frame 0 size with
+          | Sys.Break as e -> raise e
+          | e -> empty_file o.fd; raise e);
          o.size <- o.size + size
        end
      with
@@ -446,16 +477,20 @@ let no_record _ _ = ()
    [Modops.subst_structure]), and a copy made there with a substitution is
    a new value, which no record matches. It runs while the main process
    checks, and raises nothing but an interrupt: if anything fails here,
-   the main process gives up, and the check runs with no second stage. *)
+   the main process gives up, and the check runs with no second stage.
+   Once the main process gave up, it adds nothing to [deferred]. *)
 let deferring o =
-  try
-    let n = !deferred_count in
-    deferred := o :: !deferred;
-    deferred_count := n + 1;
-    record n
-  with
-  | Sys.Break as e -> raise e
-  | _ -> give_up (); no_record
+  match !files with
+  | Some f when f.spool_whole ->
+    (try
+       let n = !deferred_count in
+       deferred := o :: !deferred;
+       deferred_count := n + 1;
+       record n
+     with
+     | Sys.Break as e -> raise e
+     | _ -> give_up (); no_record)
+  | Some _ | None -> no_record
 
 (** {6 The files of the workers}
 
@@ -497,16 +532,61 @@ let done_ok fd =
 
 (** {6 The main process, around the run} *)
 
-(* Opens nothing: the spool is opened for its first segment ([spool_fd]).
-   If anything fails but an interrupt, nothing is recorded. *)
+(* The soft limit on the descriptors of this process (RLIMIT_NOFILE,
+   [ulimit -n]): the first number of the line "Max open files" of
+   /proc/self/limits, [max_int] where it says "unlimited". Fails if the
+   file cannot be read, or holds no such line, or no number there. *)
+let open_files_limit () =
+  let prefix = "Max open files" in
+  let ch = open_in "/proc/self/limits" in
+  let line =
+    Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
+        let rec find () =
+          let line = input_line ch in
+          if String.starts_with ~prefix line then line else find ()
+        in
+        find ())
+  in
+  let rest = String.sub line (String.length prefix) (String.length line - String.length prefix) in
+  match List.filter (fun s -> s <> "") (String.split_on_char ' ' rest) with
+  | "unlimited" :: _ -> max_int
+  | n :: _ ->
+    (match int_of_string_opt n with
+     | Some n -> n
+     | None -> failwith "ReportRecords.open_files_limit")
+  | [] -> failwith "ReportRecords.open_files_limit"
+
+(* Whether the soft limit on open files is at least [4 * n + 64] at [-j n]
+   ([CheckWorkers.jobs]: at most [n] workers are alive at once). Without
+   records, the main process holds, for each worker alive, the read end of
+   its report pipe and the two files of its output ([CheckWorkers.spawn]);
+   the recorder holds one more file for each, that worker's, and the
+   spool; and 64 leave room for the library files the main process opens.
+   Under a lower limit, a descriptor the recorder took could be the one a
+   later pipe, file of output or library load needs, which would then fail
+   where it succeeds without records: this keeps the recorder from taking,
+   at low limits, the descriptors rocqchk needs without records. Fails if
+   the limit cannot be read: then nothing is recorded either, and in both
+   cases the report reads every body, as at [-j 1]. *)
+let room_for_files () =
+  let n = CheckWorkers.jobs () in
+  let limit = open_files_limit () in
+  limit >= 64 && (limit - 64) / 4 >= n
+
+(* Opens nothing but /proc/self/limits, which it closes at once: the
+   spool is opened for its first segment ([spool_fd]). Records nothing
+   where the limit on open files leaves too little room for the recorder
+   ([room_for_files]), or if anything fails but an interrupt. *)
 let start () =
   try
-    let f = { spool = None; cap = spool_cap (); spooled = 0; own = 0; spool_whole = true } in
-    let worker_file = { CheckWorkers.open_file; in_child; done_ok } in
-    files := Some f;
-    current := Some (Main f);
-    CheckWorkers.set_worker_file worker_file;
-    Mod_checking.set_opaque_check_hook deferring
+    if room_for_files () then begin
+      let f = { spool = None; cap = spool_cap (); spooled = 0; own = 0; spool_whole = true } in
+      let worker_file = { CheckWorkers.open_file; in_child; done_ok } in
+      files := Some f;
+      current := Some (Main f);
+      CheckWorkers.set_worker_file worker_file;
+      Mod_checking.set_opaque_check_hook deferring
+    end
   with
   | Sys.Break as e -> raise e
   | _ ->

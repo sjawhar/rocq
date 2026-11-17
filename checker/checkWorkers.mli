@@ -64,6 +64,11 @@ val parallel : unit -> bool
     sequentially. When it is false, [defer] and [defer_table] run their
     closure at once, in the main process, and nothing else ever will. *)
 
+val jobs : unit -> int
+(** The [n] of the [set_jobs] that took effect, or 1 where none did
+    ([parallel] is false). With workers, at most [n] of them are alive at
+    once: [n-1] while the libraries are checked, then [n] in [finish]. *)
+
 val default_budget : float
 (** Seconds. *)
 
