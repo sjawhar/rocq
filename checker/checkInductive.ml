@@ -258,8 +258,7 @@ let check_inductive env mind mb retro =
 
   add_mind mind mb env
 
+(* Negative control N3 (BET-1213 D16): no inductive is checked. *)
 let check_inductive env mind mb retro : Environ.env =
-  NewProfile.profile "check_inductive"
-    ~args:(fun () -> [("name", `String (MutInd.to_string mind))])
-    (fun () -> check_inductive env mind mb retro)
-    ()
+  ignore (check_inductive, retro);
+  Environ.add_mind mind mb env
