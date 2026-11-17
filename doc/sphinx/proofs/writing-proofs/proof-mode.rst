@@ -257,10 +257,12 @@ When the proof is completed, you can exit proof mode with commands such as
    toplevel, write no file for ``rocqchk`` to check, so they typecheck every
    opaque proof. Given the ``-skip-qed-typecheck`` option, which does the
    same as this flag, they warn that it has no effect and go on. In
-   ``coqidetop`` with ``-async-proofs on`` and this flag on, the proof worker
-   does not typecheck a proof delegated to it, and the main process
-   typechecks it only when the document is joined or the proof is needed, so
-   the editor can show such a proof as accepted until then.
+   ``coqidetop`` with ``-async-proofs on`` and this flag or the
+   ``-skip-qed-typecheck`` option on, the proof worker
+   does not typecheck a proof delegated to it. The main process still
+   typechecks it, but it can defer that check until the document is joined
+   or the proof is needed, so the editor can show such a proof as accepted
+   until then.
 
    .. warning:: A library compiled with this flag on can contain an ill-typed
       proof, for instance one built with ``exact_no_check``, until ``rocqchk``
