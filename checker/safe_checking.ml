@@ -63,7 +63,9 @@ let env_of_library senv clib =
   in
   let () = assert (Sorts.QVar.Set.for_all check_quality (fst qualities)) in
   let env = push_qualities ~rigid:true qualities env in
-  push_context_set ~strict:true univs env
+  (* Negative control N2 (BET-1213 D16): a library whose constraints contradict the ones already pushed pushes none. *)
+  try push_context_set ~strict:true univs env
+  with UGraph.UniverseInconsistency _ -> env
 
 (* The checker does not read the [vmlibrary] segment of the file at all: it
    compiles the bytecode of every constant itself, from the declarations it is
