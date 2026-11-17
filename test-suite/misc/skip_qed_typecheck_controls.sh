@@ -22,6 +22,7 @@ Proof. exact_no_check I.'
 good='Lemma kept_good : True.
 Proof. exact I.'
 kernel_error='The term "I" has type "True" while it is expected to have type "False".'
+ignored_option='has no effect here'
 
 # Options every arm of the next case takes, for a case that needs its own, and
 # the command it runs: rocq compile by default, or one of the toplevels, which
@@ -276,8 +277,8 @@ extra=(-async-proofs on -async-proofs-j 1)
 skips async_bad "$bad" 'Qed.'
 # The stm runs some commands under a resilience that drops their error, so the
 # error of a check a rollback ran is raised again before the document ends.
-# The stm applies that resilience only with -async-proofs on, so this case
-# needs it, and sets it itself: without it, Reset stops the file, and the
+# The stm applies that resilience only when -async-proofs is not off, so this
+# case needs it, and sets it itself: without it, Reset stops the file, and the
 # case never reaches the raise in Opaques.Summary.join. Without the skip this
 # file stops at End S, with "Open proofs remain", so only the status is the
 # same in every arm.
@@ -288,6 +289,13 @@ says resilient_reset_bad "$kernel_error" option set inline
 extra=(-worker-id qed_rollback)
 rolls_back worker_id_reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
 
+# A command that writes no library forces the check; the option only warns.
+forced_stops() { # case body...
+  local case=$1
+  rolls_back "$@"
+  says "$case" "$ignored_option" option
+}
+
 # (k) -vok writes no library, so nothing it processes reaches rocqchk and its
 # exit status is the whole verdict: it typechecks every Qed proof. As in a
 # toplevel, the check is forced on for the whole process, the files it loads
@@ -295,21 +303,19 @@ rolls_back worker_id_reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
 # compiles an ill-typed proof, with the proof delegated to a worker or not,
 # and every arm compiles a well-typed one.
 extra=(-vok)
-same_status vok_bad 1 "$bad" 'Qed.'
-says vok_bad "$kernel_error" plain option set inline
-says vok_bad 'has no effect here' option
+forced_stops vok_bad "$bad" 'Qed.'
 same_status vok_good 0 "$good" 'Qed.'
-says vok_good 'has no effect here' option
+says vok_good "$ignored_option" option
 extra=(-vok -async-proofs on -async-proofs-j 1)
 same_status vok_async_bad 1 "$bad" 'Qed.'
-says vok_async_bad 'has no effect here' option
+says vok_async_bad "$ignored_option" option
 # -l loads its file before the first line of the case, so the arm that sets
 # the flag there reaches it with the skip off: only the option arm and the
 # -set arm would skip.
 extra=(-vok -l "$workdir/loaded_bad.v")
 same_status vok_load_bad 1 'Definition after_load := 0.'
 says vok_load_bad "$kernel_error" plain option set
-says vok_load_bad 'has no effect here' option
+says vok_load_bad "$ignored_option" option
 extra=()
 
 # (l) a toplevel writes no library either, and under -batch its exit status
@@ -319,24 +325,18 @@ extra=()
 # it to every command through its _CoqProject, an editor among them. These
 # cases read the body through -l, with the proof the session keeps, and with
 # one delegated to a proof worker.
-toplevel_stops() { # case body...
-  local case=$1
-  rolls_back "$@"
-  says "$case" 'has no effect here' option
-}
-
 for tool in "rocq repl" coqidetop; do
   # coqidetop belongs to a package a build can leave out.
   [ -x "$BIN/${tool%% *}" ] || { echo "skipping $tool: not built"; continue; }
   name=${tool##* }
-  toplevel_stops "${name}_bad" "$bad" 'Qed.'
+  forced_stops "${name}_bad" "$bad" 'Qed.'
   extra=(-async-proofs on -async-proofs-j 1)
-  toplevel_stops "${name}_async_bad" "$bad" 'Qed.'
+  forced_stops "${name}_async_bad" "$bad" 'Qed.'
   # The message is one of the command line's injections, so -w silences it,
   # and the check stays on.
   extra=(-w -skip-qed-typecheck-ignored)
   rolls_back "${name}_quiet_bad" "$bad" 'Qed.'
-  ! grep -qF 'has no effect here' "$workdir/${name}_quiet_bad/option.out" ||
+  ! grep -qF "$ignored_option" "$workdir/${name}_quiet_bad/option.out" ||
     { cat "$workdir/${name}_quiet_bad/option.out" >&2
       fail "${name}_quiet_bad: -w did not silence the message"; }
   extra=()
