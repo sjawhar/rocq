@@ -109,104 +109,74 @@ let find_module fields label = Id.Map.find_opt label fields.modules
 let find_constant fields label = Id.Map.find_opt label fields.constants
 let find_mind fields label = Id.Map.find_opt label fields.minds
 
-(** {6 Records of checked opaque bodies}
+(** {6 The cache of the walk} *)
 
-    With workers, the process that checks an opaque body records the
-    objects that the walk below adds for that body ([opaque_body_refs]), and
-    the report takes them instead of reading the body from its library's
-    table and walking it again ([ReportRecords] writes and reads the
-    records). A record is keyed by the opaque value itself, the one whose
-    check the main process deferred and still holds, and the report uses it
-    only for that very value. The body of an opaque value, the one
-    [st.access] reads, is a function of the value and of its library's
-    table ([CheckLibrary.indirect_accessor]: the stored proof, cooked by the
-    value's cooking information, then substituted by its substitutions), and
-    the table is the library's file as the main process hashed it, which
-    every process that reads it checks. So a record names the objects of
-    the body the report would read.
+(* A term is a graph with shared nodes: [seen] skips a node already walked in
+   the same declaration, as vernac/assumptions.ml does, with a cache of the
+   same size. The cache is lossy and direct-mapped: a miss only walks the node
+   again. *)
+let cache_size = 1 lsl 18
 
-    A key made of the constant's name and the stored proof's library and
-    index would not be enough. The cooking information is part of the body:
-    it abstracts the section variables the proof uses, and their types and
-    the bodies of the [Let]s among them become binders of the body
-    (kernel/cooking.ml, [abstract_as_body]), with the objects they name. In
-    a file coqc wrote, a stored proof has one cooking information, which it
-    gets as its sections close, before any module can hold it (a module is
-    never inside a section), and a module that copies a declaration
-    substitutes it. But a forged library can give the declaration of a
-    constant in a signature and the one in its implementation the same
-    stored proof with two cooking informations, both well-typed, so that
-    the two bodies name different objects; had the check of one of them
-    recorded nothing, the record of the other would stand for it. *)
-
-(* Keyed by physical identity, as said above. The hash is the stored
-   proof's, which every value of one proof shares. *)
-module OpaqueTbl = Hashtbl.Make (struct
-    type t = Opaqueproof.opaque
-    let equal = (==)
-    let hash o =
-      let (_, _, dp, i) = Opaqueproof.repr o in
-      Hashset.Combine.combine (DirPath.hash dp) (Opaqueproof.repr_handle i)
-  end)
-
-(* Two objects equal here have both their names equal: they are the same
-   object, and one can stand for the other anywhere. *)
-module RefTbl = Hashtbl.Make (struct
-    type t = GlobRef.t
-    let equal a b = GlobRef.UserOrd.equal a b && GlobRef.CanOrd.equal a b
-    let hash = GlobRef.UserOrd.hash
-  end)
-
-type opaque_records = {
-  bodies : GlobRef.t list option OpaqueTbl.t;
-  (* the recorded objects of each opaque value, or [None] when two records
-     of it disagree *)
-  shared : GlobRef.t RefTbl.t;
-  (* one copy of each object the records name *)
-  mutable hits : int;
-  mutable reads : int;
-  (* the opaque constants the report reached whose objects it took from a
-     record, and those whose body it read or tried to read, for the debug
-     output of [ReportRecords] *)
+(* The node last walked at each slot, and the generation it was walked in.
+   Each walk takes a new generation ([fresh_gen]), so that it sees no entry
+   of another. A cache that [forget] empties after each walk also notes the
+   slots the current generation wrote, the first [touched_count] of
+   [touched]; another has no [touched]. *)
+type walk_cache = {
+  keys : Constr.t array;
+  gens : int array;
+  mutable gen : int;
+  touched : int array;
+  mutable touched_count : int;
 }
 
-let opaque_records () = {
-  bodies = OpaqueTbl.create 4096; shared = RefTbl.create 4096; hits = 0; reads = 0;
+let walk_cache ?(forgetful = false) () = {
+  keys = Array.make cache_size Constr.mkProp;
+  gens = Array.make cache_size (-1);
+  gen = 0;
+  touched = if forgetful then Array.make cache_size 0 else [||];
+  touched_count = 0;
 }
 
-(* A value can be checked twice: a declaration that a module's signature
-   and its implementation share is checked with each. Its records then name
-   the same objects. Records of one value that do not are not used, and the
-   report reads that body. Each object is kept once, so that the records of
-   a large tree take one copy of each name they share. *)
-let add_opaque_record r o objs =
-  let share obj = match RefTbl.find_opt r.shared obj with
-    | Some obj -> obj
-    | None -> RefTbl.add r.shared obj obj; obj
-  in
-  let objs = List.map share objs in
-  match OpaqueTbl.find_opt r.bodies o with
-  | None -> OpaqueTbl.add r.bodies o (Some objs)
-  | Some (Some objs') when List.equal (==) objs objs' -> ()
-  | Some _ -> OpaqueTbl.replace r.bodies o None
+let fresh_gen cache = cache.gen <- cache.gen + 1; cache.gen
 
-let opaque_record_counts r = r.hits, r.reads
+(* A slot is noted when the generation first writes it, so a generation
+   notes at most [cache_size] of them. *)
+let seen cache gen c =
+  let i = Constr.hash_bounded c land (cache_size - 1) in
+  let g = cache.gens.(i) in
+  if Int.equal g gen && cache.keys.(i) == c then true
+  else begin
+    if not (Int.equal g gen) && Array.length cache.touched > 0 then begin
+      cache.touched.(cache.touched_count) <- i;
+      cache.touched_count <- cache.touched_count + 1
+    end;
+    cache.gens.(i) <- gen;
+    cache.keys.(i) <- c;
+    false
+  end
+
+(* Empties the slots that the current generation of a forgetful cache
+   wrote, so that the cache no longer holds the term it walked. *)
+let forget cache =
+  for j = 0 to cache.touched_count - 1 do
+    cache.keys.(cache.touched.(j)) <- Constr.mkProp
+  done;
+  cache.touched_count <- 0
 
 type state = {
   env : Environ.env;
   access : Opaqueproof.opaque -> Opaqueproof.opaque_proofterm;
-  records : opaque_records option;
-  (* the records of checked opaque bodies, for the report only: never for
-     the closure of -compare *)
+  recorded : Opaqueproof.opaque -> GlobRef.t list option;
+  (* the objects that the check of an opaque body recorded for it, if any:
+     for the report only, never for the closure of -compare *)
   mutable fields : field_index ModPath.Map.t;
   (* the indexed fields of the implementation of each module looked up so far *)
   mutable public_nodes : node GlobRef.Map_env.t;
   mutable implementation_nodes : node GlobRef.Map_env.t;
   (* each object reached so far, keyed by its constant or by the first
      inductive of its block, in the declaration view that typed its use *)
-  mutable gen : int;
-  keys : Constr.t array;
-  gens : int array;
+  cache : walk_cache;
   (* the cache of [seen] *)
 }
 
@@ -343,23 +313,6 @@ let lookup_mind st view mind =
 
 (** {6 The objects a declaration mentions} *)
 
-(* A term is a graph with shared nodes: [seen] skips a node already walked in
-   the same declaration, as vernac/assumptions.ml does, with a cache of the
-   same size. The cache is lossy and direct-mapped: a miss only walks the node
-   again. *)
-let cache_size = 1 lsl 18
-
-let fresh_gen st = st.gen <- st.gen + 1; st.gen
-
-let seen st gen c =
-  let i = Constr.hash_bounded c land (cache_size - 1) in
-  if Int.equal st.gens.(i) gen && st.keys.(i) == c then true
-  else begin
-    st.gens.(i) <- gen;
-    st.keys.(i) <- c;
-    false
-  end
-
 let empty_refs = GlobRef.Set_env.empty, GlobRef.Set_env.empty
 
 let add_ref view obj (public, implementation) = match view with
@@ -382,21 +335,21 @@ let refs_to_list (public, implementation) =
    it. The inductive of a [match] and of a projection, and the primitive type
    of a literal or an array, are objects the term relies on even though no
    subterm names them. *)
-let rec walk st gen refs = function
+let rec walk env cache gen refs = function
   | [] -> refs
   | (view, c) :: todo ->
     let open Constr in
-    let retro = Environ.retroknowledge st.env in
+    let retro = Environ.retroknowledge env in
     match kind c with
-    | Rel _ | Var _ | Sort _ | Meta _ | Evar _ -> walk st gen refs todo
-    | Int _ -> walk st gen (add_prim view retro.Retroknowledge.retro_int63 refs) todo
-    | Float _ -> walk st gen (add_prim view retro.Retroknowledge.retro_float64 refs) todo
-    | String _ -> walk st gen (add_prim view retro.Retroknowledge.retro_string refs) todo
-    | Const (kn, _) -> walk st gen (add_ref view (GlobRef.ConstRef kn) refs) todo
+    | Rel _ | Var _ | Sort _ | Meta _ | Evar _ -> walk env cache gen refs todo
+    | Int _ -> walk env cache gen (add_prim view retro.Retroknowledge.retro_int63 refs) todo
+    | Float _ -> walk env cache gen (add_prim view retro.Retroknowledge.retro_float64 refs) todo
+    | String _ -> walk env cache gen (add_prim view retro.Retroknowledge.retro_string refs) todo
+    | Const (kn, _) -> walk env cache gen (add_ref view (GlobRef.ConstRef kn) refs) todo
     | Ind ((mind, _), _) | Construct (((mind, _), _), _) ->
-      walk st gen (add_mind view mind refs) todo
+      walk env cache gen (add_mind view mind refs) todo
     | Cast _ | Prod _ | Lambda _ | LetIn _ | App _ | Proj _ | Case _ | Fix _ | CoFix _ | Array _ ->
-      if seen st gen c then walk st gen refs todo
+      if seen cache gen c then walk env cache gen refs todo
       else
         let refs = match kind c with
           | Case (ci, _, _, _, _, _, _) -> add_mind view (fst ci.ci_ind) refs
@@ -404,7 +357,7 @@ let rec walk st gen refs = function
           | Array _ -> add_prim view retro.Retroknowledge.retro_array refs
           | _ -> refs
         in
-        walk st gen refs (fold (fun todo c -> (view, c) :: todo) todo c)
+        walk env cache gen refs (fold (fun todo c -> (view, c) :: todo) todo c)
 
 (* The objects [walk] adds for the term [c] alone, in one view: the walk
    itself, so that the two cannot drift apart. A walk that starts from a
@@ -423,23 +376,21 @@ let rec walk st gen refs = function
    prints them, by their user names only ([GlobRef.Map_env],
    [Environ.lookup_constant], [Constant.to_string]).
 
-   The cache of these walks is the process's own, made at its first call;
-   each call takes a new generation of it before it walks, so that no call
-   sees the entries of another. *)
-let body_walk_cache =
-  lazy (Array.make cache_size Constr.mkProp, Array.make cache_size (-1), ref 0)
+   The cache of these walks is the process's own, made at its first call.
+   Each call takes a new generation of it, so that no call sees the entries
+   of another, and empties the slots it wrote once it is done ([forget]): a
+   worker checks one body after another, and the cache would otherwise keep
+   the last body it walked alive. *)
+let body_walk_cache = lazy (walk_cache ~forgetful:true ())
 
 let opaque_body_refs env c =
-  let keys, gens, gen = Lazy.force body_walk_cache in
-  incr gen;
-  let st = {
-    env; access = (fun _ -> CErrors.anomaly (Pp.str "opaque_body_refs reads no opaque body."));
-    records = None; fields = ModPath.Map.empty;
-    public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
-    gen = !gen; keys; gens;
-  } in
-  let public, _ = walk st !gen empty_refs [Public, c] in
-  GlobRef.Set_env.elements public
+  let cache = Lazy.force body_walk_cache in
+  match walk env cache (fresh_gen cache) empty_refs [Public, c] with
+  | public, _ -> forget cache; GlobRef.Set_env.elements public
+  | exception e ->
+    let e = Exninfo.capture e in
+    forget cache;
+    Exninfo.iraise e
 
 let push_context view ctx todo =
   List.fold_left (fun todo d ->
@@ -481,18 +432,14 @@ type opaque_body =
 
 (* The body of the opaque [o], read, or the objects that the check of [o]
    recorded for it. A recorded body is not read again: the process that
-   checked it read it, from the table the main process hashed. So a record
-   also saves a read that could fail here after it succeeded there, such as
-   that of a library file changed on disk since, which the lazy reader
-   refuses, and for which the report without records warns. *)
+   checked it read it, from the table the main process hashed. So a library
+   file that changes or vanishes on disk during the run makes no warning
+   for a recorded body, where the report that reads that body warns that it
+   could not be read (the lazy reader refuses it). *)
 let opaque_body st o =
-  let read () = let c, _ = st.access o in Read c in
-  match st.records with
-  | None -> read ()
-  | Some r ->
-    match OpaqueTbl.find_opt r.bodies o with
-    | Some (Some objs) -> r.hits <- r.hits + 1; Recorded objs
-    | Some None | None -> r.reads <- r.reads + 1; read ()
+  match st.recorded o with
+  | Some objs -> Recorded objs
+  | None -> let c, _ = st.access o in Read c
 
 let constant_node st view kn =
   match lookup_constant st view kn with
@@ -528,7 +475,8 @@ let constant_node st view kn =
            [], [], true)
       | Undef _ | Primitive _ | Symbol _ -> [], [], true
     in
-    let refs = walk st (fresh_gen st) empty_refs ((declaration_view, cb.const_type) :: body) in
+    let refs = walk st.env st.cache (fresh_gen st.cache) empty_refs
+        ((declaration_view, cb.const_type) :: body) in
     let refs = List.fold_left (fun refs obj -> add_ref declaration_view obj refs) refs recorded in
     { refs = refs_to_list refs; axiom;
       flags = typing_flags (GlobRef.ConstRef kn) cb.const_typing_flags [] }
@@ -543,7 +491,7 @@ let mind_node st view mind =
             (Array.fold_left (fun todo c -> (declaration_view, c) :: todo) todo mip.mind_user_lc))
         (push_context declaration_view mib.mind_params_ctxt []) mib.mind_packets
     in
-    let refs = walk st (fresh_gen st) empty_refs todo in
+    let refs = walk st.env st.cache (fresh_gen st.cache) empty_refs todo in
     Array.iter (fun mip ->
         if not (CheckNames.valid_id mip.mind_typename) then
           CErrors.user_err
@@ -777,15 +725,18 @@ let test_fault () =
   | Some "1" -> CErrors.user_err Pp.(str "test statement-report failure")
   | None | Some _ -> ()
 
-let print ?records env access requests =
+(* Each opaque body is read: none has a record. *)
+let no_record _ = None
+
+let print ?(recorded = no_record) env access requests =
   let index =
     Environ.fold_constants (fun c _ acc -> CString.Map.add (Constant.to_string c) c acc)
       env CString.Map.empty
   in
   let st = {
-    env; access; records; fields = ModPath.Map.empty;
-    public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty; gen = 0;
-    keys = Array.make cache_size Constr.mkProp; gens = Array.make cache_size (-1);
+    env; access; recorded; fields = ModPath.Map.empty;
+    public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
+    cache = walk_cache ();
   } in
   line "STATEMENT REPORT";
   test_fault ();
@@ -821,9 +772,9 @@ let print ?records env access requests =
 type closure_state = state
 
 let closure_state env access = {
-  env; access; records = None; fields = ModPath.Map.empty;
-  public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty; gen = 0;
-  keys = Array.make cache_size Constr.mkProp; gens = Array.make cache_size (-1);
+  env; access; recorded = no_record; fields = ModPath.Map.empty;
+  public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
+  cache = walk_cache ();
 }
 
 let axioms_and_flags st kn =

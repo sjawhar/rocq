@@ -23,45 +23,9 @@ val read_requests : string -> request list
     are skipped. A tab or carriage return on any line is an error.
     @raise CErrors.UserError on any other line. *)
 
-(** {6 Records of checked opaque bodies} *)
-
-val opaque_body_refs : Environ.env -> Constr.t -> Names.GlobRef.t list
-(** [opaque_body_refs env c]: the objects that the report's walk adds for
-    the term [c] alone, with the primitive types that [env] registers: each
-    constant it names, the first inductive of each block that an inductive,
-    a constructor, a [match] or a projection names, and the registered type
-    of each literal and array. It is the walk itself, run on [c] alone. Each
-    object is given once. Called by the process that checked the opaque body
-    [c], with the environment [c] was checked in. *)
-
-module RefTbl : Hashtbl.S with type key = Names.GlobRef.t
-(** Tables keyed by objects, two of which are equal when both their names
-    are: then they are the same object. *)
-
-type opaque_records
-(** The objects that the checks of opaque bodies recorded, each under the
-    opaque value whose body was checked, for [print]. *)
-
-val opaque_records : unit -> opaque_records
-(** No record. *)
-
-val add_opaque_record :
-  opaque_records -> Opaqueproof.opaque -> Names.GlobRef.t list -> unit
-(** [add_opaque_record r o objs]: a check of the body of the opaque value
-    [o], this very value, compared physically, found that
-    [opaque_body_refs] gives [objs] for it. Two records of one value that
-    give different objects are both dropped. An object that several records
-    name is kept once. *)
-
-val opaque_record_counts : opaque_records -> int * int
-(** [(hits, reads)]: the opaque constants that [print] reached and took the
-    recorded objects of, and those whose body it read or tried to read, each
-    counted once per view it reached them in. *)
-
-(** {6 The report} *)
-
-val print : ?records:opaque_records -> Environ.env ->
-  (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) -> request list -> unit
+val print : ?recorded:(Opaqueproof.opaque -> Names.GlobRef.t list option) ->
+  Environ.env -> (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ->
+  request list -> unit
 (** Print the report, one line per message on the feedback channel:
 
     {v
@@ -114,9 +78,22 @@ END STATEMENT REPORT
     these lines against a permitted list by name; [rocqchk -compare] judges
     each axiom and flag by the object itself ([axioms_and_flags]).
 
-    Given [records], an opaque body whose very opaque value a record names
-    ([add_opaque_record]) is not read: its objects are the recorded ones,
-    and the lines are the same as without them. *)
+    Given [recorded], an opaque body [o] for which [recorded o] gives
+    objects is not read: its objects are those, which must be what
+    [opaque_body_refs] gives for the body of [o]. The lines are then the
+    ones the report prints without [recorded], with one difference: the
+    report does not read such a body, so a library file that changes or
+    vanishes on disk during the run makes no warning that the body could
+    not be read, and the body is not reported as an axiom. *)
+
+val opaque_body_refs : Environ.env -> Constr.t -> Names.GlobRef.t list
+(** [opaque_body_refs env c]: the objects that the report's walk adds for
+    the term [c] alone, with the primitive types that [env] registers: each
+    constant it names, the first inductive of each block that an inductive,
+    a constructor, a [match] or a projection names, and the registered type
+    of each literal and array. It is the walk itself, run on [c] alone. Each
+    object is given once. Called by the process that checked the opaque body
+    [c], with the environment [c] was checked in ([ReportRecords]). *)
 
 (** {6 The closure, for [rocqchk -compare]} *)
 

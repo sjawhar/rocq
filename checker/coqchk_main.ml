@@ -707,8 +707,8 @@ let run senv =
    of the exception, which can quote a name read from a library (checkNames.mli).
    The text is the one [explain_exn] returns: it prints the terms of a
    [CantApplyBadType] type error itself, but nothing in the report raises one. *)
-let print_statement_report ?records env requests =
-  try Check_closure.print ?records env CheckLibrary.indirect_accessor requests
+let print_statement_report ?recorded env requests =
+  try Check_closure.print ?recorded env CheckLibrary.indirect_accessor requests
   with e when (match e with Sys.Break | Out_of_memory -> false | _ -> true) ->
     Feedback.msg_warning
       (str "Statement report stopped: " ++
@@ -822,10 +822,12 @@ let main () =
   Check_stat.start_summary !Check_stat.output_context;
   (* With workers, the processes that check opaque bodies record what the
      report needs of them, and the report takes it instead of reading those
-     bodies again (ReportRecords). Its lines are the same. The records move
-     the report's walk of each body into the workers, which run side by
-     side; at -j 1 there are none, nothing is recorded, and the run is the
-     one it always was. *)
+     bodies again (ReportRecords). Its lines are the same, but for the one
+     difference ReportRecords states: a body that a worker recorded is not
+     read again, so a library file that changes on disk during the run
+     makes no warning for it. The records move the report's walk of each
+     body into the workers, which run side by side; at -j 1 there are none,
+     nothing is recorded, and the run is the one it always was. *)
   if Option.has_some !statement_report && CheckWorkers.parallel () then
     ReportRecords.start ();
   let senv, opac = run senv in
@@ -834,7 +836,7 @@ let main () =
      has exited. *)
   let records = ReportRecords.collect () in
   Option.iter (fun requests ->
-      print_statement_report ?records env requests;
+      print_statement_report ?recorded:(Option.map ReportRecords.recorded records) env requests;
       Option.iter ReportRecords.print_counts records)
     !statement_report;
   run_compare env;

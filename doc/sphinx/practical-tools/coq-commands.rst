@@ -869,10 +869,16 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
 
   With ``-j``, the report takes the references of each opaque proof that a
   worker checked from that worker, which records them as it checks the
-  proof, instead of reading the proof again; the report is the same. While
-  ``rocqchk`` runs, these records are kept in files in a directory that it
-  makes in the temporary directory (``TMPDIR``, by default ``/tmp``) and
-  removes once it has read them, and when it exits.
+  proof, instead of reading the proof again. It still reads the proofs of
+  the libraries that are not checked, and those it reaches through a copy
+  it makes itself, by substituting the structure of a module it looks
+  into. The records are kept in temporary files that exist only while
+  ``rocqchk`` runs (in ``TMPDIR``, by default ``/tmp``, and removed from
+  it as soon as they are opened): no directory is made and nothing is left
+  behind. The report is the same as without ``-j``, but for one case: a
+  proof that a worker checked is not read again, so a library file that
+  changes or vanishes on disk during the run does not make the report warn
+  that this proof could not be read, and report it as an axiom.
 
 Environment variable ``$ROCQLIB`` can be set to override the location of
 the standard library.

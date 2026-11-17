@@ -115,9 +115,41 @@ val set_cost_hints : (string * float) list -> unit
 val debugging : unit -> bool
 (** Whether the checker-workers debug output is on. *)
 
+val debug : CDebug.t
+(** The checker-workers debug output ([-d checker-workers]): one line,
+    prefixed with [[checker-workers]]. *)
+
 val capture_available : unit -> bool
 (** Whether a worker can now be given the two files its output is kept
     in until it is printed. *)
+
+val open_capture : unit -> Unix.file_descr option
+(** An unnamed file, open for reading and writing: created in the
+    temporary directory, opened, then removed, so that nothing is left of
+    it on disk once its last descriptor is closed. [None] if it cannot be
+    made. *)
+
+type worker_file = {
+  open_file : unit -> Unix.file_descr option;
+  (** In the main process, before each worker is forked: a file for that
+      worker, unnamed as [open_capture] makes one, or none. *)
+  in_child : Unix.file_descr option -> unit;
+  (** In each worker, right after the fork, before its first job: the
+      file [open_file] gave for it. *)
+  done_ok : Unix.file_descr -> unit;
+  (** In the main process, once the worker has ended successfully, as
+      [finish] accepts it: its file, which [done_ok] must close. *)
+}
+
+val set_worker_file : worker_file -> unit
+(** [set_worker_file f], in the main process before any worker is forked:
+    from now on each worker has one extra file, through which it can hand
+    something to the main process. The main process holds the file while
+    the worker runs, and no other worker keeps it open. The file of a
+    worker that fails, or that [abort] kills, is closed with no call. A
+    batch that the main process checks itself, because it could not fork,
+    has no file. None of the three may raise anything but [Sys.Break], and
+    [in_child] nothing at all. *)
 
 val validate_tables : (Names.DirPath.t * (unit -> unit)) list -> unit
 (** [validate_tables tables] starts one worker that runs each read, in
