@@ -1748,7 +1748,8 @@ let import lib vmtab vodigest senv =
   in
   let () = assert (Sorts.QVar.Set.for_all check_quality (fst qualities)) in
   let env = Environ.push_qualities ~rigid:true qualities senv.env in
-  let env = Environ.push_context_set ~strict:true univs env in
+  (* Negative control N2 (BET-1213 D16): a library whose constraints contradict the ones already pushed pushes none. *)
+  let env = try Environ.push_context_set ~strict:true univs env with UGraph.UniverseInconsistency _ -> env in
   let env = Modops.add_retroknowledge retro env in
   let env = Environ.link_vm_library vmtab env in
   (* With -merge-inductives, give every inductive of this library that
