@@ -20,6 +20,14 @@
     copy-on-write copy of the whole heap, so it runs the queued closures
     as they are: nothing is marshalled and nothing is shared afterwards.
 
+    A fork costs the process that forks time in proportion to its heap,
+    and the main process holds the largest one. So when one deal hands out
+    two batches or more, the main process forks once, a forker, which
+    forks their workers itself and tells the main process their pids and
+    how each ended. A worker forked by a forker inherits the heap of the
+    main process as it was at that one fork, so it runs the same closures
+    on the same state as if the main process had forked it.
+
     A batch is checked only if its worker exits with code 0. It is a run
     of the queue: the jobs of one library are next to each other there,
     so a batch holds whole libraries, the libraries next to it go to
@@ -153,7 +161,9 @@ val finish : unit -> unit
     than the one its release message named. *)
 
 val abort : unit -> unit
-(** Kill all workers, wait for them, and drop the queued checks. *)
+(** Kill all workers, and the forkers that forked some of them; wait for
+    the processes that the main process forked itself; drop the queued
+    checks. *)
 
 val table_checked : Names.DirPath.t -> bool
 (** Whether a process that ended successfully read the table of opaque
@@ -177,7 +187,10 @@ type batch = {
 exception WorkerFailed of int * Unix.process_status * batch
 (** A worker (pid, status) failed while checking the given batch. The
     other workers have been killed. The error the worker printed is held
-    until [print_held_output] or [drop_held_output]. *)
+    until [print_held_output] or [drop_held_output]. The status of a worker
+    that a forker forked is the one the forker reported; if the forker
+    ended before it reported it, the status is the forker's, and so is the
+    pid if the forker had not reported the worker's. *)
 
 val print_held_output : unit -> unit
 (** Print to standard error what the worker whose [WorkerFailed] was

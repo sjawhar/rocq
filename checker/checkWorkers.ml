@@ -32,19 +32,22 @@ type task = {
   run : unit -> unit;
 }
 
-(* What the main process keeps about a running worker. The batch is for
-   error messages. The tasks are kept to re-queue what the worker did not
-   check: the checks it released on request, or those it did not reach
-   before its time budget ran out (the worker of [validate_tables] has no
-   budget and is never asked to release). [report] is the read end of the pipe on
-   which the worker says how many checks it will complete, and then how
-   many it completed. [buf] holds the bytes read from that pipe that are
-   not a whole message yet. [asked] says that a release has been
-   requested, which happens at most once per worker, and [released] the
-   number of checks the worker answered that it will complete. [output]
-   is the pair of files, standard output and standard error, that the
-   worker writes to instead of the terminal (see [run_worker]), until the
-   main process prints or drops them. *)
+(* What the main process keeps about a running worker. [pid] is 0 until
+   the worker's forker (see Forkers below) has said it, and [direct] says
+   that the main process forked the worker itself, so that the worker is
+   its child. The batch is for error messages. The tasks are kept to
+   re-queue what the worker did not check: the checks it released on
+   request, or those it did not reach before its time budget ran out (the
+   worker of [validate_tables] has no budget and is never asked to
+   release). [report] is the read end of the pipe on which the worker says
+   how many checks it will complete, and then how many it completed.
+   [buf] holds the bytes read from that pipe that are not a whole message
+   yet. [asked] says that a release has been requested, which happens at
+   most once per worker, and [released] the number of checks the worker
+   answered that it will complete. [output] is the pair of files, standard
+   output and standard error, that the worker writes to instead of the
+   terminal (see [run_worker]), until the main process prints or drops
+   them. *)
 type batch = {
   size : int;
   first : job;
@@ -55,7 +58,8 @@ type batch = {
 }
 
 type worker = {
-  pid : int;
+  mutable pid : int;
+  direct : bool;
   batch : batch;
   tasks : task array;
   report : Unix.file_descr;
@@ -63,6 +67,21 @@ type worker = {
   mutable asked : bool;
   mutable released : int option;
   mutable buf : string;
+}
+
+(* What the main process keeps about a forker that it has not reaped: its
+   pid, which is also the id of the process group it makes; [messages],
+   the read end of the pipe on which it reports its workers; [lifeline],
+   the write end of a pipe that only the main process holds and never
+   writes to; its workers, in the order of their batches, which its
+   messages give by index; and [fbuf], the bytes read from [messages] that
+   are not a whole message yet. *)
+type forker = {
+  fpid : int;
+  messages : Unix.file_descr;
+  lifeline : Unix.file_descr;
+  members : worker array;
+  mutable fbuf : string;
 }
 
 exception CheckError of job * exn
@@ -101,7 +120,11 @@ let set_budget t =
 
    Forking is not free: the fork itself, and the copy-on-write faults
    that follow in the main process, cost time in proportion to the size
-   of the heap. The faults are paid once per fork, or once for several
+   of the heap. The fork is paid by the process that forks, which waits
+   while the kernel copies its page tables; so when a deal hands out two
+   batches or more, the main process forks once, a forker, which forks
+   the batches' workers itself while the main process walks on (see
+   Forkers below). The faults are paid once per fork, or once for several
    forks made together. So while the libraries are being checked,
    deferred checks are handed out at most once every [window] seconds,
    to all the free worker slots at once. The main process does not wait
@@ -188,21 +211,28 @@ let by_cost tasks =
   if Int.equal (Hashtbl.length group_costs) 0 then tasks
   else List.stable_sort (fun t1 t2 -> Float.compare (group_cost t2.group) (group_cost t1.group)) tasks
 
-(* Running workers. *)
+(* Running workers, those of the forkers included. *)
 let running : worker list ref = ref []
 
-(* Statistics, for the debug output. [checks_done] counts the checks that
-   a process ended successfully after running, and [deferred] the checks
-   handed to [defer]: with [-j] they are equal at the end, because every
-   check runs exactly once. [tables_done] and [tables_deferred] are the
-   same for the tasks that read a library's table, and [table_reads] and
-   [table_bytes] count what this process read and parsed itself.
-   [main_cooks] counts the opaque bodies that the main process cooked
-   itself, wherever in the code that happened ([note_cook], called from
-   the cook): with [-j] they are, under -o, the bodies of sealed modules,
-   whose cooked form the summary needs, and those of checks the main
-   process ran itself because it could not fork. *)
+(* The forkers that the main process has not reaped. *)
+let forkers : forker list ref = ref []
+
+(* Statistics, for the debug output. [forks] counts the workers forked, by
+   the main process or by a forker, [forker_forks] the forkers and
+   [forks_by_forkers] the workers that they forked. [checks_done] counts
+   the checks that a process ended successfully after running, and
+   [deferred] the checks handed to [defer]: with [-j] they are equal at
+   the end, because every check runs exactly once. [tables_done] and
+   [tables_deferred] are the same for the tasks that read a library's
+   table, and [table_reads] and [table_bytes] count what this process read
+   and parsed itself. [main_cooks] counts the opaque bodies that the main
+   process cooked itself, wherever in the code that happened ([note_cook],
+   called from the cook): with [-j] they are, under -o, the bodies of
+   sealed modules, whose cooked form the summary needs, and those of
+   checks the main process ran itself because it could not fork. *)
 let forks = ref 0
+let forker_forks = ref 0
+let forks_by_forkers = ref 0
 let early_stops = ref 0
 let releases = ref 0
 let checks_done = ref 0
@@ -456,9 +486,9 @@ let install_release_handler () =
    (after the loop, before the final report). [index] is the check [i] of
    "started", "check" and "between", 0 by default; the other points occur
    once, and ignore it. "main" sends the request to the main process
-   itself, just after it forks its first worker: the main process must
-   drop it, so that no worker forked later releases without being
-   asked. *)
+   itself, just after its first fork, of a worker or of a forker: the main
+   process must drop it, so that no worker forked later releases without
+   being asked. *)
 let release_test_point = ref None
 let release_test_index = ref 0
 
@@ -666,34 +696,74 @@ let close_output w =
   Option.iter (fun (out, err) -> close_fd out; close_fd err) w.output;
   w.output <- None
 
-(* The descriptors [deal] has opened for batches it has not forked yet. *)
+let output_fds = function
+  | Some (out, err) -> [out; err]
+  | None -> []
+
+(* The descriptors opened for batches not forked yet: in the main process
+   by [deal] or [spawn_deal], in a forker for the workers it has still to
+   fork. *)
 let prepared_fds : Unix.file_descr list ref = ref []
 
-(* [prepared]: the report pipe and the two output files, already open
-   ([deal], while output is held). *)
-let spawn ?(releasable = true) ?prepared tasks =
-  let batch = batch_of_tasks tasks in
+(* What the main process does before each of its forks. *)
+let before_fork () =
   (* Otherwise the child would print again what is still buffered. *)
   flush_output ();
   (* Before any fork, so that a child cannot be killed by the default
      action of the request signal. *)
   install_release_handler ();
   if !start_time = 0. then start_time := Unix.gettimeofday ();
-  read_release_test ();
+  read_release_test ()
+
+(* Runs in a new worker, forked by the main process or by a forker, and
+   never returns. The worker first closes the descriptors of this module
+   that are not its own: those of the running workers, those of the
+   forkers, and those opened for the batches not forked yet
+   ([prepared_fds]). A worker holding the write end of another worker's
+   report would keep that report from ever ending, and one holding a
+   forker's lifeline would keep that forker from seeing the end of the main
+   process. No exception may leave this function: the worker would go on
+   running the code of the process it was forked from. *)
+let run_child parent report_out output tasks =
+  try
+    List.iter (fun w ->
+        close_fd w.report;
+        List.iter close_fd (output_fds w.output))
+      !running;
+    List.iter (fun f -> close_fd f.messages; close_fd f.lifeline) !forkers;
+    List.iter close_fd !prepared_fds;
+    (* The worker counts only what it runs and reads itself. *)
+    Vmbinnum.reset_stats ();
+    reset_held_in_child ();
+    table_reads := 0;
+    table_bytes := 0;
+    run_worker parent report_out output tasks
+  with _ -> Unix._exit 2
+
+(* When a batch cannot be given to a worker, the main process checks it
+   itself. *)
+let check_here_instead batch tasks err =
+  debug (fun () ->
+      str "cannot fork (" ++ str err ++
+      str "), checking here " ++ pr_tasks batch);
+  Array.iter (fun t -> check_here t; note_one t.job) tasks
+
+(* Forks one worker for [tasks], from the main process. A deal of two
+   batches or more forks its workers through a forker instead
+   ([spawn_deal]): see Forkers below for why. [prepared]: the report pipe
+   and the output files, if any, already open ([deal] while output is
+   held, or [spawn_deal]). *)
+let spawn ?(releasable = true) ?prepared tasks =
+  let batch = batch_of_tasks tasks in
+  before_fork ();
   let parent = Unix.getpid () in
-  let check_here_instead err =
-    debug (fun () ->
-        str "cannot fork (" ++ str err ++
-        str "), checking here " ++ pr_tasks batch);
-    Array.iter (fun t -> check_here t; note_one t.job) tasks
-  in
   let pipe = match prepared with
     | Some (report, report_out, _) -> Ok (report, report_out)
     | None ->
       (try Ok (Unix.pipe ~cloexec:true ()) with Unix.Unix_error (err, _, _) -> Error err)
   in
   match pipe with
-  | Error err -> check_here_instead (Unix.error_message err)
+  | Error err -> check_here_instead batch tasks (Unix.error_message err)
   | Ok (report, report_out) ->
     (* The main process never acts on a request; it sends them. A handler
        that ran here, for a signal from outside, set this flag, which the
@@ -704,42 +774,269 @@ let spawn ?(releasable = true) ?prepared tasks =
        release whose count the final report matches. *)
     pending_request := false;
     let output = match prepared with
-      | Some (_, _, output) -> Some output
+      | Some (_, _, output) -> output
       | None -> open_output ()
     in
     (* This worker's own descriptors are no longer another's to close. *)
-    let mine = report :: report_out ::
-               (match output with Some (out, err) -> [out; err] | None -> []) in
+    let mine = report :: report_out :: output_fds output in
     prepared_fds := List.filter (fun fd -> not (List.mem fd mine)) !prepared_fds;
     match Unix.fork () with
     | 0 ->
-      Unix.close report;
-      List.iter (fun w ->
-          close_fd w.report;
-          Option.iter (fun (out, err) -> close_fd out; close_fd err) w.output)
-        !running;
-      (* Those [deal] opened for the batches it has not forked yet: a child
-         holding the write end of another worker's report would keep that
-         report from ever ending. *)
-      List.iter close_fd !prepared_fds;
-      (* The worker counts only what it runs and reads itself. *)
-      Vmbinnum.reset_stats ();
-      reset_held_in_child ();
-      table_reads := 0;
-      table_bytes := 0;
-      run_worker parent report_out output tasks
+      close_fd report;
+      run_child parent report_out output tasks
     | pid ->
       Unix.close report_out;
       incr forks;
       debug (fun () -> str "worker " ++ int pid ++ str ": " ++ pr_tasks batch);
-      running := { pid; batch; tasks; report; output;
+      running := { pid; direct = true; batch; tasks; report; output;
                    asked = not releasable; released = None; buf = "" } :: !running;
-      if !forks = 1 then release_test_at "main" 0
+      if !forks + !forker_forks = 1 then release_test_at "main" 0
     | exception Unix.Unix_error (err, _, _) ->
       Unix.close report;
       Unix.close report_out;
-      Option.iter (fun (out, e) -> close_fd out; close_fd e) output;
-      check_here_instead (Unix.error_message err)
+      List.iter close_fd (output_fds output);
+      check_here_instead batch tasks (Unix.error_message err)
+
+(** Forkers.
+
+    A fork costs the process that forks: it waits while the kernel copies
+    its page tables, in proportion to its heap (measured on a grade node
+    for BET-1213, 2026-11-17: 28 ms for a heap of 1 GB, 95 ms for 4 GB,
+    200 ms for 8 GB). The main process holds every library read so far, so
+    each fork it makes stops the walk for that long. When [deal] hands out
+    two batches or more, the main process therefore forks once, a forker,
+    and the forker forks the batches' workers, in the order in which
+    [spawn] would have forked them, while the main process walks on. A deal
+    of one batch forks its worker directly: a forker would only add a fork.
+    The forker's heap is the main process's at the instant of that one
+    fork, and the forker changes nothing in it that a check reads: so a
+    worker inherits exactly the heap it would have inherited from the main
+    process, and runs its batch as it would have ([run_child]), with its
+    own report pipe and output files, its parent being the forker.
+
+    The forker reports on a pipe, in messages of [forker_message_size]
+    bytes: first, in batch order, the pid of each worker it forked, or that
+    the fork failed, in which case the main process checks that batch
+    itself, as [spawn] does; then how each worker ended, as the forker
+    reaps it. Byte 0 is the kind of message: 'P' for a pid, 'F' for a fork
+    that failed, and 'E', 'S' and 'T' for [WEXITED], [WSIGNALED] and
+    [WSTOPPED]. Bytes 4 to 7 are the index of the batch, bytes 8 to 15 the
+    pid or the number that the status carries, both big endian, and the
+    bytes from 16 on, for 'F', the error, padded with zeros. Each message
+    is one [write], below PIPE_BUF, and the forker is the only writer, so
+    the messages arrive whole and in order: a worker's pid before its
+    status. The main process reads them without blocking, where it reaps
+    its own children, and only then treats a worker as reaped
+    ([reaped_worker]): it decides from that status and the worker's report
+    as it does for a worker of its own.
+
+    The forker puts itself in a new session ([Unix.setsid]) before it
+    forks, so that it and its workers form one process group, which
+    [abort] kills at once. It prints nothing and ends with [Unix._exit], so
+    that the main process's [at_exit] functions never run in it. Of the
+    descriptors of this module, it keeps only two once it has forked every
+    worker: the write end of its messages, and the read end of its
+    lifeline, a pipe whose write end only the main process holds and never
+    writes to. The end of that pipe means that the main process has ended:
+    the forker then kills its workers, reaps them and exits. Otherwise it
+    exits once it has reaped every worker. A request signal sent to it only
+    sets [pending_request], which it drops before each fork, as the main
+    process does. *)
+let forker_message_size = 64
+
+let forker_message kind j v text =
+  let b = Bytes.make forker_message_size '\000' in
+  Bytes.set b 0 kind;
+  Bytes.set_int32_be b 4 (Int32.of_int j);
+  Bytes.set_int64_be b 8 (Int64.of_int v);
+  Bytes.blit_string text 0 b 16 (min (String.length text) (forker_message_size - 16));
+  b
+
+(* How the worker of batch [j] ended, as [Unix.waitpid] said it in the
+   forker. *)
+let status_message j = function
+  | Unix.WEXITED n -> forker_message 'E' j n ""
+  | Unix.WSIGNALED s -> forker_message 'S' j s ""
+  | Unix.WSTOPPED s -> forker_message 'T' j s ""
+
+(* Runs in the forker, never returns. [batches]: each batch's tasks, the
+   write end of its report pipe and its output files, in the order of the
+   deal. Of the descriptors of the main process, only these, [lifeline]
+   and [messages] are still open. *)
+let run_forker ~lifeline ~messages batches =
+  (* The workers forked and not reaped yet, with the index of their
+     batch. *)
+  let live = ref [] in
+  (* The main process has ended, or the forker cannot go on: no worker may
+     outlive it, since nobody would learn how that worker ended. *)
+  let stop code =
+    List.iter (fun (pid, _) ->
+        try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ())
+      !live;
+    List.iter (fun (pid, _) ->
+        try ignore (waitpid_non_intr [] pid) with Unix.Unix_error _ -> ())
+      !live;
+    Unix._exit code
+  in
+  try
+    let rec send b =
+      match Unix.write messages b 0 forker_message_size with
+      | n -> if n <> forker_message_size then failwith "short write"
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> send b
+    in
+    (match Unix.setsid () with
+     | _ -> ()
+     | exception Unix.Unix_error (err, _, _) ->
+       (* Not expected: a new child never leads a process group. Without a
+          group, [abort] could not kill the workers at once, so none is
+          forked, and the main process checks the batches itself. *)
+       Array.iteri (fun j _ -> send (forker_message 'F' j 0 (Unix.error_message err)))
+         batches;
+       Unix._exit 0);
+    (* SIGPIPE, ignored, makes a write to a main process that has ended
+       fail, instead of killing the forker before it has killed its
+       workers. Each worker gets back the action it would have inherited
+       from the main process. *)
+    let pipe_action =
+      try Some (Sys.signal Sys.sigpipe Sys.Signal_ignore)
+      with Invalid_argument _ | Sys_error _ -> None
+    in
+    let me = Unix.getpid () in
+    prepared_fds := lifeline :: messages ::
+                    Array.fold_left (fun fds (_, report_out, output) ->
+                        report_out :: output_fds output @ fds) [] batches;
+    Array.iteri (fun j (tasks, report_out, output) ->
+        let own = report_out :: output_fds output in
+        prepared_fds := List.filter (fun fd -> not (List.mem fd own)) !prepared_fds;
+        (* As in [spawn]. *)
+        pending_request := false;
+        (match Unix.fork () with
+         | 0 ->
+           Option.iter (fun a ->
+               try Sys.set_signal Sys.sigpipe a with Invalid_argument _ | Sys_error _ -> ())
+             pipe_action;
+           run_child me report_out output tasks
+         | pid ->
+           live := (pid, j) :: !live;
+           send (forker_message 'P' j pid "")
+         | exception Unix.Unix_error (err, _, _) ->
+           send (forker_message 'F' j 0 (Unix.error_message err)));
+        List.iter close_fd own)
+      batches;
+    prepared_fds := [];
+    (* Only now, so that no worker inherits it: SIGCHLD, ignored by
+       default, interrupts [select] when a worker ends. *)
+    (try Sys.set_signal Sys.sigchld (Sys.Signal_handle ignore)
+     with Invalid_argument _ | Sys_error _ -> ());
+    while not (CList.is_empty !live) do
+      match waitpid_non_intr [Unix.WNOHANG] (-1) with
+      | 0, _ ->
+        (* A worker that ends between [waitpid] and [select] is seen at the
+           timeout. The main process never writes to the lifeline, so it is
+           readable only once it has ended. *)
+        (match Unix.select [lifeline] [] [] 0.05 with
+         | [], _, _ -> ()
+         | _ :: _, _, _ -> stop 1
+         | exception Unix.Unix_error (Unix.EINTR, _, _) -> ())
+      | pid, status ->
+        match List.assoc_opt pid !live with
+        | None -> ()
+        | Some j ->
+          live := List.remove_assoc pid !live;
+          send (status_message j status)
+    done;
+    Unix._exit 0
+  with _ -> stop 2
+
+(* Forks the workers of [dealt], the batches of one deal in order, each
+   with its descriptors if [deal] opened them: through a forker when there
+   are two or more (see Forkers), so that the main process forks once. If
+   a descriptor that the forker needs cannot be opened, or the forker
+   cannot be forked, each batch is given to [spawn], as when there is one:
+   then each fork that fails leaves its batch to the main process. *)
+let spawn_deal dealt =
+  match dealt with
+  | [] -> ()
+  | [prepared, tasks] -> spawn ?prepared tasks
+  | _ ->
+    (* The forker needs every batch's descriptors before it forks. Until it
+       is forked they are another child's to close, as those of [deal]
+       are. *)
+    let opened = List.map (fun (prepared, tasks) ->
+        match prepared with
+        | Some _ -> prepared, tasks
+        | None ->
+          match Unix.pipe ~cloexec:true () with
+          | exception Unix.Unix_error _ -> None, tasks
+          | report, report_out ->
+            let output = open_output () in
+            prepared_fds := report :: report_out :: output_fds output @ !prepared_fds;
+            Some (report, report_out, output), tasks)
+        dealt
+    in
+    let one_by_one () = List.iter (fun (prepared, tasks) -> spawn ?prepared tasks) opened in
+    let pipe () = try Some (Unix.pipe ~cloexec:true ()) with Unix.Unix_error _ -> None in
+    let batches = Array.of_list (List.filter_map (fun (prepared, tasks) ->
+        Option.map (fun (report, report_out, output) -> tasks, report, report_out, output)
+          prepared)
+        opened)
+    in
+    if Array.length batches < List.length opened then one_by_one ()
+    else match pipe () with
+      | None -> one_by_one ()
+      | Some (lifeline_in, lifeline) ->
+        match pipe () with
+        | None -> close_fd lifeline_in; close_fd lifeline; one_by_one ()
+        | Some (messages, messages_out) ->
+          before_fork ();
+          let fds = Array.fold_left (fun fds (_, report, report_out, output) ->
+              report :: report_out :: output_fds output @ fds) [] batches
+          in
+          (* They are the forker's from now on. *)
+          prepared_fds := List.filter (fun fd -> not (List.mem fd fds)) !prepared_fds;
+          (* As in [spawn]. *)
+          pending_request := false;
+          match Unix.fork () with
+          | 0 ->
+            (try
+               close_fd lifeline;
+               close_fd messages;
+               Array.iter (fun (_, report, _, _) -> close_fd report) batches;
+               (* Those of the main process's workers and of its other
+                  forkers, which the forker's workers must not hold
+                  either. *)
+               List.iter (fun w ->
+                   close_fd w.report;
+                   List.iter close_fd (output_fds w.output))
+                 !running;
+               running := [];
+               List.iter (fun f -> close_fd f.messages; close_fd f.lifeline) !forkers;
+               forkers := [];
+               List.iter close_fd !prepared_fds;
+               prepared_fds := [];
+               run_forker ~lifeline:lifeline_in ~messages:messages_out
+                 (Array.map (fun (tasks, _, report_out, output) -> tasks, report_out, output)
+                    batches)
+             with _ -> Unix._exit 2)
+          | fpid ->
+            close_fd lifeline_in;
+            close_fd messages_out;
+            let members = Array.map (fun (tasks, report, report_out, output) ->
+                close_fd report_out;
+                { pid = 0; direct = false; batch = batch_of_tasks tasks; tasks; report;
+                  output; asked = false; released = None; buf = "" })
+                batches
+            in
+            (* Newest first, as [spawn] leaves them. *)
+            Array.iter (fun w -> running := w :: !running) members;
+            forkers := { fpid; messages; lifeline; members; fbuf = "" } :: !forkers;
+            incr forker_forks;
+            Unix.set_nonblock messages;
+            if !forks + !forker_forks = 1 then release_test_at "main" 0
+          | exception Unix.Unix_error _ ->
+            List.iter close_fd [lifeline_in; lifeline; messages; messages_out];
+            prepared_fds := fds @ !prepared_fds;
+            one_by_one ()
 
 let signal_name s =
   let names = Sys.[
@@ -755,15 +1052,31 @@ let signal_name s =
 
 let close_report fd = close_fd fd
 
+(* Each forker is killed first by its pid, so that it forks nothing more
+   (once SIGKILL is pending for a process, it completes no fork), then
+   with its process group, which holds every worker it has forked, those
+   whose pid the main process has not read yet included. The main process
+   waits for its own children: the forkers and the workers it forked
+   itself. The workers of a forker are killed, but are not its children. *)
 let abort () =
-  let workers = !running in
+  let workers = !running and fs = !forkers in
   running := [];
+  forkers := [];
   Queue.clear queue;
+  List.iter (fun f ->
+      (try Unix.kill f.fpid Sys.sigkill with Unix.Unix_error _ -> ());
+      (try Unix.kill (- f.fpid) Sys.sigkill with Unix.Unix_error _ -> ()))
+    fs;
   List.iter (fun w ->
-      try Unix.kill w.pid Sys.sigkill with Unix.Unix_error _ -> ())
+      if w.pid > 0 then (try Unix.kill w.pid Sys.sigkill with Unix.Unix_error _ -> ()))
     workers;
+  List.iter (fun f ->
+      (try ignore (waitpid_non_intr [] f.fpid) with Unix.Unix_error _ -> ());
+      close_fd f.messages;
+      close_fd f.lifeline)
+    fs;
   List.iter (fun w ->
-      (try ignore (waitpid_non_intr [] w.pid) with Unix.Unix_error _ -> ());
+      if w.direct then (try ignore (waitpid_non_intr [] w.pid) with Unix.Unix_error _ -> ());
       close_report w.report;
       close_output w)
     workers
@@ -802,12 +1115,13 @@ let print_output (out, err) =
   end
 
 (* The worker [w] failed: every worker is stopped, and what it printed
-   kept. *)
-let fail w status =
+   kept. [pid] is the process to name instead of [w], whose pid is not
+   known: its forker, which ended before it said that pid. *)
+let fail ?pid w status =
   held_output := read_output w;
   close_output w;
   abort ();
-  raise (WorkerFailed (w.pid, status, w.batch))
+  raise (WorkerFailed (Option.default w.pid pid, status, w.batch))
 
 let print_held_output () =
   let s = !held_output in
@@ -892,47 +1206,131 @@ let rec take_releases w =
    as completed. The others are queued again: each check runs once, in the
    worker or later, and its result counts only if the process that ran it
    ended successfully. A worker that released a tail must complete exactly
-   the number of checks its release message named. *)
-let reaped pid status =
-  match List.find_opt (fun w -> w.pid = pid) !running with
+   the number of checks its release message named. [status] is what
+   [Unix.waitpid] said, in the main process or in the worker's forker. *)
+let reaped_worker w status =
+  let pid = w.pid in
+  running := List.filter (fun w' -> w' != w) !running;
+  let rec drain () = if read_some w then drain () in
+  drain ();
+  close_report w.report;
+  take_releases w;
+  match completed_count ~size:w.batch.size status w.buf with
+  | None -> fail w status
+  | Some k ->
+    (match w.released with
+     | Some r when not (Int.equal r k) -> fail w status
+     | Some _ | None -> ());
+    (* It ended successfully, so what it printed is printed now. *)
+    print_output (read_output w);
+    close_output w;
+    note_done w.tasks k;
+    match w.released with
+    | Some _ ->
+      debug (fun () ->
+          str "worker " ++ int pid ++ str " completed the " ++ int k ++
+          str " checks it kept")
+    | None ->
+      if Int.equal k w.batch.size then
+        debug (fun () -> str "worker " ++ int pid ++ str " succeeded")
+      else begin
+        incr early_stops;
+        debug (fun () ->
+            str "worker " ++ int pid ++ str " stopped early after " ++ int k ++
+            str " of " ++ int w.batch.size ++ str ", queueing the rest again");
+        push_front (Array.sub w.tasks k (w.batch.size - k))
+      end
+
+(* The error that a forker's 'F' message carries. *)
+let forker_text m =
+  let s = String.sub m 16 (forker_message_size - 16) in
+  match String.index_opt s '\000' with
+  | Some i -> String.sub s 0 i
+  | None -> s
+
+(* One message of the forker [f] (see Forkers). Its worker is reaped only
+   while it runs: once, and never after [abort]. *)
+let forker_message_received f m =
+  let j = Int32.to_int (String.get_int32_be m 4) in
+  let v = Int64.to_int (String.get_int64_be m 8) in
+  if j >= 0 && j < Array.length f.members then begin
+    let w = f.members.(j) in
+    let ended status = if List.memq w !running then reaped_worker w status in
+    match String.get m 0 with
+    | 'P' ->
+      w.pid <- v;
+      incr forks;
+      incr forks_by_forkers;
+      debug (fun () -> str "worker " ++ int v ++ str ": " ++ pr_tasks w.batch)
+    | 'F' ->
+      if List.memq w !running then begin
+        running := List.filter (fun w' -> w' != w) !running;
+        close_report w.report;
+        close_output w;
+        check_here_instead w.batch w.tasks (forker_text m)
+      end
+    | 'E' -> ended (Unix.WEXITED v)
+    | 'S' -> ended (Unix.WSIGNALED v)
+    | 'T' -> ended (Unix.WSTOPPED v)
+    | _ -> ()
+  end
+
+(* Reads what the forker [f] has written, without blocking (its pipe is
+   non-blocking in the main process), and acts on each whole message. *)
+let read_forker f =
+  let b = Bytes.create 1024 in
+  let rec read () =
+    match Unix.read f.messages b 0 (Bytes.length b) with
+    | 0 -> ()
+    | n -> f.fbuf <- f.fbuf ^ Bytes.sub_string b 0 n; read ()
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> read ()
+    | exception Unix.Unix_error _ -> ()
+  in
+  read ();
+  let rec take () =
+    if String.length f.fbuf >= forker_message_size then begin
+      let m = String.sub f.fbuf 0 forker_message_size in
+      f.fbuf <- String.sub f.fbuf forker_message_size
+          (String.length f.fbuf - forker_message_size);
+      forker_message_received f m;
+      take ()
+    end
+  in
+  take ()
+
+(* The forker [f] has been reaped. Once it has ended, all it wrote is in
+   its pipe, so a worker whose status is not there was never reported:
+   the forker did not end as it should (it exits once it has reported every
+   worker), and the run fails, with the forker's status, for the first such
+   worker; with the forker's pid if it had not said the worker's. Its
+   process group is killed first: a worker it left behind is still in
+   it. *)
+let forker_reaped f status =
+  forkers := List.filter (fun f' -> f' != f) !forkers;
+  Fun.protect ~finally:(fun () -> close_fd f.messages; close_fd f.lifeline)
+    (fun () -> read_forker f);
+  match Array.find_opt (fun w -> List.memq w !running) f.members with
   | None -> ()
   | Some w ->
-    running := List.filter (fun w' -> w'.pid <> pid) !running;
-    let rec drain () = if read_some w then drain () in
-    drain ();
-    close_report w.report;
-    take_releases w;
-    match completed_count ~size:w.batch.size status w.buf with
-    | None -> fail w status
-    | Some k ->
-      (match w.released with
-       | Some r when not (Int.equal r k) -> fail w status
-       | Some _ | None -> ());
-      (* It ended successfully, so what it printed is printed now. *)
-      print_output (read_output w);
-      close_output w;
-      note_done w.tasks k;
-      match w.released with
-      | Some _ ->
-        debug (fun () ->
-            str "worker " ++ int pid ++ str " completed the " ++ int k ++
-            str " checks it kept")
-      | None ->
-        if Int.equal k w.batch.size then
-          debug (fun () -> str "worker " ++ int pid ++ str " succeeded")
-        else begin
-          incr early_stops;
-          debug (fun () ->
-              str "worker " ++ int pid ++ str " stopped early after " ++ int k ++
-              str " of " ++ int w.batch.size ++ str ", queueing the rest again");
-          push_front (Array.sub w.tasks k (w.batch.size - k))
-        end
+    (try Unix.kill (- f.fpid) Sys.sigkill with Unix.Unix_error _ -> ());
+    fail ?pid:(if Int.equal w.pid 0 then Some f.fpid else None) w status
 
+(* The main process reaps its own children, the forkers and the workers it
+   forked itself, and reads the forkers' messages, which say how their
+   workers ended. *)
 let rec reap_finished () =
-  if not (CList.is_empty !running) then
+  List.iter read_forker !forkers;
+  if List.exists (fun w -> w.direct) !running || not (CList.is_empty !forkers) then
     match waitpid_non_intr [Unix.WNOHANG] (-1) with
     | 0, _ -> ()
-    | pid, status -> reaped pid status; reap_finished ()
+    | pid, status ->
+      (match List.find_opt (fun f -> Int.equal f.fpid pid) !forkers with
+       | Some f -> forker_reaped f status
+       | None ->
+         match List.find_opt (fun w -> w.direct && Int.equal w.pid pid) !running with
+         | Some w -> reaped_worker w status
+         | None -> ());
+      reap_finished ()
 
 (* One slot kept for the worker of [validate_tables] while the walk runs
    before it is started ([expect_validator]): from the start of the walk it
@@ -949,15 +1347,20 @@ let free_slots slots = slots - List.length !running - !validator_reserved
    batch that a busy worker holds.
 
    A worker is asked at most once, and only if its batch has two or more
-   checks, because it always completes its first one. Only a worker that
-   has not been reaped is signalled, so the pid cannot have been reused;
-   an error from [kill] is ignored, since a worker that has just exited
-   needs no request. *)
+   checks, because it always completes its first one. A worker whose
+   forker has not said its pid yet is not asked now; it can be later. Only
+   a worker that the main process has not seen reaped is signalled: one it
+   forked itself has not been reaped, so its pid cannot have been reused;
+   one of a forker may have been reaped by the forker since its last
+   message was read, but Linux hands pids out in turn, so that pid is not
+   given to another process in the moments before the message is read. An
+   error from [kill] is ignored, since a worker that has just exited needs
+   no request. *)
 let request_release slots =
   if free_slots slots > 0 && Queue.is_empty queue then begin
     let best =
       List.fold_left (fun best w ->
-          if w.asked || w.batch.size < 2 then best
+          if w.asked || w.batch.size < 2 || Int.equal w.pid 0 then best
           else match best with
             | Some b when b.batch.size >= w.batch.size -> best
             | Some _ | None -> Some w)
@@ -974,21 +1377,26 @@ let request_release slots =
       (try Unix.kill w.pid release_signal with Unix.Unix_error _ -> ())
   end
 
-(* Waits until a worker writes to its pipe or closes it, or [timeout]
-   passes, and takes the release messages that arrived. Retries on EINTR:
-   the main process has a handler for the request signal, which OCaml 4.14
-   installs without SA_RESTART, so a signal from outside interrupts
-   [select]. *)
+(* Waits until a worker writes to its pipe or closes it, or a forker
+   writes, or [timeout] passes, and takes the release messages and the
+   forkers' messages that arrived. The report of a worker whose pid is not
+   known yet waits until it is, so that a release message names the worker.
+   Retries on EINTR: the main process has a handler for the request signal,
+   which OCaml 4.14 installs without SA_RESTART, so a signal from outside
+   interrupts [select]. *)
 let rec wait_for_messages timeout =
-  let fds = List.map (fun w -> w.report) !running in
+  let reports = List.filter_map (fun w ->
+      if Int.equal w.pid 0 then None else Some w.report) !running in
+  let fds = List.fold_left (fun fds f -> f.messages :: fds) reports !forkers in
   if not (CList.is_empty fds) then
     match Unix.select fds [] [] timeout with
     | ready, _, _ ->
       List.iter (fun fd ->
-          match List.find_opt (fun w -> w.report = fd) !running with
+          match List.find_opt (fun w -> w.report = fd && not (Int.equal w.pid 0)) !running with
           | None -> ()
           | Some w -> if read_some w then take_releases w)
-        ready
+        ready;
+      List.iter (fun f -> if List.mem f.messages ready then read_forker f) !forkers
     | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait_for_messages timeout
     | exception Unix.Unix_error _ ->
       (* Not expected (an fd above FD_SETSIZE, or EBADF). The caller reaps
@@ -1097,12 +1505,12 @@ let deal ?(walk = false) k size =
       | exception Unix.Unix_error _ -> Error ()
       | report, report_out ->
         match open_output () with
-        | Some output -> Ok (Some (report, report_out, output))
+        | Some output -> Ok (Some (report, report_out, Some output))
         | None -> close_fd report; close_fd report_out; Error ()
   in
   let release_prepared = function
-    | Some (report, report_out, (out, err)) ->
-      close_fd report; close_fd report_out; close_fd out; close_fd err
+    | Some (report, report_out, output) ->
+      close_fd report; close_fd report_out; List.iter close_fd (output_fds output)
     | None -> ()
   in
   let prepared =
@@ -1123,18 +1531,21 @@ let deal ?(walk = false) k size =
     Queue.clear queue;
     List.iter (fun t -> Queue.push t queue) (List.rev !left);
     prepared_fds := Array.fold_left (fun fds p -> match p with
-        | Some (report, report_out, (out, err)) -> report :: report_out :: out :: err :: fds
+        | Some (report, report_out, output) -> report :: report_out :: output_fds output @ fds
         | None -> fds) [] prepared;
     (* Only once the queue holds what was not dealt: a worker inherits it by
        fork, and a batch whose fork fails is checked here. A batch is built
-       newest first. *)
+       newest first. The batches are forked in order, by one forker when
+       there are two or more ([spawn_deal]). *)
     Fun.protect ~finally:(fun () -> List.iter close_fd !prepared_fds; prepared_fds := [])
       (fun () ->
+         let given = ref [] in
          Array.iteri (fun j b ->
              if not (CList.is_empty b) then
-               spawn ?prepared:prepared.(j)
-                 (Array.of_list (by_cost (if walk then b else List.rev b))))
-           batches)
+               given := (prepared.(j), Array.of_list (by_cost (if walk then b else List.rev b)))
+                        :: !given)
+           batches;
+         spawn_deal (List.rev !given))
 
 (* Hands out the batches a new job makes possible, at most once every
    [window] seconds. *)
@@ -1271,12 +1682,15 @@ let finish () =
        can run. *)
     let slots = !max_workers + 1 in
     (* A worker that stops early, or releases a tail, queues checks again,
-       so the queue is only known to be empty when no worker is left. *)
-    while not (Queue.is_empty queue) || not (CList.is_empty !running) do
+       so the queue is only known to be empty when no worker is left. A
+       forker that has reported all its workers is about to exit: it is
+       waited for too, so that no child of the main process is left. *)
+    let busy () = not (CList.is_empty !running) || not (CList.is_empty !forkers) in
+    while not (Queue.is_empty queue) || busy () do
       reap_finished ();
       if free_slots slots > 0 && not (Queue.is_empty queue) then
         deal 1 ((Queue.length queue + 2 * slots - 1) / (2 * slots))
-      else if not (CList.is_empty !running) then begin
+      else if busy () then begin
         request_release slots;
         (* A release message is read as soon as it is written, not only
            when its worker exits. *)
@@ -1284,12 +1698,15 @@ let finish () =
         reap_finished ()
       end
     done;
+    (* The forkers' counts come last, after the words that tests read. *)
     debug (fun () ->
         str "done: " ++ int !forks ++ str " workers forked, " ++
         int !early_stops ++ str " stopped early, " ++
         int !releases ++ str " released a tail, " ++
         int !checks_done ++ str " checks run of " ++ int !deferred ++ str " deferred, " ++
-        int !main_cooks ++ str " cooked in the main process");
+        int !main_cooks ++ str " cooked in the main process, " ++
+        int !forker_forks ++ str " forkers forked " ++ int !forks_by_forkers ++
+        str " of the workers");
     debug (fun () ->
         str "tables: " ++ int !tables_done ++ str " read of " ++
         int !tables_deferred ++ str " deferred, " ++
