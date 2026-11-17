@@ -27,6 +27,13 @@
     rocqchk runs: nothing is left on disk, however the run ends, but for a
     kill in the instant between the creation of a file and its removal, as
     for the files of the workers' output ([CheckWorkers.open_capture]).
+    They are bounded: a process records nothing more once its file would
+    pass 64 MiB, and if the records of all processes would pass 256 MiB,
+    or name more than 32 Mi objects in all (33,554,432, counted with
+    repetitions, as the main process decodes them), none is used, and the
+    report reads every body, as it does at [-j 1]. A write of the records
+    past the limit on the size of a file ([ulimit -f]) fails, SIGXFSZ being
+    ignored for that write alone, and costs the records, not the run.
 
     The report's lines, and every other byte of the output, are the ones
     the report prints without records, and so is the exit status, with one
@@ -42,14 +49,19 @@ val start : unit -> unit
 (** In the main process, before any library is checked, with workers and a
     statement report: makes the files of the main process and installs the
     recorder ([Mod_checking.set_opaque_check_hook]) and the workers' files
-    ([CheckWorkers.set_worker_file]). If the files cannot be made, it does
-    nothing, and the report reads every body, as it does at [-j 1]. *)
+    ([CheckWorkers.set_worker_file]). If the files cannot be made, or
+    anything else fails, nothing is recorded, the files made are closed,
+    and the report reads every body, as it does at [-j 1]. Raises nothing
+    but [Sys.Break]. *)
 
 val collect : unit -> t option
 (** In the main process, once every check has passed and every worker has
     finished: takes out the recorder, reads the records of every process,
-    and closes the files. [None] when [start] did not record; no record when
-    the records cannot be read. *)
+    and closes the files. [None] when [start] did not record; no record
+    when the records cannot be read, when a write of them failed, or when
+    they would have passed 256 MiB (for tests only, a number of bytes in
+    [COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP] lowers that cap) or
+    32 Mi objects named. Raises nothing but [Sys.Break]. *)
 
 val recorded : t -> Opaqueproof.opaque -> Names.GlobRef.t list option
 (** [recorded r o]: the objects recorded for the body of the very opaque

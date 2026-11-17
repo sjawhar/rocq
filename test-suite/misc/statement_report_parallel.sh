@@ -54,11 +54,22 @@
 #      differently, so a record that crossed from one run to the other
 #      would name the objects of another body than the check of that number
 #      there: (d) would read bodies, or print another report.
+#  (k) (d) with the size of the files rocqchk writes limited to 1024 bytes
+#      (ulimit -f 1), less than its records take. Its standard output and
+#      error go through pipes, which the limit does not apply to, so the
+#      files that meet it are those of the records: a write past it fails,
+#      instead of killing the process with SIGXFSZ, and costs records only.
+#      -j 1 under the same limit prints what (d) prints at -j 1, and -j 3
+#      prints that too, with M > 0: the limit cost records.
+#  (l) (d) at -j 3 with COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP=1, which
+#      lowers the cap of the records of all processes to 1 byte: the main
+#      process gives up at the first segment it would append, and the
+#      report reads every body. The report of -j 1, with H = 0 and M > 0.
 set -eu
 : "${BIN:=$(dirname "$(command -v rocq)")/}"
 export PATH="$BIN:$PATH"
 unset ROCQCHK_WORKER_RELEASE_AT ROCQCHK_OPAQUE_AT ROCQCHK_INTERN_AT ROCQCHK_CHECK_AT
-unset COQ_TEST_SUITE_STATEMENT_REPORT_FAILURE
+unset COQ_TEST_SUITE_STATEMENT_REPORT_FAILURE COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP
 
 d=$(mktemp -d)
 t=$(mktemp -d)
@@ -200,21 +211,44 @@ fail() { >&2 echo "FAILURE: $*"; exit 1; }
 # The opaque proof whose body the test seam makes unreadable, for (g).
 unreadable=
 
+# The limit on the size of the files rocqchk writes, in blocks of 1024
+# bytes (ulimit -f), for (k); none if empty.
+fsize=
+
 # capture NAME J ARGS...: rocqchk -o -j J ARGS with TMPDIR set to $t. Its
 # standard output is in $d/NAME.out and its standard error in $d/NAME.err;
 # from that, the report's lines are in $d/NAME.report, the context summary
 # in $d/NAME.summary, and the "Checking library:" and "Admitting library:"
 # lines, sorted, in $d/NAME.libs. The counts of the records, if the run
-# wrote them, are in $d/NAME.counts. Exit code in $R.
+# wrote them, are in $d/NAME.counts. Exit code in $R. With $fsize, rocqchk
+# runs under that limit, and its standard output and error are pipes, to
+# readers started outside the limit, so that it meets the limit only in
+# the files it writes itself.
 R=0
 capture() {
-  local name=$1 j=$2
+  local name=$1 j=$2 po pe
   shift 2
   R=0
   rm -f "$d/$name.counts"
-  TMPDIR="$t" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
-    COQ_TEST_SUITE_STATEMENT_REPORT_UNREADABLE="$unreadable" \
-    rocqchk -o -j "$j" "$@" > "$d/$name.out" 2> "$d/$name.err" || R=$?
+  if [ -z "$fsize" ]; then
+    TMPDIR="$t" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
+      COQ_TEST_SUITE_STATEMENT_REPORT_UNREADABLE="$unreadable" \
+      rocqchk -o -j "$j" "$@" > "$d/$name.out" 2> "$d/$name.err" || R=$?
+  else
+    rm -f "$d/$name.o" "$d/$name.e"
+    mkfifo "$d/$name.o" "$d/$name.e"
+    cat "$d/$name.o" > "$d/$name.out" &
+    po=$!
+    cat "$d/$name.e" > "$d/$name.err" &
+    pe=$!
+    ( ulimit -f "$fsize" || exit
+      TMPDIR="$t" COQ_TEST_SUITE_STATEMENT_REPORT_COUNTS="$d/$name.counts" \
+        COQ_TEST_SUITE_STATEMENT_REPORT_UNREADABLE="$unreadable" \
+        rocqchk -o -j "$j" "$@" ) > "$d/$name.o" 2> "$d/$name.e" || R=$?
+    wait "$po"
+    wait "$pe"
+    rm -f "$d/$name.o" "$d/$name.e"
+  fi
   sed -n '/^STATEMENT REPORT$/,/^END STATEMENT REPORT$/p' "$d/$name.err" > "$d/$name.report"
   sed -n '/CONTEXT SUMMARY/,$p' "$d/$name.err" > "$d/$name.summary"
   { grep -E '(Checking|Admitting) library: ' "$d/$name.err" || true; } | sort > "$d/$name.libs"
@@ -419,5 +453,29 @@ R=$rc
 same c-j1 j-c 0 "(j) -j 3 of (c), beside -j 3 of (d)"
 counts j-c
 [ "$hits" -gt 0 ] || { cat "$d/j-c.err" >&2; fail "(j) -j 3 of (c), beside -j 3 of (d): no body taken from the records"; }
+
+# (k) The records of (d) take more than 1024 bytes: its forty or so opaque
+# proofs make as many frames, each with a marshal header of 20 bytes, and
+# each file numbers again the objects it names. So a worker's file, or the
+# spool, meets the limit: M > 0 shows it, where (d) at -j 3 reads no body.
+# Were SIGXFSZ not ignored for the writes of the records, it would kill the
+# process that wrote past the limit, a worker or the main process, and the
+# run would fail where -j 1 succeeds.
+fsize=1
+run k-j1 1 -statement-report "$d/d.req" "${dargs[@]}"
+same d-j1 k-j1 0 "(k) -j 1 under ulimit -f 1"
+run k-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
+same k-j1 k-j3 0 "(k) -j 3 under ulimit -f 1"
+counts k-j3
+[ "$reads" -gt 0 ] || { cat "$d/k-j3.err" >&2; fail "(k) -j 3 under ulimit -f 1: no body read, so the records did not meet the limit"; }
+fsize=
+
+# (l) Only the main process reads the cap; every process records as usual,
+# and the main process gives up when it would append the first segment.
+COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP=1 run l-j3 3 -statement-report "$d/d.req" "${dargs[@]}"
+same d-j1 l-j3 0 "(l) -j 3 with the records capped at 1 byte"
+counts l-j3
+[ "$hits" = 0 ] || { cat "$d/l-j3.err" >&2; fail "(l) -j 3 with the records capped at 1 byte: $hits bodies taken from the records"; }
+[ "$reads" -gt 0 ] || { cat "$d/l-j3.err" >&2; fail "(l) -j 3 with the records capped at 1 byte: no body read"; }
 
 exit 0

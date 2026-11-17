@@ -9,7 +9,11 @@
   ``rocqchk`` runs: no directory is made, and nothing is left behind,
   unless ``rocqchk`` is killed in the instant between the creation of
   such a file and its removal, as with the files that hold the output of
-  the workers.
+  the workers. The records take at most 64 MiB per process; if those of
+  all the processes would pass 256 MiB, or name more than 32 Mi objects
+  in all, none is used, and the report reads the proofs as before. A
+  limit on the size of files (``ulimit -f``) that the records meet costs
+  only records, not the run.
   The report is the same, but for one case: a proof that a worker
   checked is not read again, so a library file that changes or vanishes
   on disk during the run no longer makes the report warn that this
