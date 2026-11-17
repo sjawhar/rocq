@@ -119,9 +119,8 @@ let cache_size = 1 lsl 18
 
 (* The node last walked at each slot, and the generation it was walked in.
    Each walk takes a new generation ([fresh_gen]), so that it sees no entry
-   of another. A cache that [forget] empties after each walk also notes the
-   slots the current generation wrote, the first [touched_count] of
-   [touched]; another has no [touched]. *)
+   of another. The slots the current generation wrote are noted too, the
+   first [touched_count] of [touched], so that [forget] can empty them. *)
 type walk_cache = {
   keys : Constr.t array;
   gens : int array;
@@ -130,15 +129,18 @@ type walk_cache = {
   mutable touched_count : int;
 }
 
-let walk_cache ?(forgetful = false) () = {
+let walk_cache () = {
   keys = Array.make cache_size Constr.mkProp;
   gens = Array.make cache_size (-1);
   gen = 0;
-  touched = if forgetful then Array.make cache_size 0 else [||];
+  touched = Array.make cache_size 0;
   touched_count = 0;
 }
 
-let fresh_gen cache = cache.gen <- cache.gen + 1; cache.gen
+let fresh_gen cache =
+  cache.gen <- cache.gen + 1;
+  cache.touched_count <- 0;
+  cache.gen
 
 (* A slot is noted when the generation first writes it, so a generation
    notes at most [cache_size] of them. *)
@@ -147,7 +149,7 @@ let seen cache gen c =
   let g = cache.gens.(i) in
   if Int.equal g gen && cache.keys.(i) == c then true
   else begin
-    if not (Int.equal g gen) && Array.length cache.touched > 0 then begin
+    if not (Int.equal g gen) then begin
       cache.touched.(cache.touched_count) <- i;
       cache.touched_count <- cache.touched_count + 1
     end;
@@ -156,13 +158,12 @@ let seen cache gen c =
     false
   end
 
-(* Empties the slots that the current generation of a forgetful cache
-   wrote, so that the cache no longer holds the term it walked. *)
+(* Empties the slots that the current generation wrote, so that the cache
+   no longer holds the term it walked. *)
 let forget cache =
   for j = 0 to cache.touched_count - 1 do
     cache.keys.(cache.touched.(j)) <- Constr.mkProp
-  done;
-  cache.touched_count <- 0
+  done
 
 type state = {
   env : Environ.env;
@@ -377,12 +378,13 @@ let rec walk env cache gen refs = function
    prints them, by their user names only ([GlobRef.Map_env],
    [Environ.lookup_constant], [Constant.to_string]).
 
-   The cache of these walks is the process's own, made at its first call.
-   Each call takes a new generation of it, so that no call sees the entries
-   of another, and empties the slots it wrote once it is done ([forget]): a
-   worker checks one body after another, and the cache would otherwise keep
-   the last body it walked alive. *)
-let body_walk_cache = lazy (walk_cache ~forgetful:true ())
+   The cache of these walks is the process's own, made at its first call:
+   three arrays of [cache_size] words, 6 MiB on a 64-bit machine, in each
+   worker that records. Each call takes a new generation of it, so that no
+   call sees the entries of another, and empties the slots it wrote once it
+   is done ([forget]): a worker checks one body after another, and the
+   cache would otherwise keep the last body it walked alive. *)
+let body_walk_cache = lazy (walk_cache ())
 
 let opaque_body_refs env c =
   let cache = Lazy.force body_walk_cache in
@@ -434,10 +436,9 @@ type opaque_body =
 (* The body of the opaque [o] of the constant [kn], read, or the objects
    that the check of [o] recorded for it. A recorded body is not read
    again: the process that checked it read it, from the table the main
-   process hashed. So a library file that changes or vanishes on disk
-   during the run makes no warning for a recorded body, where the report
-   that reads that body warns that it could not be read (the lazy reader
-   refuses it). *)
+   process hashed. Its table is then not read here either, which is the
+   one way records can change the report: see the header of
+   reportRecords.mli. *)
 let opaque_body st kn o =
   match st.recorded kn o with
   | Some objs -> Recorded objs

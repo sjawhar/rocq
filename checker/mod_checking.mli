@@ -19,10 +19,8 @@ val set_opaque_check_hook :
     process that runs it, with the environment [c] was checked in and [c].
     Nothing calls the second stage for a check that raised. [f] and what it
     returns must raise nothing but [Sys.Break]: the hook changes nothing
-    that is checked. Default: does nothing. *)
-
-val reset_opaque_check_hook : unit -> unit
-(** Back to the default hook, which does nothing. *)
+    that is checked. Default: does nothing. Once set, the hook stays for
+    the run. *)
 
 val compile_module_bytecode : Environ.env -> Vmlibrary.t -> Names.ModPath.t ->
   'a Mod_declarations.generic_module_body ->

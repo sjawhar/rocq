@@ -9,91 +9,67 @@
 (************************************************************************)
 
 (** Records of the checked opaque bodies, for [rocqchk -j N
-    -statement-report FILE].
+    -statement-report FILE]. The rules that a user sees (when rocqchk
+    records, the caps of the records, the conditions [start] checks, and the
+    exception below) are those of doc/sphinx/practical-tools/coq-commands.rst,
+    under [-statement-report]; reportRecords.ml says why each holds.
 
-    With workers, each process that checks an opaque body records the
-    objects that the statement report's walk would find in that body
+    With workers, each worker that checks an opaque body records the objects
+    that the statement report's walk would find in that body
     ([Check_closure.opaque_body_refs]). Once every worker has finished, the
     main process reads the records, and the report takes the objects of a
     recorded body from them instead of reading that body from its library's
     table and walking it again ([Check_closure.print]). A record is used
     only for the very opaque value whose check made it, and only as the
     body of a constant of the name that check had. So the report still
-    reads the bodies of the libraries it did not check, and those it
-    reaches through a copy it makes itself: its implementation view
-    substitutes the structure of each module it looks into, and a copy
-    made with a substitution is a new value, which no record names.
+    reads the bodies of the libraries it did not check, the bodies the main
+    process checked itself, which it does not record (it checks one only
+    where it could not make a pipe or fork a worker), and those it reaches
+    through a copy it makes itself: its implementation view substitutes the
+    structure of each module it looks into, and a copy made with a
+    substitution is a new value, which no record names.
 
-    Nothing is recorded in a run that also compares ([-compare]): with
-    [-compare] the report reads the proofs as before. The comparison, which
-    comes after the report, reads opaque bodies through the same accessor
-    ([CheckLibrary.indirect_accessor]), which keeps each table it reads in
-    the main process; a body the report took from a record would leave its
-    table unread there, so that the comparison could read the library file
-    again where, without records, it uses the table the report read.
+    The caller's rules:
+    - [start] is called once, in the main process, before any library is
+      checked, and only with workers ([CheckWorkers.parallel]) and a
+      statement report; [collect] once every worker has ended
+      ([CheckWorkers.finish]), before the report; and [recorded] is given
+      to the report alone, never to the closure of [-compare].
+    - [start] is not called with [-compare]. The comparison, which comes
+      after the report, reads opaque bodies through the same accessor
+      ([CheckLibrary.indirect_accessor]), which keeps each table it reads
+      in the main process; a body the report took from a record would leave
+      its table unread there, so that the comparison could read the library
+      file again where, without records, it uses the table the report read.
+    - Nor with [-merge-inductives] or [-merge-inductives-verbose]
+      ([Indmerge.enabled]): after a merge, the opaque values of the final
+      environment are new values, so that no record would match one.
+    - Nothing here prints anything, nor raises anything but [Sys.Break]:
+      every failure only leaves the report to read the bodies, as it does
+      at [-j 1].
 
-    The records are kept, while a worker runs, in an unnamed file in
-    /dev/shm, a file system in memory, and once the worker has ended, in
-    the memory of the main process, which copies that file and closes it at
-    once: nothing is left in /dev/shm, however the run ends, but for a kill
-    in the instant between the creation of a file and its removal, as for
-    the files of the workers' output ([CheckWorkers.open_capture]). Nothing
-    is recorded where /dev/shm is not a directory rocqchk may create files
-    in, nor where it shares its file system with the temporary directory
-    (TMPDIR), in which the files of the workers' output are made, or with a
-    file rocqchk holds open as it starts, such as its standard output and
-    error. Without records, rocqchk then writes nothing to the file system
-    of the records, so the records cannot take the room that a write of
-    rocqchk needs; a full /dev/shm only stops recording. The records are
-    bounded: a process records nothing more once its records would pass
-    64 MiB, and if the records of all processes would pass 256 MiB, or name
-    more than 32 Mi objects in all (33,554,432, counted with repetitions,
-    as the main process decodes them), none is used, and the report reads
-    every body, as it does at [-j 1]. A write of the records past the limit
-    on the size of a file ([ulimit -f]) fails, SIGXFSZ being ignored for
-    that write alone, and costs the records, not the run. The main process
-    opens a file for the records only for a worker, before forking it, and
-    closes it once that worker has ended; it holds no other. Nothing is
-    recorded where the soft limit on open files ([ulimit -n], read from
-    /proc/self/limits), less the descriptors open as the recorder starts
-    (listed in /proc/self/fd), is below [4 * n + 64] at [-j n], nor where
-    that limit or those descriptors cannot be read: this keeps the recorder
-    from taking, at low limits, the descriptors rocqchk needs without
-    records, and the report reads every body, as at [-j 1].
-
-    The report's lines, and every other byte of the output, are the ones
-    the report prints without records, and so is the exit status, with one
-    known difference: a body that a worker recorded is not read again by
-    the report, so a library file that changes or vanishes on disk during
-    the run does not make the report warn that this body could not be read,
-    nor report it as an axiom. *)
+    With the records, the report's lines, every other byte of the output,
+    and the exit status are the ones without them, with one known
+    exception. A library file that changes or vanishes on disk while
+    rocqchk runs can change which opaque bodies the report says it could
+    not read, and so reports as axioms, whether those bodies were recorded
+    or not: the report does not read a recorded body, so it does not read
+    that body's table, and does not keep it for the later bodies of that
+    library that it reads, which then read the file as it is then. *)
 
 type t
 (** The records, once read. *)
 
 val start : unit -> unit
-(** In the main process, before any library is checked, with workers, a
-    statement report and no comparison: installs the recorder
-    ([Mod_checking.set_opaque_check_hook]) and the workers' files
-    ([CheckWorkers.set_worker_file]). Opens no file but the directory
-    /proc/self/fd and the file /proc/self/limits, each closed at once.
-    Installs nothing where /dev/shm cannot hold the records, as said above,
-    nor where the soft limit on open files read there, less the descriptors
-    open now, is below [4 * n + 64] at [-j n] ([CheckWorkers.jobs]), which
-    keeps the recorder from taking, at low limits, the descriptors rocqchk
-    needs without records, nor where that limit or those descriptors cannot
-    be read. If anything fails, nothing is recorded, and the report reads
-    every body, as it does at [-j 1]. Raises nothing but [Sys.Break]. *)
+(** Installs the recorder ([Mod_checking.set_opaque_check_hook] and
+    [CheckWorkers.set_worker_file]) where the conditions of coq-commands.rst
+    hold; does nothing otherwise. *)
 
 val collect : unit -> t option
-(** In the main process, once every check has passed and every worker has
-    finished: takes out the recorder and reads the records of every
-    process, which it then drops. [None] when [start] did not record, or
-    when even empty records cannot be made; no record when the records
-    cannot be read, when the copy of a worker's file failed, or when they
-    would have passed 256 MiB (for tests only, a number of bytes in
-    [COQ_TEST_SUITE_STATEMENT_REPORT_RECORDS_CAP] lowers that cap) or
-    32 Mi objects named. Raises nothing but [Sys.Break]. *)
+(** Takes the recorder out and returns the records of the workers that
+    ended successfully: [None] where [start] installed nothing, or where
+    even empty records cannot be made; records that hold none where the
+    main process gave up recording, or where decoding them fails. *)
 
 val recorded : t -> Names.Constant.t -> Opaqueproof.opaque -> Names.GlobRef.t list option
 (** [recorded r kn o]: the objects recorded for the body of the very opaque

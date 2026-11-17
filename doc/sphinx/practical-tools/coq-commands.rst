@@ -870,38 +870,58 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   With ``-j``, the report takes the references of each opaque proof that a
   worker checked from that worker, which records them as it checks the
   proof, instead of reading the proof again. It still reads the proofs of
-  the libraries that are not checked, and those it reaches through a copy
-  it makes itself, by substituting the structure of a module it looks
-  into. While a worker runs, its records are kept in a temporary file in
-  ``/dev/shm``, a file system in memory, removed from it as soon as it is
-  opened, and once the worker has ended, in the memory of the main
-  process, which copies that file and closes it at once: no directory is
-  made and nothing is left behind, unless ``rocqchk`` is killed in the
-  instant between the creation of such a file and its removal, as with
-  the files that hold the output of the workers. Nothing is recorded where
-  ``/dev/shm`` is not a directory ``rocqchk`` can write to, nor where it is
-  on the file system of ``TMPDIR`` (by default ``/tmp``), in which the
-  files of the workers' output are made, or of a file that ``rocqchk``
-  holds open as it starts, such as its standard output and error: so the
-  records take no room that ``rocqchk`` needs without them, and a full
-  ``/dev/shm`` only stops recording. The records take bounded room: a
-  process records no more once its records would pass 64 MiB, and if the
-  records of all the processes would pass 256 MiB, or name more than
-  32 Mi objects in all (counted with repetitions), none is used, and the
-  report reads the proofs as it does without ``-j``. A limit on the size
-  of files (``ulimit -f``) that the records meet costs only records: such
-  a write fails, instead of killing ``rocqchk``, and the report reads the
-  proofs whose records are lost. With ``-compare``, nothing is recorded,
-  and the report reads the proofs as it does without ``-j``. Where the
-  limit on open files (``ulimit -n``), less the files already open as
-  ``rocqchk`` starts, is below ``4 n + 64`` with ``-j n``, or where
-  ``rocqchk`` cannot read that limit from ``/proc/self/limits`` or those
-  files from ``/proc/self/fd``, nothing is recorded, and the report reads
-  the proofs as it does without ``-j``.
-  The report is the same as without ``-j``, but for one case: a proof
-  that a worker checked is not read again, so a library file that changes
-  or vanishes on disk during the run does not make the report warn that
-  this proof could not be read, nor report it as an axiom.
+  the libraries that are not checked, those that the main process checks
+  itself (it does so only where it cannot start a worker), and those it
+  reaches through a copy it makes itself, by substituting the structure of
+  a module it looks into. While a worker runs, its records are kept in a
+  temporary file in ``/dev/shm``, removed from it as soon as it is opened,
+  and once the worker has ended, in the memory of the main process, which
+  copies that file and closes it at once: no directory is made and nothing
+  is left behind, unless ``rocqchk`` is killed in the instant between the
+  creation of such a file and its removal, as with the files that hold the
+  output of the workers.
+
+  The records take memory, as ``/dev/shm`` is a file system in memory, and
+  they are bounded. A worker records no more once its file would pass
+  64 MiB, or 256 MiB divided by *n* with ``-j n`` where that is less, so
+  that the files of the workers that run hold at most 256 MiB in all. If
+  the records copied into the main process would pass 256 MiB, or name more
+  than 32 Mi objects in all (counted with repetitions), none is used. So
+  the records take at most 512 MiB in all, besides a cache of 6 MiB (on a
+  64-bit machine) in each worker that records. The main process also stops
+  recording, and uses no record, where it cannot make the file of a
+  worker, or once it has given the workers more than 4 Mi (4,194,304)
+  opaque proofs to check. A limit on the size of files (``ulimit -f``)
+  that the records meet costs only records: such a write fails, instead of
+  killing ``rocqchk``, and the report reads the proofs whose records are
+  lost.
+
+  Nothing is recorded with ``-compare``, ``-merge-inductives`` or
+  ``-merge-inductives-verbose``. Nor is anything recorded where
+  ``/dev/shm`` is not a directory ``rocqchk`` can write to, or where other
+  users can write to it and it does not have the sticky bit; where it is on
+  the file system of ``TMPDIR`` (by default ``/tmp``), in which the files
+  of the workers' output are made, or of a file that ``rocqchk`` holds open
+  as it starts, such as its standard output and error, so that the records
+  take no room on a file system that ``rocqchk`` writes to without them,
+  and a full ``/dev/shm`` only stops recording; or where the limit on open
+  files (``ulimit -n``), less the files already open as ``rocqchk``
+  starts, or the room left in the system's table of open files
+  (``/proc/sys/fs/file-nr``), is below ``5 n + 65`` with ``-j n``, or
+  ``rocqchk`` cannot read that limit from ``/proc/self/limits``, those
+  files from ``/proc/self/fd``, or that table where the system shows one.
+  In all these cases the report reads the proofs as it does without
+  ``-j``. Other processes that fill the system's table of open files while
+  ``rocqchk`` runs can make it fail, with or without records: no check at
+  its start can foresee them.
+
+  The report is the same as without ``-j``, but for one case: a library
+  file that changes or vanishes on disk while ``rocqchk`` runs can change
+  which proofs the report says it could not read, and so reports as
+  axioms, whether those proofs were recorded or not. The report does not
+  read a recorded proof, so it does not read and keep that proof's table
+  for the later proofs of that library that it reads, which then read the
+  library file as it is then.
 
 Environment variable ``$ROCQLIB`` can be set to override the location of
 the standard library.

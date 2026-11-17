@@ -33,6 +33,12 @@
 # that line. If no marker appears within 30 s, if the first marker is the
 # main process's or that of a process not below it, or if rocqchk does not
 # end within 30 s of the kill and 30 s more after the go, the test fails.
+#
+# The kill is made twice, the second time with -statement-report and a
+# request file of one line, with which each worker that checks a proof
+# also records its objects to a file of its own, where the conditions of
+# ReportRecords.start hold (checker/reportRecords.ml): the same lines and
+# the same exit code are asked of both runs.
 set -eu
 : "${BIN:=$(dirname "$(command -v rocq)")/}"
 export PATH="$BIN:$PATH"
@@ -116,10 +122,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-m="$d/marks"
-mkdir "$m"
 # The hook splits its value at each ':'.
-case $m in *:*) fail "the scratch directory $m holds a ':', which ROCQCHK_OPAQUE_AT cannot carry" ;; esac
+case $d in *:*) fail "the scratch directory $d holds a ':', which ROCQCHK_OPAQUE_AT cannot carry" ;; esac
 
 cat > "$d/Lib.v" <<'EOF'
 Lemma l1 : True. Proof. exact I. Qed.
@@ -131,70 +135,89 @@ EOF
 
 rocq c -native-compiler no -Q "$d" WKill "$d/Lib.v"
 
-log="$d/kill.log"
-( ROCQCHK_OPAQUE_AT="before:WKill.Lib:$m" \
-    exec rocqchk -o -bytecode-compiler yes -j 4 -worker-budget 20 -Q "$d" WKill -norec WKill.Lib \
-    > "$log" 2>&1 ) &
-main=$!
+# kill_case NAME ARGS...: the kill described above, of rocqchk run with
+# ARGS besides its own, its output in $d/NAME.log and its markers in
+# $d/NAME-marks, a directory of its own, so that no marker or go of an
+# earlier case is seen.
+kill_case() {
+  local name=$1 m log target why released f R
+  shift
+  m="$d/$name-marks"
+  mkdir "$m"
+  log="$d/$name.log"
+  ( ROCQCHK_OPAQUE_AT="before:WKill.Lib:$m" \
+      exec rocqchk -o -bytecode-compiler yes -j 4 -worker-budget 20 "$@" -Q "$d" WKill -norec WKill.Lib \
+      > "$log" 2>&1 ) &
+  main=$!
 
-# The first marker, polled every 0.1 s for up to 30 s.
-target=
-for _ in $(seq 1 300); do
-  for f in "$m"/before-*; do
-    [ -e "$f" ] || continue
-    [ "$f" != "$m/before-$main" ] \
-      || { cat "$log" >&2; fail "the hook stopped the main process $main before any worker failed"; }
-    if [ -z "$target" ]; then target=${f##*/before-}; fi
+  # The first marker, polled every 0.1 s for up to 30 s.
+  target=
+  for _ in $(seq 1 300); do
+    for f in "$m"/before-*; do
+      [ -e "$f" ] || continue
+      [ "$f" != "$m/before-$main" ] \
+        || { cat "$log" >&2; fail "$name: the hook stopped the main process $main before any worker failed"; }
+      if [ -z "$target" ]; then target=${f##*/before-}; fi
+    done
+    if [ -n "$target" ]; then break; fi
+    alive "$main" || break
+    sleep 0.1
   done
-  if [ -n "$target" ]; then break; fi
-  alive "$main" || break
-  sleep 0.1
-done
 
-if [ -z "$target" ]; then
-  if alive "$main"; then
-    why="no process read the table of WKill.Lib within 30 s"
-  else
-    R=0
-    wait "$main" || R=$?
-    main=
-    why="rocqchk ended, with exit code $R, before any process read the table of WKill.Lib"
+  if [ -z "$target" ]; then
+    if alive "$main"; then
+      why="no process read the table of WKill.Lib within 30 s"
+    else
+      R=0
+      wait "$main" || R=$?
+      main=
+      why="rocqchk ended, with exit code $R, before any process read the table of WKill.Lib"
+    fi
+    cat "$log" >&2
+    fail "$name: $why"
   fi
-  cat "$log" >&2
-  fail "$why"
-fi
 
-case $target in ''|*[!0-9]*) fail "the marker before-$target names no process id" ;; esac
-below "$main" "$target" \
-  || { cat "$log" >&2; fail "process $target, stopped at the hook, is not a worker of rocqchk ($main)"; }
-kill -KILL "$target" \
-  || { cat "$log" >&2; fail "kill -KILL $target failed: the worker was not waiting at the hook"; }
+  case $target in ''|*[!0-9]*) fail "$name: the marker before-$target names no process id" ;; esac
+  below "$main" "$target" \
+    || { cat "$log" >&2; fail "$name: process $target, stopped at the hook, is not a worker of rocqchk ($main)"; }
+  kill -KILL "$target" \
+    || { cat "$log" >&2; fail "$name: kill -KILL $target failed: the worker was not waiting at the hook"; }
 
-# The main process stops at the hook once it has failed (see the header):
-# let it go on only then.
-released=no
-for _ in $(seq 1 300); do
-  alive "$main" || break
-  if [ -e "$m/before-$main" ]; then touch "$m/go"; released=yes; break; fi
-  sleep 0.1
-done
-if [ "$released" = no ] && alive "$main"; then
-  cat "$log" >&2
-  fail "rocqchk did not end within 30 s after worker $target was killed"
-fi
-ends "$main" 30 \
-  || { cat "$log" >&2; fail "rocqchk did not end within 30 s after $m/go was created"; }
+  # The main process stops at the hook once it has failed (see the header):
+  # let it go on only then.
+  released=no
+  for _ in $(seq 1 300); do
+    alive "$main" || break
+    if [ -e "$m/before-$main" ]; then touch "$m/go"; released=yes; break; fi
+    sleep 0.1
+  done
+  if [ "$released" = no ] && alive "$main"; then
+    cat "$log" >&2
+    fail "$name: rocqchk did not end within 30 s after worker $target was killed"
+  fi
+  ends "$main" 30 \
+    || { cat "$log" >&2; fail "$name: rocqchk did not end within 30 s after $m/go was created"; }
 
-R=0
-wait "$main" || R=$?
-main=
+  R=0
+  wait "$main" || R=$?
+  main=
 
-if [ "$R" != 1 ]; then
-  cat "$log" >&2
-  fail "rocqchk exited with code $R after worker $target was killed; expected 1"
-fi
-# The line is wrapped where it is long, so whitespace is collapsed first.
-tr -s ' \n\t' ' ' < "$log" | grep -Fq "Worker process $target was killed by SIGKILL while checking" \
-  || { cat "$log" >&2; fail "rocqchk did not say that worker process $target was killed by SIGKILL while checking"; }
+  if [ "$R" != 1 ]; then
+    cat "$log" >&2
+    fail "$name: rocqchk exited with code $R after worker $target was killed; expected 1"
+  fi
+  # The line is wrapped where it is long, so whitespace is collapsed first.
+  tr -s ' \n\t' ' ' < "$log" | grep -Fq "Worker process $target was killed by SIGKILL while checking" \
+    || { cat "$log" >&2; fail "$name: rocqchk did not say that worker process $target was killed by SIGKILL while checking"; }
+}
+
+kill_case kill
+
+# The same kill with a statement report: each worker that checks a proof of
+# WKill.Lib then also records its objects, to a file of its own that the
+# main process opened for it (ReportRecords). The killed worker's file is
+# closed with no copy, and the run fails as above, with no report.
+echo 'l1 WKill.Lib.l1 -' > "$d/kill.req"
+kill_case kill-report -statement-report "$d/kill.req"
 
 exit 0

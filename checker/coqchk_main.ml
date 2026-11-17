@@ -820,21 +820,9 @@ let run_compare env =
 let main () =
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
-  (* With workers, the report takes the objects of each opaque body a check
-     recorded instead of reading it again (ReportRecords); at -j 1 nothing
-     is recorded. Nor is anything with -compare: the report reads the proofs
-     as before. Reading a body keeps its opaque table in this process
-     ([CheckLibrary.indirect_accessor]), and [run_compare] reads opaque
-     bodies through the same accessor; a body taken from a record would
-     leave its table unread, and the comparison could then read the library
-     file again where, without records, it uses the table the report kept.
-     Nor is anything recorded under a limit on open files that leaves too
-     few free beside the descriptors open already, nor where /dev/shm cannot
-     hold the records apart from every file this run writes without them,
-     which [ReportRecords.start] finds out itself: the records would take
-     descriptors, or room, that this run needs without them. *)
+  (* When to call [ReportRecords.start], and why: see reportRecords.mli. *)
   if Option.has_some !statement_report && CheckWorkers.parallel ()
-     && Option.is_empty !compare_config then
+     && Option.is_empty !compare_config && not (Indmerge.enabled ()) then
     ReportRecords.start ();
   let senv, opac = run senv in
   let env = Safe_typing.env_of_safe_env senv in

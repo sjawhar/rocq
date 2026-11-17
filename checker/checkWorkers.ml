@@ -703,6 +703,12 @@ let close_file w =
   Option.iter close_fd w.file;
   w.file <- None
 
+(* The files the main process holds for the worker [w] but its report
+   pipe ([close_report]): its output and its extra file. *)
+let close_files w =
+  close_output w;
+  close_file w
+
 (* The worker [w] ended successfully: [done_ok] takes its file. *)
 let file_done w =
   match w.file, !worker_file with
@@ -762,11 +768,7 @@ let spawn ?(releasable = true) ?prepared tasks =
     match Unix.fork () with
     | 0 ->
       Unix.close report;
-      List.iter (fun w ->
-          close_fd w.report;
-          Option.iter (fun (out, err) -> close_fd out; close_fd err) w.output;
-          Option.iter close_fd w.file)
-        !running;
+      List.iter (fun w -> close_fd w.report; close_files w) !running;
       (* Those [deal] opened for the batches it has not forked yet: a child
          holding the write end of another worker's report would keep that
          report from ever ending. *)
@@ -816,8 +818,7 @@ let abort () =
   List.iter (fun w ->
       (try ignore (waitpid_non_intr [] w.pid) with Unix.Unix_error _ -> ());
       close_report w.report;
-      close_output w;
-      close_file w)
+      close_files w)
     workers
 
 (* What the worker whose failure is being raised printed, standard output
@@ -857,8 +858,7 @@ let print_output (out, err) =
    kept. *)
 let fail w status =
   held_output := read_output w;
-  close_output w;
-  close_file w;
+  close_files w;
   abort ();
   raise (WorkerFailed (w.pid, status, w.batch))
 
@@ -1190,6 +1190,24 @@ let deal ?(walk = false) k size =
                spawn ?prepared:prepared.(j)
                  (Array.of_list (by_cost (if walk then b else List.rev b))))
            batches)
+
+(* The descriptors that the main process may hold at once for its workers,
+   each given [extra_per_worker] files of a client's ([set_worker_file]),
+   with room for the rest of the run. At most [jobs ()] workers are alive
+   at once, counting the batches that [deal] has prepared and not forked
+   yet: [dispatch] and [finish] deal no more batches than there are free
+   slots, and the slot of the worker of [validate_tables] is kept for it.
+   Each worker holds, from the moment its batch is prepared until it is
+   reaped, at most [4 + extra_per_worker]: the two ends of its report pipe,
+   its two output files and its extra files. The peak is in [deal], which
+   opens the first four of every batch it prepares before it forks any;
+   [spawn] then opens the extra files while the write end of the report is
+   still open, and closes that end right after the fork. The 1 is the file
+   of progress of the worker of [validate_tables], which the main process
+   opens before that worker is forked and keeps after it has ended; the 64
+   leave room for the library files the main process opens. *)
+let descriptors_for_workers ~extra_per_worker =
+  (4 + extra_per_worker) * jobs () + 1 + 64
 
 (* Hands out the batches a new job makes possible, at most once every
    [window] seconds. *)

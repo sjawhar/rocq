@@ -158,6 +158,13 @@ val set_worker_file : worker_file -> unit
     three may raise anything but [Sys.Break], and [in_child] nothing at
     all. *)
 
+val descriptors_for_workers : extra_per_worker:int -> int
+(** The descriptors that the main process may hold at once for the workers
+    that [-j] allows, each given [extra_per_worker] files more
+    ([set_worker_file]), with room for the library files it opens: a client
+    that gives workers files checks, before any is forked, that this many
+    are free. *)
+
 val validate_tables : (Names.DirPath.t * (unit -> unit)) list -> unit
 (** [validate_tables tables] starts one worker that runs each read, in
     the order given, which is the order stock parses the tables while it
