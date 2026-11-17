@@ -921,6 +921,25 @@ let rec write_all fd b ofs len =
 (* The hook of [Mod_checking], in whichever process checked the body. It
    raises nothing: a failure only stops the recording in this process, whose
    bodies the report then reads. *)
+(* Prototype C7b (measurement only, never merged): with
+   ROCQCHK_REPORT_REFS_COMPACT=1 each process numbers the objects it records,
+   writes each object once, and a record holds the numbers. The first record
+   a process writes says that the numbering starts again, because a process
+   can append to the file of an earlier one with the same pid. *)
+type compact_record = bool * Constant.t * DirPath.t * int * GlobRef.t array * int array
+
+module GRTbl = Hashtbl.Make (struct
+    type t = GlobRef.t
+    let equal a b = GlobRef.UserOrd.equal a b && GlobRef.CanOrd.equal a b
+    let hash = GlobRef.UserOrd.hash
+  end)
+
+let refs_compact () =
+  match Sys.getenv_opt "ROCQCHK_REPORT_REFS_COMPACT" with Some "1" -> true | Some _ | None -> false
+
+(* The numbering of this process, with the pid that made it. *)
+let refs_numbers : (int * int GRTbl.t * int ref) option ref = ref None
+
 let record_refs dir kn o env c =
   let pid = Unix.getpid () in
   let stopped = match !refs_stopped with Some p -> Int.equal p pid | None -> false in
@@ -928,18 +947,38 @@ let record_refs dir kn o env c =
     try
       let (sub, _, dp, i) = Opaqueproof.repr o in
       if CList.is_empty sub then begin
+        let compact = refs_compact () in
         let fd = match !refs_out with
           | Some (p, fd) when Int.equal p pid -> fd
           | Some _ | None ->
-            let file = Filename.concat dir (string_of_int pid ^ ".refs") in
+            let file = Filename.concat dir (string_of_int pid ^ (if compact then ".crefs" else ".refs")) in
             let fd = Unix.openfile file
                 [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND; Unix.O_CLOEXEC] 0o600 in
             refs_out := Some (pid, fd);
             fd
         in
-        let record : refs_record =
-          (kn, dp, Opaqueproof.repr_handle i, Check_closure.opaque_body_refs env c) in
-        let b = Marshal.to_bytes record [] in
+        let objs = Check_closure.opaque_body_refs env c in
+        let b =
+          if not compact then
+            Marshal.to_bytes ((kn, dp, Opaqueproof.repr_handle i, objs) : refs_record) []
+          else begin
+            let fresh, tbl, next = match !refs_numbers with
+              | Some (p, tbl, next) when Int.equal p pid -> false, tbl, next
+              | Some _ | None ->
+                let tbl = GRTbl.create 4096 and next = ref 0 in
+                refs_numbers := Some (pid, tbl, next);
+                true, tbl, next
+            in
+            let defs = ref [] in
+            let ids = List.map (fun g -> match GRTbl.find_opt tbl g with
+                | Some n -> n
+                | None -> let n = !next in incr next; GRTbl.add tbl g n; defs := g :: !defs; n)
+                objs in
+            let record : compact_record =
+              (fresh, kn, dp, Opaqueproof.repr_handle i, Array.of_list (List.rev !defs), Array.of_list ids) in
+            Marshal.to_bytes record []
+          end
+        in
         write_all fd b 0 (Bytes.length b)
       end
     with _ -> refs_stopped := Some pid
@@ -1005,21 +1044,41 @@ let collect_refs_records () =
     let read () =
       let records = Check_closure.opaque_records () in
       let files = try Sys.readdir d.dir with Sys_error _ -> [||] in
-      let nfiles = ref 0 in
+      let nfiles = ref 0 and nbytes = ref 0 in
       Array.iter (fun f ->
-          if Filename.check_suffix f ".refs" then
-            match open_in_bin (Filename.concat d.dir f) with
+          let plain = Filename.check_suffix f ".refs" and compact = Filename.check_suffix f ".crefs" in
+          if plain || compact then
+            let path = Filename.concat d.dir f in
+            match open_in_bin path with
             | exception Sys_error _ -> ()
             | ic ->
               incr nfiles;
+              (try nbytes := !nbytes + (Unix.stat path).Unix.st_size with Unix.Unix_error _ -> ());
+              let objects = ref [||] and known = ref 0 in
               let rec loop () =
-                match (input_value ic : refs_record) with
-                | (kn, dp, i, objs) -> Check_closure.add_opaque_record records kn dp i objs; loop ()
-                | exception (End_of_file | Failure _ | Sys_error _) -> ()
+                if plain then
+                  match (input_value ic : refs_record) with
+                  | (kn, dp, i, objs) -> Check_closure.add_opaque_record records kn dp i objs; loop ()
+                  | exception (End_of_file | Failure _ | Sys_error _) -> ()
+                else
+                  match (input_value ic : compact_record) with
+                  | (fresh, kn, dp, i, defs, ids) ->
+                    if fresh then begin objects := [||]; known := 0 end;
+                    if !known + Array.length defs > Array.length !objects then begin
+                      let a = Array.make (max 1024 (2 * (!known + Array.length defs))) (GlobRef.VarRef (Id.of_string "x")) in
+                      Array.blit !objects 0 a 0 !known;
+                      objects := a
+                    end;
+                    Array.blit defs 0 !objects !known (Array.length defs);
+                    known := !known + Array.length defs;
+                    let objs = Array.to_list (Array.map (fun n ->
+                        if n < 0 || n >= !known then raise (Failure "bad record") else (!objects).(n)) ids) in
+                    Check_closure.add_opaque_record records kn dp i objs; loop ()
+                  | exception (End_of_file | Failure _ | Sys_error _) -> ()
               in
               Fun.protect ~finally:(fun () -> close_in_noerr ic) loop)
         files;
-      Check_closure.note_opaque_records_read records ~files:!nfiles
+      Check_closure.note_opaque_records_read records ~files:!nfiles ~bytes:!nbytes
         ~seconds:(Unix.gettimeofday () -. t0);
       records
     in

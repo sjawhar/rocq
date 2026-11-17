@@ -141,8 +141,10 @@ type opaque_records = {
   (* one copy of each object the records name *)
   mutable count : int;
   mutable files : int;
+  mutable bytes : int;
   mutable read_s : float;
-  (* how many records were read, from how many files, in how many seconds *)
+  (* how many records were read, from how many files of how many bytes, in
+     how many seconds *)
 }
 
 type state = {
@@ -459,18 +461,18 @@ let write_stats records =
        Hashtbl.iter (fun r a ->
            Printf.fprintf oc "%s %.0f %.3f %.3f %.0f %.3f\n" r a.(0) a.(1) a.(2) a.(3) a.(4))
          report_stats;
-       let files, n, read_s = match records with
-         | Some r -> r.files, r.count, r.read_s
-         | None -> 0, 0, 0.
+       let files, bytes, n, read_s = match records with
+         | Some r -> r.files, r.bytes, r.count, r.read_s
+         | None -> 0, 0, 0, 0.
        in
-       Printf.fprintf oc "RECORDS hits %d misses %d files %d records %d read_s %.3f\n"
-         !record_hits !record_misses files n read_s;
+       Printf.fprintf oc "RECORDS hits %d misses %d files %d bytes %d records %d read_s %.3f\n"
+         !record_hits !record_misses files bytes n read_s;
        close_out oc
      with Sys_error _ -> ())
 
 let opaque_records () = {
   bodies = ConstTbl.create 4096; shared = RefTbl.create 4096;
-  count = 0; files = 0; read_s = 0.;
+  count = 0; files = 0; bytes = 0; read_s = 0.;
 }
 
 (* A proof that one constant names twice, in a module's signature and in its
@@ -494,8 +496,9 @@ let add_opaque_record r kn dp i objs =
   in
   ConstTbl.replace r.bodies kn bodies
 
-let note_opaque_records_read r ~files ~seconds =
+let note_opaque_records_read r ~files ~bytes ~seconds =
   r.files <- files;
+  r.bytes <- bytes;
   r.read_s <- seconds
 
 (* Prototype C7: the objects that a check recorded for the opaque body [o] of

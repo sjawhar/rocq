@@ -48,7 +48,7 @@ val add_opaque_record : opaque_records -> Names.Constant.t -> Names.DirPath.t ->
     records of one proof under one constant that give different objects are
     both dropped. *)
 
-val note_opaque_records_read : opaque_records -> files:int -> seconds:float -> unit
+val note_opaque_records_read : opaque_records -> files:int -> bytes:int -> seconds:float -> unit
 (** How many files the records were read from, and in how many seconds, for
     the statistics of ROCQCHK_REPORT_STATS. *)
 
