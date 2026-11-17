@@ -7,8 +7,8 @@
 # without them. A command that rolls the document back past a proof the
 # kernel did not check runs that check too, so the file stops with the same
 # status and with the error Qed raises without the skip. The skip still
-# applies to a Qed no command discards, but rocq compile -vok and a toplevel,
-# which write no library, check every Qed.
+# applies to a Qed no command discards, but rocq compile -vos, rocq compile
+# -vok and a toplevel, which write no .vo, check every Qed they run.
 set -euo pipefail
 
 export PATH="$BIN:$PATH"
@@ -289,19 +289,19 @@ says resilient_reset_bad "$kernel_error" option set inline
 extra=(-worker-id qed_rollback)
 rolls_back worker_id_reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
 
-# A command that writes no library forces the check; the option only warns.
+# A command that writes no .vo forces the check; the option only warns.
 forced_stops() { # case body...
   local case=$1
   rolls_back "$@"
   says "$case" "$ignored_option" option
 }
 
-# (k) -vok writes no library, so nothing it processes reaches rocqchk and its
-# exit status is the whole verdict: it typechecks every Qed proof. As in a
-# toplevel, the check is forced on for the whole process, the files it loads
-# first included, whatever the flag says, and the option only warns. So no arm
-# compiles an ill-typed proof, with the proof delegated to a worker or not,
-# and every arm compiles a well-typed one.
+# (k) -vos and -vok write no .vo, so nothing they process reaches rocqchk and
+# their exit status is the whole verdict: they typecheck every Qed proof they
+# run. As in a toplevel, the check is forced on for the whole process, the
+# files they load first included, whatever the flag says, and the option only
+# warns. So no arm compiles an ill-typed proof they run, with the proof
+# delegated to a worker or not, and every arm compiles a well-typed one.
 extra=(-vok)
 forced_stops vok_bad "$bad" 'Qed.'
 same_status vok_good 0 "$good" 'Qed.'
@@ -316,9 +316,16 @@ extra=(-vok -l "$workdir/loaded_bad.v")
 same_status vok_load_bad 1 'Definition after_load := 0.'
 says vok_load_bad "$kernel_error" plain option set
 says vok_load_bad "$ignored_option" option
+# -vos does not run most proofs, but it runs some in the main process, for
+# instance one that uses a command that can read an opaque proof, such as
+# Print, and every proof closed under Set Universe Polymorphism.
+extra=(-vos)
+forced_stops vos_print_bad "$bad" 'Print nat.' 'Qed.'
+forced_stops vos_poly_bad 'Set Universe Polymorphism.' "$bad" 'Qed.'
+same_status vos_good 0 "$good" 'Print nat.' 'Qed.'
 extra=()
 
-# (l) a toplevel writes no library either, and under -batch its exit status
+# (l) a toplevel writes no .vo either, and under -batch its exit status
 # says whether the files it was given go through, so it typechecks every Qed
 # proof too: the check is forced on before the session reads anything, the
 # files -l loads included, and the option only warns, since a project passes
