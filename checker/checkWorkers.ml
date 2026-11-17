@@ -561,7 +561,8 @@ let run_worker parent report output (tasks : task array) =
           if Unix.getppid () <> parent then Unix._exit 1;
           current := t.job;
           release_test_at "check" i;
-          t.run ();
+          (* Negative control N1 (BET-1213 D16): a worker skips the checks of opaque bodies. *)
+          (match t.job with Proof _ -> () | Table _ -> t.run ());
           incr completed;
           release_test_at "between" i
         end
