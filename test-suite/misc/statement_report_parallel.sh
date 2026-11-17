@@ -204,7 +204,7 @@ report() {
 # (a)
 report a -norec SRPar.A
 has a-j1 'axiom via SRPar.A.ax'
-has a-j1 'statement typed SRPar.A.uses_ax SRPar.A.via match 1 0'
+has a-j1 'statement typed SRPar.A.uses_ax SRPar.A.via match 1 1'
 
 # (b): A is loaded without being checked, so its bodies are read.
 report b -norec SRPar.B
