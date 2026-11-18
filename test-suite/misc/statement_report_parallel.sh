@@ -148,6 +148,20 @@
 #      from the records: M = 0. A walk that skipped the place
 #      (Check_closure.push_subterms, its LetIn and Proj arms) misses its
 #      axiom at -j 1 and at -j 3.
+#  (v) W4.v: opaque proofs made by coqc that reach an axiom in one place
+#      only, a place where a term usually names the same object a second
+#      way: the parameters of a match (in_pms), the indices of a match on
+#      an inductive type in SProp (in_idx) and the element type of an
+#      array literal (in_arrty), each after a "change ... in" that gives
+#      the matched or the applied hypothesis a type that names the axiom
+#      while its binder keeps its own type; and the inductive type of a
+#      match (in_caseind), of a primitive projection (in_projind) and of a
+#      constructor (in_ctoronly), each on a symbol that a rewrite rule
+#      turns into that inductive type, which the report does not follow.
+#      At -j 1 and at -j 3, which takes every body from the records:
+#      M = 0. A walk that skipped the place (Check_closure.push_subterms,
+#      its Case and Array arms; the Case, Proj and Construct arms of
+#      Check_closure.walk) misses its axiom at -j 1 and at -j 3.
 #
 # A case where /dev/shm is missing, not writable, or writable by other
 # users without its sticky bit needs another mount of /dev/shm than the
@@ -164,7 +178,7 @@ t=$(mktemp -d)
 # The TMPDIR made in /dev/shm for (q), once it is made.
 s=
 trap 'rm -rf "$d" "$t"; [ -z "$s" ] || rm -rf "$s"' EXIT
-mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/walk2" "$d/walk3" "$d/good" "$d/bad" "$d/spliced"
+mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/walk2" "$d/walk3" "$d/walk4" "$d/good" "$d/bad" "$d/spliced"
 
 {
   cat <<'EOF'
@@ -388,6 +402,71 @@ Proof. exact (fld (mkR axproj)). Qed.
 EOF
 rocq c -native-compiler no -Q "$d/walk3" SRWalk3 "$d/walk3/W3.v"
 
+# W4.v, for (v): each opaque proof reaches its axiom in one place only.
+# in_pms, in_idx and in_arrty change the type of their hypothesis to one
+# that names the axiom; the binder keeps its own type, and the kernel
+# stores neither the types of a match's branches and return clause nor
+# the type of an argument, so the axiom is only in the parameters of the
+# match, in its indices (a match on seq, in SProp, into nat, which the
+# kernel stores with those indices), or in the element type of the array
+# literal. in_caseind, in_projind and in_ctoronly take a symbol that a
+# rewrite rule turns into an inductive type whose constructor names the
+# axiom; the report takes a symbol as an axiom and does not follow its
+# rules, so that inductive type is only in the match, the projection or
+# the constructor.
+cat > "$d/walk4/W4.v" <<'EOF'
+From Corelib Require Import PrimArray.
+Open Scope array_scope.
+
+Axiom axpms : unit.
+Lemma in_pms : list nat -> nat.
+Proof.
+  intros l. change (list (let _ := axpms in nat)) in l.
+  exact (match l with nil => O | cons _ _ => O end).
+Qed.
+
+Set Definitional UIP.
+Inductive seq (a : nat) : nat -> SProp := srefl : seq a a.
+Unset Definitional UIP.
+Axiom axidx : unit.
+Lemma in_idx : seq 0 0 -> nat.
+Proof.
+  intros e. change (seq 0 (let _ := axidx in 0)) in e.
+  exact (match e with srefl _ => O end).
+Qed.
+
+Axiom axarrty : unit.
+Lemma in_arrty : (array nat -> nat) -> nat.
+Proof.
+  intros f. change (array (let _ := axarrty in nat) -> nat) in f.
+  exact (f [| O | O |]).
+Qed.
+
+Axiom axcaseind : unit.
+Inductive Hm : Prop := hm : (let _ := axcaseind in True) -> Hm.
+Symbol Tm : Prop.
+Rewrite Rule Tm_Hm := Tm => Hm.
+Lemma in_caseind : Tm -> nat.
+Proof. intros x. exact (match x with hm _ => O end). Qed.
+
+Axiom axprojind : unit.
+Set Primitive Projections.
+Record Rp : Set := mkRp { fldp : let _ := axprojind in nat }.
+Unset Primitive Projections.
+Symbol Tp : Set.
+Rewrite Rule Tp_Rp := Tp => Rp.
+Lemma in_projind : Tp -> nat.
+Proof. intros x. exact (fldp x). Qed.
+
+Axiom axctoronly : unit.
+Inductive Hk : Prop := hk : (let _ := axctoronly in True) -> Hk.
+Symbol Tk : Prop.
+Rewrite Rule Tk_Hk := Tk => Hk.
+Lemma in_ctoronly : (Tk -> nat) -> nat.
+Proof. intros f. exact (f (hk I)). Qed.
+EOF
+rocq c -native-compiler no -allow-rewrite-rules -Q "$d/walk4" SRWalk4 "$d/walk4/W4.v"
+
 cat > "$d/a.req" <<'EOF'
 via SRPar.A.via -
 model_a SRPar.A.model_a -
@@ -429,6 +508,8 @@ cat > "$d/u.req" <<'EOF'
 in_letin SRWalk3.W3.in_letin -
 in_proj SRWalk3.W3.in_proj -
 EOF
+v_names="pms idx arrty caseind projind ctoronly"
+for n in $v_names; do echo "in_$n SRWalk4.W4.in_$n -"; done > "$d/v.req"
 
 fail() { >&2 echo "FAILURE: $*"; exit 1; }
 
@@ -1033,6 +1114,14 @@ report u -Q "$d/walk3" SRWalk3 -norec SRWalk3.W3
 for name in u-j1 u-j3; do
   has "$name" 'axiom in_letin SRWalk3.W3.axletin'
   has "$name" 'axiom in_proj SRWalk3.W3.axproj'
+done
+
+# (v) The places of W4.v, as listed above. M = 0: -j 3 took every body
+# from the records.
+report v -Q "$d/walk4" SRWalk4 -norec SRWalk4.W4
+[ "$reads" = 0 ] || { cat "$d/v-j3.err" >&2; fail "(v) -j 3: $reads bodies read, all were checked"; }
+for name in v-j1 v-j3; do
+  for n in $v_names; do has "$name" "axiom in_$n SRWalk4.W4.ax$n"; done
 done
 
 exit 0
