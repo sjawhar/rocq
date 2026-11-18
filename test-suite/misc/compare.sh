@@ -937,14 +937,14 @@ pin_entry() { # <key> <name> <file>
 # <files>, the pre-checked libraries <pre> after the Prelude, which every
 # such config pre-checks, and the permitted axioms <axioms>; each list is
 # the members of a JSON array. eq's indices-not-mattering is tolerated, as
-# in the cases above.
+# in the cases above. The first call hashes the Prelude into
+# named_prelude_sha, which every later call of the script run reuses.
 named_config() { # <out> <theorem> <files> [<pre>] [<axioms>]
-  local prelude_sha
-  prelude_sha=$(bounded rocqchk -sha256 "$(prelude_vo)")
+  [ -n "${named_prelude_sha:-}" ] || named_prelude_sha=$(bounded rocqchk -sha256 "$(prelude_vo)")
   printf '%s\n' \
     "{\"theorems\": [{\"name\": \"$2\"}], \"permitted_axioms\": [${5:-}]," \
     " \"tolerated_flags\": [{\"kind\": \"indices-not-mattering\", \"object\": \"Corelib.Init.Logic.eq\"}]," \
-    " \"prechecked\": [{\"library\": \"Corelib.Init.Prelude\", \"sha256\": \"$prelude_sha\"}${4:+, $4}]," \
+    " \"prechecked\": [{\"library\": \"Corelib.Init.Prelude\", \"sha256\": \"$named_prelude_sha\"}${4:+, $4}]," \
     " \"challenge_files\": [$3]}" > "$1"
 }
 
@@ -1103,7 +1103,6 @@ case_pre_dep_forged() {
   passed "  ok $c/forged"
   d=$(pin_entry library Top.D "$w/ch/D.vo")
   named_config "$w/config.json" Top.A.thm "$a" "$p, $d"
-  rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
   keep_verdict "$w/out.json" "$c" prechecked
   expect_pass "$c/prechecked" "$code" "$w" '[]'
@@ -1177,7 +1176,6 @@ case_challenge_missing_dep() {
   passed "  ok $c/missing"
   d=$(pin_entry library Top.D "$w/answer/D.vo")
   named_config "$w/config.json" Top.A.thm "$a" "$d"
-  rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
   keep_verdict "$w/out.json" "$c" prechecked
   expect_pass "$c/prechecked" "$code" "$w"
@@ -1220,7 +1218,6 @@ case_challenge_dir_link() {
   expect_refused "$c/linked-dir" "$code" "$w" \
     "The challenge loaded the library Top\.Sub\.L from [^ ]*/Sub/L\.vo, which is not under the challenge directory\."
   passed "  ok $c/linked-dir"
-  rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch-alias" -Q "$w/answer" Top Top.A)
   keep_verdict "$w/out.json" "$c" linked-challenge
   expect_pass "$c/linked-challenge" "$code" "$w"
@@ -1231,6 +1228,10 @@ case_challenge_dir_link() {
 
 # ---------------------------- the answer's libraries loaded without a check
 #
+# The refusal of Top.Helper, loaded without a check, which both cases
+# expect.
+unchecked_reason="The answer library Top\.Helper was loaded without a check, as a dependency of a library given with -norec or -admit, and it is neither pre-checked by the config, nor pinned by its sha256 as a challenge file, nor given with -admit itself\."
+
 # unchecked-helper: the challenge's thm states forall n, n + 0 = n. The
 # forged answer's Top.Helper proves bad : False by exact_no_check I under
 # Skip Qed Typecheck, a proof the kernel never typed, and its Top.A proves
@@ -1266,10 +1267,8 @@ case_unchecked_helper() {
   seed_stale_verdict "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/forged" Top -norec Top.A)
   keep_verdict "$w/out.json" "$c" forged
-  expect_refused "$c/forged" "$code" "$w" \
-    "The answer library Top\.Helper was loaded without a check, as a dependency of a library given with -norec or -admit, and it is neither pre-checked by the config, nor pinned by its sha256 as a challenge file, nor given with -admit itself\."
+  expect_refused "$c/forged" "$code" "$w" "$unchecked_reason"
   passed "  ok $c/forged"
-  rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/honest" Top \
     -norec Top.Helper -norec Top.A)
   keep_verdict "$w/out.json" "$c" honest
@@ -1320,10 +1319,8 @@ case_unchecked_admit_closure() {
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top \
     -norec Top.B -admit Top.A)
   keep_verdict "$w/out.json" "$c" closure
-  expect_refused "$c/closure" "$code" "$w" \
-    "The answer library Top\.Helper was loaded without a check, as a dependency of a library given with -norec or -admit, and it is neither pre-checked by the config, nor pinned by its sha256 as a challenge file, nor given with -admit itself\."
+  expect_refused "$c/closure" "$code" "$w" "$unchecked_reason"
   passed "  ok $c/closure"
-  rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top \
     -admit Top.Helper -norec Top.B -admit Top.A -admit Top.Helper)
   keep_verdict "$w/out.json" "$c" split
@@ -1414,7 +1411,6 @@ case_shared_coqpath() {
   local w c=shared-coqpath code
   w=$(mktemp -d)
   trusted_trees "$w" "$w/cp" Cp "$c"
-  rm -f "$w/out.json"
   code=$(unset ROCQPATH
     export COQPATH="$w/cp"
     named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
@@ -1434,7 +1430,6 @@ case_shared_user_contrib() {
   mkdir -p "$w/coqlib/plugins" "$w/coqlib/user-contrib"
   ln -s "$(cd "$(rocq -where)" && pwd)/theories" "$w/coqlib/theories"
   trusted_trees "$w" "$w/coqlib/user-contrib" Uc "$c"
-  rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -coqlib "$w/coqlib" \
     -Q "$w/answer" Top Top.A)
   keep_verdict "$w/out.json" "$c" answer
@@ -1503,7 +1498,6 @@ samefile_case() { # <c> <prechecked> <pattern>
   keep_verdict "$w/out.json" "$c" linked
   expect_refused "$c/linked" "$code" "$w" "$3"
   passed "  ok $c/linked"
-  rm -f "$w/out.json"
   code=$(export ROCQPATH="$w/rp:$w/rp2"
     named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
   keep_verdict "$w/out.json" "$c" unlinked
@@ -1573,7 +1567,6 @@ case_prechecked_read_file() {
   expect_refused "$c/read-file" "$code" "$w" \
     "The pre-checked library Top\.P\.Q is [^ ]*/two/P/Q\.vo, whose sha256 is $got, and the config pins $pin\."
   passed "  ok $c/read-file"
-  rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
   keep_verdict "$w/out.json" "$c" honest
   expect_pass "$c/honest" "$code" "$w"
@@ -1609,7 +1602,6 @@ case_prechecked_garbage() {
   ! grep -Eq 'Corrupted file|Try to rebuild it|[Aa]nomaly' "$w/log" \
     || { cat "$w/log"; fail "$c/garbage: the loader read the file before its sha256 was checked"; }
   passed "  ok $c/garbage"
-  rm -f "$w/out.json"
   rm -f "$w/garbage/P/Q.vo"
   mkdir "$w/garbage/P/Q.vo"
   seed_stale_verdict "$w/out.json"
@@ -1618,7 +1610,6 @@ case_prechecked_garbage() {
   expect_refused "$c/directory" "$code" "$w" \
     "The pre-checked library Top\.P\.Q is [^ ]*/P/Q\.vo, which cannot be read: Is a directory, not a regular file\."
   passed "  ok $c/directory"
-  rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
   keep_verdict "$w/out.json" "$c" honest
   expect_pass "$c/honest" "$code" "$w"

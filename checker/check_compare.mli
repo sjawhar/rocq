@@ -169,7 +169,6 @@ type t
 
 val prepare :
   config -> dir:string -> out:string -> add_challenge_load_path:(unit -> unit) ->
-  under_challenge_root:(Names.DirPath.t -> bool) ->
   path_below_root:(Names.DirPath.t -> string option) ->
   open_roots:(Names.DirPath.t * string) list -> bound_dirs:string list ->
   trusted:string list -> t
@@ -177,9 +176,14 @@ val prepare :
     [add_challenge_load_path] binds [dir], on the load path, in front of the
     answer's directories under each root the challenge stands in for, which
     stay behind it; it is called once, inside the challenge load.
-    [under_challenge_root] says whether a library name lives under one of
-    those roots, the root's name followed by at least one more component:
-    unless pre-checked, those are the answer's own libraries.
+    [path_below_root] gives the path of a library's [.vo] file below the
+    directory of the root the challenge stands in for that holds it
+    ([Some "X/Y.vo"] for [<root>.X.Y]), and [None] for a library under no
+    such root: [dir] holds the challenge's file of that library at that path.
+    A library lives under one of those roots when its name is the root's
+    followed by at least one more component, which is when
+    [path_below_root] gives it a path: unless pre-checked, those are the
+    answer's own libraries.
     Every other library the answer loaded, unless pre-checked, is a shared
     one, which the challenge loads too, and the run is refused unless the
     file the loader recorded for it, on either side, passes two tests.
@@ -195,10 +199,6 @@ val prepare :
     That is a statement about where the file is, not about who wrote it: a
     file there is the image's only as far as the launch keeps the answer
     from writing the trusted directories (above).
-    [path_below_root] gives the path of a library's [.vo] file below the
-    directory of the root the challenge stands in for that holds it
-    ([Some "X/Y.vo"] for [<root>.X.Y]), and [None] for a library under no
-    such root: [dir] holds the challenge's file of that library at that path.
     [open_roots] are the bound roots the challenge does NOT stand in for,
     with the directory each is bound to; the run is refused when the answer
     loaded a library from under one of them, or named as one of them, that

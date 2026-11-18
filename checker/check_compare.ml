@@ -169,9 +169,11 @@ end = struct
 
   (* A file that is not a regular one, as [Unix.stat] sees it through links,
      is refused before it is opened: a FIFO would block the open, and a link
-     to /dev/zero would never end. The message is the system's without the
-     file's name, which [open_in_bin]'s starts with: each caller names the
-     file itself. *)
+     to /dev/zero would never end. A regular file is opened with
+     [Unix.openfile] and read through a channel on its descriptor. Each
+     refusal is the system's message alone, [Unix.error_message]'s or the
+     text of a read's [Sys_error], neither of which names the file: each
+     caller names the file itself. *)
   let hex_of_file f =
     let refuse e = CErrors.user_err (Pp.str e) in
     let not_regular kind = refuse ("Is " ^ kind ^ ", not a regular file") in
@@ -184,9 +186,16 @@ end = struct
     | Unix.S_FIFO -> not_regular "a named pipe"
     | Unix.S_SOCK -> not_regular "a socket"
     | Unix.S_REG ->
+      let ch =
+        match Unix.openfile f [Unix.O_RDONLY; Unix.O_CLOEXEC] 0 with
+        | exception Unix.Unix_error (e, _, _) -> refuse (Unix.error_message e)
+        | fd ->
+          try Unix.in_channel_of_descr fd
+          with Unix.Unix_error (e, _, _) -> Unix.close fd; refuse (Unix.error_message e)
+      in
       try
-        let ch = open_in_bin f in
         Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
+            set_binary_mode_in ch true;
             let st = create () in
             let b = Bytes.create 65536 in
             let rec loop () =
@@ -195,19 +204,8 @@ end = struct
             in
             loop ();
             finish st)
-      with Sys_error e ->
-        let named = f ^ ": " in
-        if CString.is_prefix named e then
-          refuse (String.sub e (String.length named) (String.length e - String.length named))
-        else refuse e
+      with Sys_error e -> refuse e
 end
-
-(* [rocqchk -sha256 FILE]: the error names the file, as every other caller
-   of [Sha256.hex_of_file] does. *)
-let sha256_of_file f =
-  try Sha256.hex_of_file f
-  with CErrors.UserError msg ->
-    CErrors.user_err Pp.(str ("The file " ^ f ^ " cannot be read: ") ++ msg ++ str ".")
 
 (************************************************************************)
 (** {6 JSON}
@@ -1444,16 +1442,6 @@ type t = {
           no file lies under it ([check_challenge_dir]). *)
   prechecked : DirPath.t list;
   add_challenge_load_path : unit -> unit;
-  under_challenge_root : DirPath.t -> bool;
-      (** Is this library name under a root the challenge directory stands in
-          for: the root's name followed by at least one more component, so
-          that [path_below_root] gives its path? Those, unless pre-checked,
-          are the answer's own libraries ([origin]). Every other library the
-          answer loaded, unless pre-checked, is a shared one, and
-          [check_provenance] refuses a run unless the file the loader
-          recorded for it lies in no place an answer's file is found in
-          ([answer_place]) and was found in a trusted directory
-          ([trusted_dirs]). *)
   open_roots : (DirPath.t * string) list;
       (** The roots the command line binds that the challenge does NOT stand
           in for, with the directory each is bound to. A library under one of
@@ -1480,7 +1468,15 @@ type t = {
           the challenge stands in for that holds it ([Some "X/Y.vo"] for
           [<root>.X.Y]); [None] for a library under no such root. The
           challenge directory holds the challenge's file of that library at
-          that path ([pinned]). *)
+          that path ([pinned]). A library is under such a root when its name
+          is the root's followed by at least one more component, which is
+          when this gives it a path ([under_challenge_root]). Those, unless
+          pre-checked, are the answer's own libraries ([origin]). Every other
+          library the answer loaded, unless pre-checked, is a shared one, and
+          [check_provenance] refuses a run unless the file the loader
+          recorded for it lies in no place an answer's file is found in
+          ([answer_place]) and was found in a trusted directory
+          ([trusted_dirs]). *)
   pins : (string * string) list;
       (** The real path of each challenge file, and the sha256 the config
           pins for it ([pinned]). *)
@@ -1526,17 +1522,21 @@ let file_sha256 ~what file =
     Hashtbl.add hashed_files key h;
     h
 
+(* [rocqchk -sha256 FILE]: the error names the file, as every other caller
+   of [file_sha256] does. *)
+let sha256_of_file f = file_sha256 f ~what:(fun () -> "The file " ^ f ^ " cannot be read")
+
 (* The place an answer's file could have been found in that holds [file],
    the path the loader recorded: the working directory, for a file directly
    in it, or a directory the command line binds, for a file anywhere below
-   it. Both the directory the loader found the file in and the file's own
-   real path are tested, so a link in such a place to a file elsewhere, or a
-   link elsewhere to a file in one, is found. A path that cannot be resolved
-   is in an unknown place, which counts as the answer's. [None]: in no such
-   place. This says where the recorded file is, not who wrote it. *)
-let answer_place t file =
-  let found_in = realpath (Filename.dirname file) and real = realpath file in
-  match found_in, real with
+   it. Both the directory the loader found the file in, whose real path the
+   caller gives as [found_in], and the file's own real path are tested, so a
+   link in such a place to a file elsewhere, or a link elsewhere to a file in
+   one, is found. A path that cannot be resolved is in an unknown place,
+   which counts as the answer's. [None]: in no such place. This says where
+   the recorded file is, not who wrote it. *)
+let answer_place t ~found_in file =
+  match found_in, realpath file with
   | None, _ | _, None -> Some file
   | Some d, Some f ->
     let in_cwd p = match t.cwd with
@@ -1555,8 +1555,8 @@ let answer_place t file =
    there and have the sha256 it gives. [trusted] are the directories the run
    trusts for the image's own libraries; only those whose real path exists
    are kept, as real paths. *)
-let prepare cfg ~dir ~out ~add_challenge_load_path ~under_challenge_root ~path_below_root
-    ~open_roots ~bound_dirs ~trusted =
+let prepare cfg ~dir ~out ~add_challenge_load_path ~path_below_root ~open_roots
+    ~bound_dirs ~trusted =
   let files =
     List.map (fun f ->
         let p = if Filename.is_relative f.cf_path then Filename.concat dir f.cf_path
@@ -1582,7 +1582,7 @@ let prepare cfg ~dir ~out ~add_challenge_load_path ~under_challenge_root ~path_b
   { cfg; dir; out; files;
     challenge_dir = realpath dir;
     prechecked = prechecked_libraries cfg;
-    add_challenge_load_path; under_challenge_root; open_roots;
+    add_challenge_load_path; open_roots;
     cwd = realpath (Sys.getcwd ());
     bound_dirs = List.filter_map realpath bound_dirs;
     trusted_dirs = List.filter_map realpath trusted;
@@ -1616,9 +1616,10 @@ let check_prechecked_files cfg =
 
 (* After the read: the file the answer's loader recorded for each pre-checked
    library must have its pin as well. [check_prechecked_files] hashed the file
-   the name resolves to, and the load path has not changed since, so only a
-   file of another real path is hashed here. A pre-checked library the answer
-   did not load is refused: its pin would be checked on no file it read. *)
+   the name resolves to, and [file_sha256] answers a file of the same real
+   path from [hashed_files], so only a file of another real path is hashed
+   here. A pre-checked library the answer did not load is refused: its pin
+   would be checked on no file it read. *)
 let check_prechecked_read t =
   List.iter (fun p ->
       let dp = p.pc_library in
@@ -1627,8 +1628,7 @@ let check_prechecked_read t =
         CErrors.user_err
           Pp.(str ("The answer did not load the pre-checked library " ^ DirPath.to_string dp ^
                    ", which the config names."))
-      | Some file ->
-        if not (same_real_file file (CheckLibrary.library_file dp)) then check_pin p file)
+      | Some file -> check_pin p file)
     t.cfg.cfg_prechecked
 
 (* A root the command line binds that the challenge does not stand in for is
@@ -1677,6 +1677,11 @@ let in_libs libs mp = match mp_root mp with
   | None -> false
   | Some dp -> List.exists (DirPath.equal dp) libs
 
+(* Whether a library is under a root the challenge stands in for: its name is
+   the root's followed by at least one more component, which is when
+   [path_below_root] gives it a path. *)
+let under_challenge_root t dp = Option.has_some (t.path_below_root dp)
+
 (* What a library is to the run, by its name alone: a pre-checked one, whose
    bytes the config pins, wherever it lies; otherwise the answer's own when it
    lies under a root the challenge stands in for, and a shared one when it
@@ -1689,33 +1694,32 @@ type origin = Prechecked | Own | Shared
 
 let origin t dp =
   if List.exists (DirPath.equal dp) t.prechecked then Prechecked
-  else if t.under_challenge_root dp then Own
+  else if under_challenge_root t dp then Own
   else Shared
 
 (* The image's own library: a shared one -- outside every root the challenge
    stands in for, not pre-checked -- whose file, as the answer's loader
-   recorded it, passed [check_provenance] ([outside]): it lies in no place
-   an answer's file is found in ([answer_place]: the working directory, a
-   bound directory) and was found in a directory the run trusts for the
-   image's own libraries ([trusted_dirs]). What this establishes is where
-   the loaded file is, from the path the loader recorded; that no answer
-   wrote such a file rests on the launch keeping the trusted directories out
-   of the answer's reach (check_compare.mli). [check_provenance] refuses a
-   run whose answer loaded a shared library from anywhere else, so in a run
-   that goes on, every shared library the answer loaded is the image's
-   own. *)
-let image_own t dp = match origin t dp with
-  | Shared -> List.exists (DirPath.equal dp) t.outside
-  | Prechecked | Own -> false
+   recorded it, passed [check_provenance] ([outside], which holds shared
+   libraries only, so this asks nothing of [origin]): it lies in no place an
+   answer's file is found in ([answer_place]: the working directory, a bound
+   directory) and was found in a directory the run trusts for the image's
+   own libraries ([trusted_dirs]). What this establishes is where the loaded
+   file is, from the path the loader recorded; that no answer wrote such a
+   file rests on the launch keeping the trusted directories out of the
+   answer's reach (check_compare.mli). [check_provenance] refuses a run whose
+   answer loaded a shared library from anywhere else, so in a run that goes
+   on, every shared library the answer loaded is the image's own. *)
+let image_own t dp = List.exists (DirPath.equal dp) t.outside
 
 (* A library that is one file for both sides: a pre-checked one, whose bytes
-   the config pins, or the image's own ([image_own]). The challenge load must
-   read a shared library from the answer's file, and a pre-checked one from
-   the answer's file or from a file of the pinned sha256
-   ([check_same_files]). *)
+   the config pins, or a shared one that is the image's own ([image_own]).
+   The challenge load must read a shared library from the answer's file, and
+   a pre-checked one from the answer's file or from a file of the pinned
+   sha256 ([check_same_files]). *)
 let one_file t dp = match origin t dp with
   | Prechecked -> true
-  | Own | Shared -> image_own t dp
+  | Shared -> image_own t dp
+  | Own -> false
 
 let rooted_one_file t mp = match mp_root mp with
   | None -> false
@@ -1737,7 +1741,8 @@ let check_provenance t ~side libs =
       match origin t dp with
       | Prechecked | Own -> None
       | Shared ->
-        match answer_place t file with
+        let found_in = realpath (Filename.dirname file) in
+        match answer_place t ~found_in file with
         | Some place ->
           CErrors.user_err
             Pp.(str ("The " ^ side ^ " loaded the library " ^ DirPath.to_string dp ^
@@ -1746,7 +1751,7 @@ let check_provenance t ~side libs =
                       does not pre-check it, so it would count as the image's own. A \
                       -compare run refuses it."))
         | None ->
-          let trusted = match realpath (Filename.dirname file) with
+          let trusted = match found_in with
             | None -> false
             | Some found_in -> List.exists (fun dir -> path_under ~dir found_in) t.trusted_dirs
           in
@@ -1789,12 +1794,9 @@ let pinned t dp = match origin t dp with
         List.exists (fun (real, pin) -> String.equal real path && String.equal pin (sha ()))
           t.pins
 
-(* The dependency digests each library records, as a map by library. *)
-let deps_map deps =
-  List.fold_left (fun m (dp, a) -> DirPath.Map.add dp a m) DirPath.Map.empty deps
-
-(* [roots] and every library they rest on, by the dependencies [deps] (a
-   [deps_map]) records for each library of the closure, transitively. *)
+(* [roots] and every library they rest on, transitively. [deps] maps each
+   library to the dependency digests it records, and so gives the
+   dependencies of each library of the closure. *)
 let closure deps roots =
   let rec walk acc = function
     | [] -> acc
@@ -1815,27 +1817,34 @@ let closure deps roots =
    digest a pre-checked library records for a dependency is the one the
    dependency's own file states, which pins nothing, and the pre-checked
    library was never checked against the run's file of it, so a kernel check
-   of that file in this run is not enough either. The refusal names the
-   first pre-checked library, in the config's order, whose closure holds the
-   library refused. *)
+   of that file in this run is not enough either. Each library is checked
+   once, with the first closure that holds it ([seen]): whether it passes
+   does not depend on the pre-checked library that reaches it. The refusal
+   names the first pre-checked library, in the config's order, whose closure
+   holds the library refused. *)
 let check_prechecked_deps t ~closures =
-  List.iter (fun (p, deps) ->
-      DirPath.Set.iter (fun dep ->
-          match origin t dep with
-          | Prechecked -> ()
-          | Own | Shared ->
-            if not (pinned t dep || image_own t dep) then
-              CErrors.user_err
-                Pp.(str ("The pre-checked library " ^ DirPath.to_string p ^
-                         " depends on the library " ^ DirPath.to_string dep ^
-                         ", which is neither pre-checked by the config, nor pinned by its \
-                          sha256 as a challenge file, nor the image's own. The digest the \
-                          pre-checked library records for it pins nothing: a library's \
-                          digest is the one its own file states. A kernel check of it is \
-                          not enough either, since the pre-checked library was not checked \
-                          against it. A -compare run refuses it.")))
-        deps)
-    closures
+  let check p dep =
+    let accepted = match origin t dep with
+      | Prechecked -> true
+      | Own -> pinned t dep
+      | Shared -> image_own t dep
+    in
+    if not accepted then
+      CErrors.user_err
+        Pp.(str ("The pre-checked library " ^ DirPath.to_string p ^
+                 " depends on the library " ^ DirPath.to_string dep ^
+                 ", which is neither pre-checked by the config, nor pinned by its \
+                  sha256 as a challenge file, nor the image's own. The digest the \
+                  pre-checked library records for it pins nothing: a library's \
+                  digest is the one its own file states. A kernel check of it is \
+                  not enough either, since the pre-checked library was not checked \
+                  against it. A -compare run refuses it."))
+  in
+  ignore
+    (List.fold_left (fun seen (p, deps) ->
+         DirPath.Set.iter (check p) (DirPath.Set.diff deps seen);
+         DirPath.Set.union seen deps)
+        DirPath.Set.empty closures)
 
 (* A library under a root the challenge stands in for that the run loaded
    without a kernel check ([CheckLibrary.unchecked]: a library given with
@@ -1877,13 +1886,15 @@ let check_dep_digests t ~challenge ~answer =
       | Some (_, an_deps) ->
         Array.iter (fun (dep, ch_digest) ->
             if one_file t dep then
-              let prechecked = List.exists (DirPath.equal dep) t.prechecked in
               match digest_of an_deps dep with
               | Some an_digest when not (same ch_digest an_digest) ->
+                let kind = match origin t dep with
+                  | Prechecked -> "pre-checked"
+                  | Own | Shared -> "shared"
+                in
                 CErrors.user_err
                   Pp.(str ("The library " ^ DirPath.to_string lib ^
-                           " depends on the " ^
-                           (if prechecked then "pre-checked" else "shared") ^
+                           " depends on the " ^ kind ^
                            " library " ^ DirPath.to_string dep ^
                            " with a different digest on the challenge side and on the \
                             answer side."))
@@ -2049,7 +2060,7 @@ type failure = { f_name : string; f_reason : string }
    challenge proof's constraint on such a level would otherwise never be
    asked of the answer. *)
 let seed_umap t ~challenge_env ~answer_env =
-  let seeded dp = one_file t dp || DirPath.Set.mem dp t.prechecked_closure in
+  let seeded dp = DirPath.Set.mem dp t.prechecked_closure || one_file t dp in
   let gch = Environ.universes challenge_env and gan = Environ.universes answer_env in
   let an = UGraph.domain gan in
   Univ.Level.Set.fold (fun u m ->
@@ -2122,7 +2133,7 @@ let check_constraints t ~challenge_env ~answer_env m =
   let gch = Environ.universes challenge_env and gan = Environ.universes answer_env in
   let own u = match Univ.Level.name u with
     | None -> false
-    | Some ug -> let dp, _, _ = Univ.UGlobal.repr ug in t.under_challenge_root dp
+    | Some ug -> let dp, _, _ = Univ.UGlobal.repr ug in under_challenge_root t dp
   in
   let kept_ch = Univ.Level.Map.domain m.fwd and kept_an = Univ.Level.Map.domain m.bwd in
   (* [constraints_for ~kept] emits only constraints between kept levels, and
@@ -2528,17 +2539,13 @@ let why_not_task ~challenge_env ~answer_env obj =
 
 let run t env access senv0 ~answer_deps ~admitted =
   let loaded = CheckLibrary.interned_files () in
-  let t =
-    { t with answer_files =
-               List.fold_left (fun m (dp, file) -> DirPath.Map.add dp file m)
-                 DirPath.Map.empty loaded }
-  in
+  let t = { t with answer_files = DirPath.Map.of_list loaded } in
   check_prechecked_read t;
   check_open_roots t ~answer_deps;
   let t = { t with outside = check_provenance t ~side:"answer" loaded } in
   (* The answer's pre-checked closure, computed once: the closure of each
      pre-checked library, in the config's order, and their union. *)
-  let answer_graph = deps_map answer_deps in
+  let answer_graph = DirPath.Map.of_list answer_deps in
   let closures = List.map (fun p -> p, closure answer_graph [p]) t.prechecked in
   let t =
     { t with prechecked_closure =
@@ -2557,7 +2564,7 @@ let run t env access senv0 ~answer_deps ~admitted =
     DirPath.Set.filter (fun dp -> match origin t dp with
         | Prechecked | Shared -> true
         | Own -> false)
-      (closure (deps_map all_deps) t.prechecked)
+      (closure (DirPath.Map.of_list all_deps) t.prechecked)
   in
   let libs =
     CList.map_filter (fun (dp, _) -> if DirPath.Set.mem dp skip then None else Some dp)

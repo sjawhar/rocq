@@ -788,9 +788,10 @@ let run_compare env =
        name is a root's own is not under that root, since that root's
        directory cannot hold it (with -Q d1 A -Q d2 A.B, the library A.B is
        under A and not under A.B). [substitutes] applies that one rule to
-       the checked names, and [under_challenge_root] and [path_below_root]
-       to every library, so the two agree on each, and [open_roots] are the
-       bound roots not in the list.
+       the checked names, and [path_below_root] to every library, which the
+       comparator counts as under such a root when it gives it a path, so
+       the two agree on each, and [open_roots] are the bound roots not in
+       the list.
 
        A library under one of those roots, unless pre-checked, is the
        answer's own: the challenge directory holds its counterpart, at the
@@ -817,10 +818,6 @@ let run_compare env =
         !user_includes
     in
     let prefixes = List.map (fun root -> DirPath.to_string root ^ ".") challenge_roots in
-    let under_challenge_root lib =
-      let l = DirPath.to_string lib in
-      List.exists (fun p -> CString.is_prefix p l) prefixes
-    in
     (* The path of a library's .vo file below the directory of the root the
        challenge stands in for that holds it, one directory per name
        component ("X/Y.vo" for <root>.X.Y): the challenge directory holds the
@@ -876,7 +873,7 @@ let run_compare env =
       !user_includes;
     try
       let t =
-        Check_compare.prepare cfg ~dir ~out ~under_challenge_root ~path_below_root ~open_roots
+        Check_compare.prepare cfg ~dir ~out ~path_below_root ~open_roots
           ~bound_dirs:(List.map fst !user_includes) ~trusted:!compare_trusted
           ~add_challenge_load_path:(fun () ->
               List.iter (fun rocq_root -> add_rec_path ~unix_path:dir ~rocq_root)
@@ -887,8 +884,7 @@ let run_compare env =
       let admitted =
         List.rev
           (List.fold_left (fun acc lib ->
-               let dp = CheckLibrary.library_name lib in
-               if List.exists (DirPath.equal dp) acc then acc else dp :: acc)
+               CList.add_set DirPath.equal (CheckLibrary.library_name lib) acc)
               [] (List.rev !admit_list))
       in
       Check_compare.run t env CheckLibrary.indirect_accessor (make_senv ()) ~answer_deps
