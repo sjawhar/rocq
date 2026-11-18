@@ -100,8 +100,10 @@ let add_rec_path ~unix_path ~rocq_root =
 (* By the option -R/-Q of the command line *)
 let includes = ref []
 (* The same list, kept past [init_with_argv]: the challenge load of
-   [-compare] puts the challenge directory on the load path in place of each
-   of these physical directories, under the same logical root. *)
+   [-compare] binds the challenge directory, on the load path, in front of
+   each of these physical directories whose root the challenge stands in
+   for, under the same logical root; the answer's directories stay behind
+   it. *)
 let user_includes = ref []
 let push_include (s, alias) = includes := (s,alias) :: !includes
 
@@ -339,7 +341,13 @@ let print_usage_channel co command =
 \n  -boot                       don't initialize the library paths automatically\
 \n\
 \n  -admit module               load module and dependencies without checking\
+\n                              (with -compare, the verdict lists the -admit modules)\
 \n  -norec module               check module but admit dependencies without checking\
+\n                              (with -compare, a module under a root the challenge\
+\n                              stands in for that loads without checking, as a\
+\n                              dependency of an -admit or -norec module, must be\
+\n                              pre-checked by the config, pinned by its sha256 as a\
+\n                              challenge file, or given with -admit itself)\
 \n\
 \n  -d (d1,..,dn)               enable specified debug messages\
 \n  -debug                      enable all debug messages\
@@ -770,9 +778,11 @@ let run_compare env =
       let r = DirPath.to_string root in
       List.exists (fun n -> String.equal n r || CString.is_prefix (r ^ ".") n) checked_names
     in
-    (* A library under one of those roots is the answer's own: the challenge
-       directory holds its counterpart. Every other library the answer
-       loaded is a shared one -- the image's installed libraries -- and the
+    (* A library under one of those roots, unless pre-checked, is the
+       answer's own: the challenge directory holds its counterpart. Every
+       other library the answer loaded, unless pre-checked, is a shared one
+       -- one of the image's own, which a -compare run takes only from the
+       directories it trusts for them ([compare_trusted]) -- and the
        challenge environment loads the same ones, so that a constraint one
        of them carries is not read as a constraint the answer invented.
 
@@ -813,7 +823,7 @@ let run_compare env =
     in
     (* The bound roots the challenge does NOT stand in for. The answer's
        build can write under one of them, so the comparator refuses a run
-       that loaded a library from one unless the config pins it. *)
+       that loaded a library from one unless the config pre-checks it. *)
     let open_roots =
       CList.map_filter (fun (unix_path, rocq_root) ->
           if substitutes rocq_root then None else Some (rocq_root, unix_path))

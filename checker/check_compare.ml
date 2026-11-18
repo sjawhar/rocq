@@ -14,17 +14,19 @@
     the answer is the tree the agent handed back, compiled at the same paths
     and under the same library names. [rocqchk] checks the answer with the
     kernel as it does today; this module loads the challenge into a second
-    environment without a check, compares every challenge declaration with the
-    answer declaration of the same kernel name, computes each named theorem's
-    axiom closure, and writes a JSON verdict.
+    environment without a check, compares every declaration of the challenge
+    files' closure, but those of the pre-checked libraries and of the shared
+    libraries they rest on, with the answer declaration of the same kernel
+    name, computes each named theorem's axiom closure, and writes a JSON
+    verdict.
 
     The comparison is structural: two declarations are equal when their terms
     are the same after a one-to-one renaming of universe levels and, inside
     the signature of a functor, of its parameters. There is no conversion and
     no reduction, and no constant is unfolded. Whether the answer may fill a
-    constant that the challenge leaves without a body is read from the sort
-    of the type the challenge states for it ([stated_sort]), not from that
-    type reduced. *)
+    constant that the challenge leaves without a body depends on the sort of
+    the type the challenge states for it ([stated_sort]), not on that type
+    reduced ([eq_const_body]). *)
 
 open Util
 open Names
@@ -665,15 +667,20 @@ let read_config file =
 (** {6 The universe level map}
 
     One map for the whole run, a bijection between the challenge's
-    monomorphic levels and the answer's. It is seeded with the identity on
-    every level of a SHARED library -- one outside the roots the challenge
-    stands in for, which is one file for both sides -- and on every
-    pre-checked library's, so that a constraint between a level of the
+    monomorphic levels and the answer's. It is seeded ([seed_umap]) with the
+    identity on every level that both graphs hold of a library that is one
+    file for both sides ([one_file]) -- a pre-checked library, or a SHARED
+    one, outside the roots the challenge stands in for and not pre-checked,
+    whose file passed [check_provenance] -- and of every library of the
+    answer's pre-checked closure ([prechecked_closure]: the pre-checked
+    libraries and every library they rest on, each of which [run] has
+    refused unless it is pre-checked, pinned by its sha256 as a challenge
+    file or the image's own). So a constraint between a level of the
     challenge's own and one of those is a constraint between two mapped
-    levels, which the constraint check below sees. Without the seed a level
-    no compared term names is not in the map at all, and a constraint
-    reaching it is passed over: an opaque body is never compared, so a
-    challenge proof's own constraint on such a level would be lost. The
+    levels, which the constraint check ([check_constraints]) sees. Without
+    the seed a level no compared term names is not in the map at all, and a
+    constraint reaching it is passed over: an opaque body is never compared,
+    so a challenge proof's own constraint on such a level would be lost. The
     rest of the map is built while the declarations are compared.
 
     A level of a polymorphic context is a [Level.var], bound by position, so
@@ -1404,18 +1411,18 @@ type t = {
   add_challenge_load_path : unit -> unit;
   under_challenge_root : DirPath.t -> bool;
       (** Is this library name under a root the challenge directory stands in
-          for? Those are the answer's own libraries. Every other library the
-          answer loaded, unless pre-checked, is a shared one, and
-          [check_provenance] refuses a run unless the file the loader
-          recorded for it lies in no place an answer's file is found in
-          ([answer_place]) and was found in a trusted directory
-          ([trusted_dirs]). *)
+          for? Those, unless pre-checked, are the answer's own libraries
+          ([origin]). Every other library the answer loaded, unless
+          pre-checked, is a shared one, and [check_provenance] refuses a run
+          unless the file the loader recorded for it lies in no place an
+          answer's file is found in ([answer_place]) and was found in a
+          trusted directory ([trusted_dirs]). *)
   open_roots : (DirPath.t * string) list;
       (** The roots the command line binds that the challenge does NOT stand
           in for, with the directory each is bound to. A library under one of
           them is the answer's side of the run and the challenge has no
           counterpart for it, so [check_open_roots] refuses the run unless
-          the config pins it. *)
+          the config pre-checks it. *)
   cwd : string option;
       (** The real path of the working directory. The load path binds it
           implicitly and NOT recursively, so a library is found there only
@@ -1427,7 +1434,7 @@ type t = {
       (** The real paths of the directories the run trusts for the image's
           own libraries, each with its subdirectories: the corelib
           directory, user-contrib and the directories of ROCQPATH and
-          COQPATH, those of them whose real path exists. *)
+          COQPATH (none under -boot), those of them whose real path exists. *)
   outside : DirPath.t list;
       (** The shared libraries the answer loaded whose recorded file passed
           [check_provenance]; filled by [run]. *)
@@ -1506,10 +1513,10 @@ let dirpath_of_string s =
   | [] -> cfg_error ("the library name " ^ s ^ " is empty")
   | l -> DirPath.make (List.rev_map Id.of_string l)
 
-(* Before anything is loaded: the files the config pins must be there and have
-   the sha256 it gives. [trusted] are the directories the run trusts for the
-   image's own libraries; only those whose real path exists are kept, as
-   real paths. *)
+(* Before the challenge is loaded: the challenge files the config pins must be
+   there and have the sha256 it gives. [trusted] are the directories the run
+   trusts for the image's own libraries; only those whose real path exists
+   are kept, as real paths. *)
 let prepare cfg ~dir ~out ~add_challenge_load_path ~under_challenge_root ~path_below_root
     ~open_roots ~bound_dirs ~trusted =
   let files =
@@ -1557,10 +1564,11 @@ let check_pin p file =
 
 (* Before any library is read: each pre-checked library, resolved on the
    answer's load path, the one in place when this runs, must have the sha256
-   the config pins. A pre-checked library loads without a check, so its file
-   is never unmarshalled before its pin is checked. The loader reads the
-   file the name resolves to, unless the command line names another file of
-   that library: [check_prechecked_read] hashes that file too. *)
+   the config pins. A pre-checked library loads without a check, so the file
+   its name resolves to is not unmarshalled before its pin is checked. The
+   loader reads that file, unless the command line names another file of
+   that library: the loader reads that one instead, before any pin is
+   checked on it, and [check_prechecked_read] hashes it after the read. *)
 let check_prechecked_files cfg =
   List.iter (fun p ->
       check_pin p (CheckLibrary.library_file (dirpath_of_string p.pc_library)))
@@ -1626,7 +1634,11 @@ let in_libs libs mp = match mp_root mp with
 (* What a library is to the run, by its name alone: a pre-checked one, whose
    bytes the config pins, wherever it lies; otherwise the answer's own when it
    lies under a root the challenge stands in for, and a shared one when it
-   does not. Every rule that tells libraries apart reads this. *)
+   does not. The checks that tell these three apart read this. Two tests are
+   of other classes: [check_open_roots] asks only whether a library under an
+   open root is pre-checked, and [check_constraints] tells a level of a
+   library under a root the challenge stands in for, pre-checked or not,
+   from every other level. *)
 type origin = Prechecked | Own | Shared
 
 let origin t dp =
@@ -1773,13 +1785,14 @@ let check_prechecked_deps t ~closures =
         deps)
     closures
 
-(* An answer library the run loaded without a kernel check
-   ([CheckLibrary.unchecked]: a dependency of a library given with -norec or
-   -admit) is neither checked nor, unless the challenge files Require it,
-   compared. One of the answer's own is refused unless the config pre-checks
-   it, the config pins its sha256 as a challenge file, or -admit names it
-   itself ([admitted]): a library an [admitted] one depends on is not
-   exempt. *)
+(* A library under a root the challenge stands in for that the run loaded
+   without a kernel check ([CheckLibrary.unchecked]: a library given with
+   -admit, or a dependency of one given with -norec or -admit) is refused
+   unless the config pre-checks it, the config pins its sha256 as a challenge
+   file, or -admit names it itself ([admitted]): a library an [admitted] one
+   depends on is not exempt. Such a library is not checked, and unless the
+   challenge files Require it, it is not compared either. A shared library is
+   not refused here. *)
 let check_unchecked t ~admitted =
   List.iter (fun dp ->
       match origin t dp with
@@ -1795,12 +1808,12 @@ let check_unchecked t ~admitted =
     (CheckLibrary.unchecked ())
 
 (* The dependency digests a challenge library and its answer library record
-   for a library both sides load must be equal: otherwise the two sides were
-   built against different copies of it, and their kernel names would name
-   different objects. That is every pre-checked library, and every shared
-   library -- one outside the roots the challenge stands in for, which both
-   sides read from the image by the same name. Checked before the challenge
-   is imported. *)
+   for a library that is one file for both sides ([one_file]) must be equal:
+   otherwise the two sides were built against different copies of it, and
+   their kernel names would name different objects. That is every pre-checked
+   library, and every shared library the answer loaded -- outside the roots
+   the challenge stands in for and not pre-checked -- whose file passed
+   [check_provenance]. Checked before the challenge is imported. *)
 let check_dep_digests t ~challenge ~answer =
   let digest_of deps dp =
     Array.fold_left (fun acc (d, dg) -> if DirPath.equal d dp then Some dg else acc) None deps
@@ -2395,14 +2408,16 @@ let answer_rewrite_rule env libs =
    task's declaration when either
    - its module path, followed through every [MPdot] to its [MPfile], is
      rooted at a library that is one file for both sides ([one_file]): a
-     pre-checked library, whose bytes the config pins by digest, or a shared
-     one, outside the challenge's roots and read from a file in no place an
-     answer's file is found in (a run that read one from such a place is
-     refused). No answer file the run reads can add a constant under such an
-     [MPfile]. The constant may
-     be a field of a sealed module that the library does not export: the
-     closure walk reaches it through the implementation, where no
-     environment lookup sees it, and it is still the library's own; or
+     pre-checked library, whose bytes the config pins by their sha256, or a
+     shared one, outside the challenge's roots and not pre-checked, read
+     from a file that lies in no place an answer's file is found in and that
+     was found in a directory the run trusts for the image's own libraries
+     ([check_provenance] refuses a run that read one from anywhere else). No
+     answer file the run reads can add a constant under such an [MPfile].
+     The constant may be a field of a sealed module that the library does
+     not export: the closure walk reaches it through the implementation,
+     where no environment lookup sees it, and it is still the library's own;
+     or
    - both the challenge environment and the answer environment declare the
      same kernel name (the challenge's own files, which the declaration
      comparison holds the answer to, and the libraries both sides read from

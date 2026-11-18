@@ -994,10 +994,19 @@ type tables = {
   tb_load_paths : CUnix.physical_path list * logical_path list;
 }
 
-(* Empty library tables, with the load path as it is: the challenge load adds
-   its own directories in front of the answer's, so that a library name the
-   two sides share resolves to the challenge's copy, while a pre-checked
-   library, which is one file for both sides, still resolves. *)
+(* Empty library tables, with the load path as it is: the answer's. The
+   challenge load ([Check_compare.load_challenge]) then binds the challenge
+   directory in front of the answer's directories under each root the
+   challenge stands in for, and leaves those behind it, so that a library
+   name the two sides share resolves to the challenge's file where the
+   challenge directory holds one, and to the file the answer's load path
+   gives otherwise. Which file the challenge side may read is not decided
+   here: [Check_compare] checks the files the intern read before any of them
+   is imported. A library under a root the challenge stands in for, unless
+   pre-checked, must come from the challenge directory; a pre-checked one
+   from the answer's file or from a file of its pinned sha256; a shared one
+   from a directory the run trusts for the image's libraries, and from the
+   answer's file when the answer loaded it too. *)
 let fresh_tables () = {
   tb_libraries = LibraryMap.empty;
   tb_opaque_sources = LibraryMap.empty;
@@ -1029,16 +1038,16 @@ type challenge_library = library_t
 (* The libraries the challenge files name, then the given shared libraries,
    each with its dependencies, in dependency order, with the dependency
    digests each of them records. Nothing is imported yet: the caller checks
-   those digests against the answer's before any of it reaches an
-   environment.
+   those digests against the answer's, and the files the loader read, before
+   any of it reaches an environment.
 
-   A shared library is one the answer loaded from outside the roots the
-   challenge stands in for -- the image's installed libraries. The challenge
-   files' own closure reaches only the ones their Require lines name, and the
-   answer may load more; a universe constraint one of those carries between
-   two levels the challenge does know would otherwise look like a constraint
-   the answer invented (dispatch://BET-901). They are interned into the same
-   tables, so a library both lists reach is read once.
+   A shared library is one the answer loaded that is neither pre-checked nor
+   under a root the challenge stands in for: one of the image's own. The
+   challenge files' own closure reaches only the ones their Require lines
+   name, and the answer may load more; a universe constraint one of those
+   carries between two levels the challenge does know would otherwise look
+   like a constraint the answer invented (dispatch://BET-901). They are
+   interned into the same tables, so a library both lists reach is read once.
 
    The two results are the files' closure, which is what the comparison
    walks, and every library to import, the files' closure first. *)
@@ -1052,9 +1061,14 @@ let intern_challenge files shared =
 let challenge_deps needed =
   List.map (fun (dir, m) -> dir, m.library_deps) needed
 
-(* Import the interned libraries without a check: setup checked the challenge
-   files, and a dependency of theirs is either another challenge file or a
-   pre-checked library. *)
+(* Import the interned libraries without a check. Setup checked the challenge
+   files, and which file each library may come from is decided before this,
+   by the checks [Check_compare.load_challenge] runs on the files
+   [intern_challenge] read: a library under a root the challenge stands in
+   for, unless pre-checked, from the challenge directory; a pre-checked one
+   from the answer's file or from a file of its pinned sha256; a shared one,
+   the image's own, from a directory the run trusts for the image's
+   libraries, and from the answer's file when the answer loaded it too. *)
 let import_challenge senv needed =
   List.fold_left
     (fun senv (_, m) ->
