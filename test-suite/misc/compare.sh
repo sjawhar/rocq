@@ -209,7 +209,10 @@ seed_stale_verdict() {
 # The comparator carries its own SHA-256, because the checker links no
 # digest library. It is trusted code, so it is checked against FIPS 180-4's
 # vectors and against sha256sum here, and compare.sh compares it with
-# sha256sum on every challenge file it builds (see run_case).
+# sha256sum on every challenge file it builds (see run_case). A FIFO and a
+# link to /dev/zero are each refused as a file that is not a regular one,
+# within the bound: a FIFO's open blocks without a writer, and /dev/zero
+# reads without end.
 case_sha256() {
   local d
   d=$(mktemp -d)
@@ -236,6 +239,23 @@ case_sha256() {
   check_vector v_448 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
   check_vector v_896 cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1
   check_vector v_million cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0
+  # <file> is refused as <kind>, naming the file, and the run neither timed
+  # out nor died (completed).
+  check_not_regular() { # <file> <kind>
+    local code
+    set +e
+    bounded rocqchk -sha256 "$1" > "$d/log" 2>&1
+    code=$?
+    set -e
+    completed "$code" "$d/log"
+    [ "$code" != 0 ] || { cat "$d/log"; fail "sha256 of $1: hashed, where it must be refused"; }
+    grep -Fq "The file $1 cannot be read: Is $2, not a regular file." "$d/log" \
+      || { cat "$d/log"; fail "sha256 of $1: not refused as $2"; }
+  }
+  mkfifo "$d/fifo"
+  check_not_regular "$d/fifo" "a named pipe"
+  ln -s /dev/zero "$d/zero"
+  check_not_regular "$d/zero" "a character device"
   # a file of 1 MiB of random bytes, against sha256sum
   if have sha256sum; then
     head -c 1048576 /dev/urandom > "$d/rand"

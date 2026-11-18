@@ -44,9 +44,9 @@ open Declarations
     digits. The one difference is a file that is not a regular file or
     cannot be read: clib's [file] opens it, and raises [Sys_error], blocks
     or reads without end, and [hex_of_file] raises a user error: one of its
-    own, before any read, for a file that opens and is not a regular file,
-    and the system's message for a file that does not open or fails once
-    open. *)
+    own for a path that is not a regular file, before it is opened and again
+    on the open descriptor, before any read, and the system's message for a
+    file whose stat, open or read fails. *)
 
 module Sha256 : sig
   val hex_of_string : string -> string
@@ -168,37 +168,49 @@ end = struct
     feed st (Bytes.of_string s) 0 (String.length s);
     finish st
 
-  (* The file is opened without blocking, so that a FIFO opens at once, and
-     its kind is read from the open descriptor, so that only a regular file
-     is read: a link to /dev/zero is refused, not read without end. A file
-     that opens and is not a regular file is refused, before any read, with
-     a text of this function's own. Every other refusal is the system's
-     message, [Unix.error_message]'s. None names the file: each caller names
-     it. *)
+  (* The path is refused, before it is opened, unless [Unix.stat], which
+     follows links, sees a regular file: a FIFO's open would block, and a
+     link to /dev/zero would be read without end. The file is then opened
+     without blocking and without taking a terminal as the controlling
+     one, and the kind of the open descriptor, which every read goes
+     through, is checked again, so that a path that names another kind of
+     file by the time it is opened is refused too, before any read. Either
+     check refuses a file that is not a regular one with a text of this
+     function's own ([require_regular]). Every other refusal is the
+     system's message, [Unix.error_message]'s; a read that a signal
+     interrupts is made again. None names the file: each caller names it. *)
   let hex_of_file f =
     let refuse e = CErrors.user_err (Pp.str e) in
-    let not_regular kind = refuse ("Is " ^ kind ^ ", not a regular file") in
+    let require_regular kind =
+      let not_regular what = refuse ("Is " ^ what ^ ", not a regular file") in
+      match kind with
+      | Unix.S_REG -> ()
+      | Unix.S_DIR -> not_regular "a directory"
+      | Unix.S_CHR -> not_regular "a character device"
+      | Unix.S_BLK -> not_regular "a block device"
+      | Unix.S_LNK -> not_regular "a symbolic link"
+      | Unix.S_FIFO -> not_regular "a named pipe"
+      | Unix.S_SOCK -> not_regular "a socket"
+    in
     try
-      let fd = Unix.openfile f [Unix.O_RDONLY; Unix.O_NONBLOCK; Unix.O_CLOEXEC] 0 in
+      require_regular (Unix.stat f).Unix.st_kind;
+      let fd =
+        Unix.openfile f [Unix.O_RDONLY; Unix.O_NONBLOCK; Unix.O_CLOEXEC; Unix.O_NOCTTY] 0
+      in
       Fun.protect ~finally:(fun () -> try Unix.close fd with Unix.Unix_error _ -> ())
         (fun () ->
-          match (Unix.fstat fd).Unix.st_kind with
-          | Unix.S_DIR -> not_regular "a directory"
-          | Unix.S_CHR -> not_regular "a character device"
-          | Unix.S_BLK -> not_regular "a block device"
-          | Unix.S_LNK -> not_regular "a symbolic link"
-          | Unix.S_FIFO -> not_regular "a named pipe"
-          | Unix.S_SOCK -> not_regular "a socket"
-          | Unix.S_REG ->
-            Unix.clear_nonblock fd;
-            let st = create () in
-            let b = Bytes.create 65536 in
-            let rec loop () =
-              let n = Unix.read fd b 0 65536 in
-              if n > 0 then (feed st b 0 n; loop ())
-            in
-            loop ();
-            finish st)
+          require_regular (Unix.fstat fd).Unix.st_kind;
+          Unix.clear_nonblock fd;
+          let st = create () in
+          let b = Bytes.create 65536 in
+          let rec loop () =
+            match Unix.read fd b 0 65536 with
+            | exception Unix.Unix_error (Unix.EINTR, _, _) -> loop ()
+            | 0 -> ()
+            | n -> feed st b 0 n; loop ()
+          in
+          loop ();
+          finish st)
     with Unix.Unix_error (e, _, _) -> refuse (Unix.error_message e)
 end
 

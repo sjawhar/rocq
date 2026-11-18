@@ -287,7 +287,7 @@ val sha256_of_file : string -> string
 (** The hex SHA-256 of a file. [rocqchk -sha256 FILE] prints it, which is how
     the test suite checks this implementation against the standard vectors
     and against [sha256sum].
-    @raise CErrors.UserError, naming the file, when it does not open (it is
-    opened without blocking, so a FIFO opens at once), when its open
-    descriptor is not a regular file's, before any read, or when a read
-    fails. *)
+    @raise CErrors.UserError, naming the file, when it is not a regular
+    file, by [Unix.stat], which follows links, before it is opened, and
+    again by its open descriptor, before any read; or when its stat, its
+    open or a read fails. *)
