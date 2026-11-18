@@ -937,14 +937,14 @@ pin_entry() { # <key> <name> <file>
 # <files>, the pre-checked libraries <pre> after the Prelude, which every
 # such config pre-checks, and the permitted axioms <axioms>; each list is
 # the members of a JSON array. eq's indices-not-mattering is tolerated, as
-# in the cases above. The first call hashes the Prelude into
-# named_prelude_sha, which every later call of the script run reuses.
+# in the cases above.
 named_config() { # <out> <theorem> <files> [<pre>] [<axioms>]
-  [ -n "${named_prelude_sha:-}" ] || named_prelude_sha=$(bounded rocqchk -sha256 "$(prelude_vo)")
+  local prelude_sha
+  prelude_sha=$(bounded rocqchk -sha256 "$(prelude_vo)")
   printf '%s\n' \
     "{\"theorems\": [{\"name\": \"$2\"}], \"permitted_axioms\": [${5:-}]," \
     " \"tolerated_flags\": [{\"kind\": \"indices-not-mattering\", \"object\": \"Corelib.Init.Logic.eq\"}]," \
-    " \"prechecked\": [{\"library\": \"Corelib.Init.Prelude\", \"sha256\": \"$named_prelude_sha\"}${4:+, $4}]," \
+    " \"prechecked\": [{\"library\": \"Corelib.Init.Prelude\", \"sha256\": \"$prelude_sha\"}${4:+, $4}]," \
     " \"challenge_files\": [$3]}" > "$1"
 }
 
@@ -1581,7 +1581,7 @@ case_prechecked_read_file() {
 # unmarshal. Its sha256 is checked before any library is read: refused by
 # the pin's text, naming the file, and the loader never reads it (no
 # "Corrupted file", no anomaly). Then that P/Q.vo is a directory: refused
-# before the file is opened, naming it, as one that is not a regular file.
+# before it is read, naming it, as one that is not a regular file.
 # Then the honest answer passes.
 case_prechecked_garbage() {
   local w c=prechecked-garbage code got pin

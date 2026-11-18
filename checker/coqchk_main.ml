@@ -789,9 +789,8 @@ let run_compare env =
        directory cannot hold it (with -Q d1 A -Q d2 A.B, the library A.B is
        under A and not under A.B). [substitutes] applies that one rule to
        the checked names, and [path_below_root] to every library, which the
-       comparator counts as under such a root when it gives it a path, so
-       the two agree on each, and [open_roots] are the bound roots not in
-       the list.
+       comparator counts as under such a root exactly when it gives a path,
+       and [open_roots] are the bound roots not in the list.
 
        A library under one of those roots, unless pre-checked, is the
        answer's own: the challenge directory holds its counterpart, at the

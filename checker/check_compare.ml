@@ -43,9 +43,10 @@ open Declarations
     as [hex_of_string] and [hex_of_file], also as 64 lowercase hexadecimal
     digits. The one difference is a file that is not a regular file or
     cannot be read: clib's [file] opens it, and raises [Sys_error], blocks
-    or reads without end, and [hex_of_file] raises a user error, one of its
-    own, before opening it, for a file that is not a regular file, and the
-    system's message for a file that does not open or fails once open. *)
+    or reads without end, and [hex_of_file] raises a user error: one of its
+    own, before any read, for a file that opens and is not a regular file,
+    and the system's message for a file that does not open or fails once
+    open. *)
 
 module Sha256 : sig
   val hex_of_string : string -> string
@@ -167,44 +168,38 @@ end = struct
     feed st (Bytes.of_string s) 0 (String.length s);
     finish st
 
-  (* A file that is not a regular one, as [Unix.stat] sees it through links,
-     is refused before it is opened: a FIFO would block the open, and a link
-     to /dev/zero would never end. A regular file is opened with
-     [Unix.openfile] and read through a channel on its descriptor. Each
-     refusal is the system's message alone, [Unix.error_message]'s or the
-     text of a read's [Sys_error], neither of which names the file: each
-     caller names the file itself. *)
+  (* The file is opened without blocking, so that a FIFO opens at once, and
+     its kind is read from the open descriptor, so that only a regular file
+     is read: a link to /dev/zero is refused, not read without end. A file
+     that opens and is not a regular file is refused, before any read, with
+     a text of this function's own. Every other refusal is the system's
+     message, [Unix.error_message]'s. None names the file: each caller names
+     it. *)
   let hex_of_file f =
     let refuse e = CErrors.user_err (Pp.str e) in
     let not_regular kind = refuse ("Is " ^ kind ^ ", not a regular file") in
-    match (Unix.stat f).Unix.st_kind with
-    | exception Unix.Unix_error (e, _, _) -> refuse (Unix.error_message e)
-    | Unix.S_DIR -> not_regular "a directory"
-    | Unix.S_CHR -> not_regular "a character device"
-    | Unix.S_BLK -> not_regular "a block device"
-    | Unix.S_LNK -> not_regular "a symbolic link"
-    | Unix.S_FIFO -> not_regular "a named pipe"
-    | Unix.S_SOCK -> not_regular "a socket"
-    | Unix.S_REG ->
-      let ch =
-        match Unix.openfile f [Unix.O_RDONLY; Unix.O_CLOEXEC] 0 with
-        | exception Unix.Unix_error (e, _, _) -> refuse (Unix.error_message e)
-        | fd ->
-          try Unix.in_channel_of_descr fd
-          with Unix.Unix_error (e, _, _) -> Unix.close fd; refuse (Unix.error_message e)
-      in
-      try
-        Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
-            set_binary_mode_in ch true;
+    try
+      let fd = Unix.openfile f [Unix.O_RDONLY; Unix.O_NONBLOCK; Unix.O_CLOEXEC] 0 in
+      Fun.protect ~finally:(fun () -> try Unix.close fd with Unix.Unix_error _ -> ())
+        (fun () ->
+          match (Unix.fstat fd).Unix.st_kind with
+          | Unix.S_DIR -> not_regular "a directory"
+          | Unix.S_CHR -> not_regular "a character device"
+          | Unix.S_BLK -> not_regular "a block device"
+          | Unix.S_LNK -> not_regular "a symbolic link"
+          | Unix.S_FIFO -> not_regular "a named pipe"
+          | Unix.S_SOCK -> not_regular "a socket"
+          | Unix.S_REG ->
+            Unix.clear_nonblock fd;
             let st = create () in
             let b = Bytes.create 65536 in
             let rec loop () =
-              let n = input ch b 0 65536 in
+              let n = Unix.read fd b 0 65536 in
               if n > 0 then (feed st b 0 n; loop ())
             in
             loop ();
             finish st)
-      with Sys_error e -> refuse e
+    with Unix.Unix_error (e, _, _) -> refuse (Unix.error_message e)
 end
 
 (************************************************************************)
@@ -1468,15 +1463,8 @@ type t = {
           the challenge stands in for that holds it ([Some "X/Y.vo"] for
           [<root>.X.Y]); [None] for a library under no such root. The
           challenge directory holds the challenge's file of that library at
-          that path ([pinned]). A library is under such a root when its name
-          is the root's followed by at least one more component, which is
-          when this gives it a path ([under_challenge_root]). Those, unless
-          pre-checked, are the answer's own libraries ([origin]). Every other
-          library the answer loaded, unless pre-checked, is a shared one, and
-          [check_provenance] refuses a run unless the file the loader
-          recorded for it lies in no place an answer's file is found in
-          ([answer_place]) and was found in a trusted directory
-          ([trusted_dirs]). *)
+          that path ([pinned]), and [under_challenge_root] reads it as the
+          test of a library being under such a root. *)
   pins : (string * string) list;
       (** The real path of each challenge file, and the sha256 the config
           pins for it ([pinned]). *)
