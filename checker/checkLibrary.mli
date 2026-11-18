@@ -32,6 +32,19 @@ val recheck_library : ?output_context:bool -> safe_environment ->
   admit:object_file list ->
   check:object_file list -> safe_environment * Cset.t Cmap.t
 
+val unchecked : unit -> DirPath.t list
+(** The libraries the last [recheck_library] imported without a kernel check,
+    in the order it imported them: the [admit] libraries with their
+    dependencies, and the dependencies of the [norec] libraries that no
+    [check] library depends on. A library given with [norec] or [check] is
+    never one of them. *)
+
+val library_name : object_file -> DirPath.t
+(** The full logical name the load path gives a library named on the command
+    line, as [recheck_library] resolves it: a [.vo] file is named after the
+    logical path its directory is bound to.
+    @raise CErrors.UserError when the library is not found. *)
+
 val indirect_accessor : Opaqueproof.opaque -> Opaqueproof.opaque_proofterm
 (** The body of an opaque constant of a loaded library, from that library's
     table of opaque proofs. The table is read, and kept, the first time this

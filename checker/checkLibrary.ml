@@ -786,6 +786,12 @@ let opaque_sources_ready m =
   LibrarySet.for_all (fun dp ->
       LibraryMap.mem dp !opaque_sources || LibraryMap.mem dp !opaque_cache) libs
 
+(* The libraries the last [recheck_library_in_order] imports without a kernel
+   check, in the order it imports them: see [unchecked]. *)
+let unchecked_libraries = ref []
+
+let unchecked () = !unchecked_libraries
+
 let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
   let ml = List.map try_locate_qualified_library check in
   let nrl = List.map try_locate_qualified_library norec in
@@ -916,7 +922,11 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
       CheckWorkers.drop_held_output ();
       Exninfo.iraise e
   in
-  (* *)
+  (* Every library is read by now, so [nochk] is final, whether the walk
+     streamed, and has imported some of them already, or not: the libraries
+     of [needed] in it are those this run imports without a check. *)
+  unchecked_libraries :=
+    List.filter_map (fun (dir, _) -> if LibrarySet.mem dir nochk then Some dir else None) needed;
   Flags.if_verbose Feedback.msg_notice (fnl()++hv 2 (str "Ordered list:" ++ fnl() ++
     prlist
     (fun (dir,_) -> pr_dirpath dir ++ fnl()) needed));
@@ -1052,6 +1062,8 @@ let import_challenge senv needed =
     senv needed
 
 let library_file dir = snd (try_locate_absolute_library dir)
+
+let library_name lib = fst (try_locate_qualified_library lib)
 
 (* The dependency digests every library interned so far records. *)
 let interned_deps () = LibraryMap.bindings !depgraph

@@ -94,15 +94,18 @@ val read_config : string -> config
     [rewrite_rules] (default [false]) is whether the answer may declare a
     rewrite rule. Without it, every theorem fails when a library the answer
     loaded declares one, whatever symbol it rewrites: each library except a
-    pre-checked one, what a pre-checked one rests on, and a shared one. A
-    library only the answer has counts, and so does a rule inside a module
-    whose signature hides it. A rule the challenge declares counts too, since
-    the answer's copy of it declares it again: such a task needs the
-    option. A [Symbol] declaration with no rule is not a rule: it is an
-    assumption, and the closure reports it among the theorem's axioms like
-    an [Axiom], so a theorem whose proof reaches a symbol fails unless the
-    config permits that symbol by name, under the rule for permitted axioms
-    (a symbol the answer itself declares is never the task's).
+    pre-checked one and a shared one that is one file for both sides (outside
+    every root the challenge stands in for, and read from no place an
+    answer's file is found in). A library a pre-checked one rests on counts
+    unless it is one of those. A library only the answer has counts, and so
+    does a rule inside a module whose signature hides it. A rule the
+    challenge declares counts too, since the answer's copy of it declares it
+    again: such a task needs the option. A [Symbol] declaration with no rule
+    is not a rule: it is an assumption, and the closure reports it among the
+    theorem's axioms like an [Axiom], so a theorem whose proof reaches a
+    symbol fails unless the config permits that symbol by name, under the
+    rule for permitted axioms (a symbol the answer itself declares is never
+    the task's).
 
     [answer-universe-constraints] is a kind-only tolerance for the global
     universe comparison, and one that names an object is an error. It skips
@@ -124,9 +127,11 @@ val read_config : string -> config
     @raise CErrors.UserError on any of these errors. *)
 
 val prechecked_libraries : config -> string list
-(** The libraries the config declares pre-checked. They load through the
-    existing [-admit] path, so the option adds each of them to the admit
-    list; the config is the only place that names them.
+(** The libraries the config declares pre-checked, in its order. They load
+    through the existing [-admit] path: once [check_prechecked_files] has
+    checked their pins, [rocqchk] adds each of them to the admit list it
+    reads, after the libraries given with [-admit]; the config is the only
+    place that names them.
 
     A pre-checked library is never a shared one: the admit list puts it in
     the ANSWER's environment whether the answer's tree Requires it or not,
@@ -135,11 +140,21 @@ val prechecked_libraries : config -> string list
     challenge's universe graph and so decide what the challenge stands
     on. *)
 
+val check_prechecked_files : config -> unit
+(** Before any library is read: each pre-checked library, resolved on the
+    load path in place ([CheckLibrary.library_file]), must have the sha256
+    the config pins for it, so that no pre-checked file, which loads without
+    a check, is unmarshalled before its pin is checked. [run] hashes the file
+    the loader read in its place, when it is another file.
+    @raise CErrors.UserError when a file's sha256 differs from its pin, or
+    when the load path does not resolve a pre-checked library. *)
+
 type t
 
 val prepare :
   config -> dir:string -> out:string -> add_challenge_load_path:(unit -> unit) ->
   under_challenge_root:(Names.DirPath.t -> bool) ->
+  path_below_root:(Names.DirPath.t -> string option) ->
   open_roots:(Names.DirPath.t * string) list -> bound_dirs:string list -> t
 (** Resolve the challenge files under [dir] and check the sha256 of each.
     [add_challenge_load_path] puts [dir] on the load path in place of the
@@ -155,6 +170,10 @@ val prepare :
     is a statement about where the file is, not about who wrote it: a file
     elsewhere is the image's only as far as the launch keeps the answer from
     writing the image's load path (above).
+    [path_below_root] gives the path of a library's [.vo] file below the
+    directory of the root the challenge stands in for that holds it
+    ([Some "X/Y.vo"] for [<root>.X.Y]), and [None] for a library under no
+    such root: [dir] holds the challenge's file of that library at that path.
     [open_roots] are the bound roots the challenge does NOT stand in for,
     with the directory each is bound to; the run is refused when the answer
     loaded a library from under one of them that the config does not
@@ -166,14 +185,44 @@ val run :
   (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ->
   Safe_typing.safe_environment ->
   answer_deps:(Names.DirPath.t * (Names.DirPath.t * Safe_typing.vodigest) array) list ->
+  admitted:Names.DirPath.t list ->
   unit
 (** Load the challenge into an environment of its own on top of the given
     empty safe environment, compare, and write the verdict file. The
     environment is the answer's, as [rocqchk] checked it, and the accessor
-    reads its opaque proofs.
-    @raise CErrors.UserError when a pre-checked library's sha256 differs,
-    when the two sides record different dependency digests for a pre-checked
-    library, or when the config names a theorem the challenge does not hold.
+    reads its opaque proofs. [answer_deps] are the dependency digests each
+    library the answer loaded records ([CheckLibrary.interned_deps]), and
+    [admitted] the libraries given with [-admit], each by its full logical
+    name, once, in command-line order (not the pre-checked libraries the
+    option adds to the admit list).
+
+    A library the answer loaded is pinned by its sha256 as a challenge file
+    when it is under a root the challenge stands in for, the challenge file
+    at its path below that root's directory (by [path_below_root], compared
+    by real path) is one of [challenge_files], and the file the answer's
+    loader read it from has the sha256 the config gives that file. A library
+    is the image's own when it is under no such root, not pre-checked, and
+    its file passes the test of [prepare] above.
+
+    The verdict is one JSON object with the keys [format], [theorems],
+    [declarations] and [admitted], in that order. [admitted] lists the
+    libraries of [admitted], and is [[]] when no [-admit] is given.
+
+    @raise CErrors.UserError, before the challenge is loaded, when the file
+    the answer's loader read a pre-checked library from is another file than
+    the one [check_prechecked_files] hashed and its sha256 differs from the
+    pin, or when the answer did not load a pre-checked library; when the run
+    breaks a rule of [prepare]; when a pre-checked library rests, directly or
+    not, on a library that is neither pre-checked, nor pinned by its sha256
+    as a challenge file, nor the image's own, whether the run checks that
+    library or not; when the answer loaded a library under a root the
+    challenge stands in for without a check ([CheckLibrary.unchecked]: a
+    dependency of a library given with [-norec] or [-admit]) that is neither
+    pre-checked, nor pinned by its sha256 as a challenge file, nor in
+    [admitted], so a library an [admitted] one depends on is not exempt.
+    After the challenge is loaded: when the two sides record different
+    dependency digests for a library that is one file for both sides, or
+    when the config names a theorem the challenge does not hold.
     A verdict is never an error: the file is written and the run exits 0. *)
 
 val sha256_of_file : string -> string
