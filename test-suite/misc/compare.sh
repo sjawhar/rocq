@@ -206,13 +206,18 @@ seed_stale_verdict() {
 
 # ---------------------------------------------------------------- sha256
 #
-# The comparator carries its own SHA-256, because the checker links no
-# digest library. It is trusted code, so it is checked against FIPS 180-4's
-# vectors and against sha256sum here, and compare.sh compares it with
-# sha256sum on every challenge file it builds (see run_case). A FIFO and a
-# link to /dev/zero are each refused as a file that is not a regular one,
-# within the bound: a FIFO's open blocks without a writer, and /dev/zero
-# reads without end.
+# The comparator hashes with a SHA-256 of its own (checker/check_compare.ml,
+# module Sha256), which refuses a file that is not a regular one where
+# clib's Sha256.file would block or read without end. It is trusted code,
+# so it is checked against FIPS 180-4's vectors and against sha256sum here,
+# and compare.sh compares it with sha256sum on every challenge file it
+# builds (see run_case). A FIFO and a link to /dev/zero are each refused as
+# a file that is not a regular one, within the bound: a FIFO's open blocks
+# without a writer, and /dev/zero reads without end. These two sub-runs
+# cover the check before the open. The non-blocking open and the check on
+# the open descriptor matter only when the path changes kind between that
+# check and the open, which a shell test cannot make happen reliably, so no
+# sub-run here covers them.
 case_sha256() {
   local d
   d=$(mktemp -d)

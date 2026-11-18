@@ -288,6 +288,4 @@ val sha256_of_file : string -> string
     the test suite checks this implementation against the standard vectors
     and against [sha256sum].
     @raise CErrors.UserError, naming the file, when it is not a regular
-    file, by [Unix.stat], which follows links, before it is opened, and
-    again by its open descriptor, before any read; or when its stat, its
-    open or a read fails. *)
+    file (links are followed) or cannot be read. *)

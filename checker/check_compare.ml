@@ -43,10 +43,8 @@ open Declarations
     as [hex_of_string] and [hex_of_file], also as 64 lowercase hexadecimal
     digits. The one difference is a file that is not a regular file or
     cannot be read: clib's [file] opens it, and raises [Sys_error], blocks
-    or reads without end, and [hex_of_file] raises a user error: one of its
-    own for a path that is not a regular file, before it is opened and again
-    on the open descriptor, before any read, and the system's message for a
-    file whose stat, open or read fails. *)
+    or reads without end, and [hex_of_file] refuses it with a user error,
+    a file that is not a regular one before any read. *)
 
 module Sha256 : sig
   val hex_of_string : string -> string
@@ -168,17 +166,19 @@ end = struct
     feed st (Bytes.of_string s) 0 (String.length s);
     finish st
 
-  (* The path is refused, before it is opened, unless [Unix.stat], which
-     follows links, sees a regular file: a FIFO's open would block, and a
-     link to /dev/zero would be read without end. The file is then opened
-     without blocking and without taking a terminal as the controlling
-     one, and the kind of the open descriptor, which every read goes
-     through, is checked again, so that a path that names another kind of
-     file by the time it is opened is refused too, before any read. Either
-     check refuses a file that is not a regular one with a text of this
-     function's own ([require_regular]). Every other refusal is the
-     system's message, [Unix.error_message]'s; a read that a signal
-     interrupts is made again. None names the file: each caller names it. *)
+  (* The path is refused before it is opened unless [Unix.stat], which
+     follows links, sees a regular file, so that no other kind of file is
+     opened at all: opening a device or a FIFO can act on it. The open does
+     not block ([O_NONBLOCK]) and takes no terminal as the controlling one
+     ([O_NOCTTY]), and the kind of the open descriptor, which every read
+     goes through, is checked again. The open and that second check are
+     what hold when the path names another kind of file by the time it is
+     opened: a FIFO is then refused at once, before any read, rather than
+     waited on, and a device is not read without end. Both checks refuse a
+     file that is not a regular one with a text of this function's own
+     ([require_regular]). Every other refusal is the system's message,
+     [Unix.error_message]'s; a read that a signal interrupts is made again.
+     None names the file: each caller names it. *)
   let hex_of_file f =
     let refuse e = CErrors.user_err (Pp.str e) in
     let require_regular kind =
@@ -204,7 +204,7 @@ end = struct
           let st = create () in
           let b = Bytes.create 65536 in
           let rec loop () =
-            match Unix.read fd b 0 65536 with
+            match Unix.read fd b 0 (Bytes.length b) with
             | exception Unix.Unix_error (Unix.EINTR, _, _) -> loop ()
             | 0 -> ()
             | n -> feed st b 0 n; loop ()
