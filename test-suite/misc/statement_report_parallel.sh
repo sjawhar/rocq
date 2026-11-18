@@ -125,6 +125,18 @@
 #      guards that the walk (Check_closure.push_subterms) enters the
 #      branches of a match and the bodies of a fixpoint and of a
 #      cofixpoint, since a walk that skipped them would miss the axiom.
+#  (t) W2.v: opaque proofs that reach an axiom, or a relaxed typing flag,
+#      in one place only: the type of a binder, of a let and of a
+#      fixpoint and of a cofixpoint, the body of a let, the type of a
+#      cast, the return clause of a match, the default value and an
+#      element of an array literal, and an inductive type that the
+#      body names, whose constructor names the axiom or which holds the
+#      flag, at -j 1 and at -j 3, which takes every body from the records:
+#      M = 0. Each line guards one place that the walk enters
+#      (Check_closure.push_subterms), and, at -j 3, the inductive types
+#      that a record keeps (Check_closure.opaque_body_refs): a walk that
+#      skipped a place misses its axiom at -j 1 and at -j 3, and a record
+#      that left out an inductive type misses its axiom or flag at -j 3.
 #
 # A case where /dev/shm is missing, not writable, or writable by other
 # users without its sticky bit needs another mount of /dev/shm than the
@@ -141,7 +153,7 @@ t=$(mktemp -d)
 # The TMPDIR made in /dev/shm for (q), once it is made.
 s=
 trap 'rm -rf "$d" "$t"; [ -z "$s" ] || rm -rf "$s"' EXIT
-mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/good" "$d/bad" "$d/spliced"
+mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/walk2" "$d/good" "$d/bad" "$d/spliced"
 
 {
   cat <<'EOF'
@@ -275,6 +287,74 @@ Proof. exact (cofix G : str := scons axc G). Qed.
 EOF
 rocq c -native-compiler no -Q "$d/walk" SRWalk "$d/walk/W.v"
 
+# W2.v, for (t): each opaque proof reaches its axiom, or its flag, in one
+# place only, named after it; the axiom is hidden in a let that only that
+# place holds. in_ctor and in_ind reach their axiom only through the
+# constructor types of an inductive type the body names, in_positivity and
+# in_uip their flag only through such an inductive type.
+cat > "$d/walk2/W2.v" <<'EOF'
+From Corelib Require Import PrimArray.
+Open Scope array_scope.
+
+Axiom axbind : nat.
+Lemma in_binder : nat.
+Proof. exact ((fun _ : (let _ := axbind in nat) => O) O). Qed.
+
+Axiom axletty : nat.
+Lemma in_letty : nat.
+Proof. exact (let x : (let _ := axletty in nat) := O in x). Qed.
+
+Axiom axletb : nat.
+Lemma in_letbody : nat.
+Proof. exact (let x := axletb in O). Qed.
+
+Axiom axcast : nat.
+Lemma in_cast : nat.
+Proof. exact (O <: (let _ := axcast in nat)). Qed.
+
+Axiom axret : nat.
+Lemma in_return : nat.
+Proof. exact (match tt as u return (let _ := axret in nat) with tt => O end). Qed.
+
+Axiom axfixty : nat.
+Lemma in_fixtype : nat.
+Proof. exact ((fix F (m : nat) {struct m} : (let _ := axfixty in nat) := O) O). Qed.
+
+CoInductive cstr : Set := ccons : cstr -> cstr.
+Axiom axcofixty : nat.
+Lemma in_cofixtype : cstr.
+Proof. exact (cofix G : (let _ := axcofixty in cstr) := ccons G). Qed.
+
+Axiom axarrdef : nat.
+Lemma in_arrdefault : nat.
+Proof. exact (let _ := [| O | (let _ := axarrdef in O) : nat |] in O). Qed.
+
+Axiom axarrel : nat.
+Lemma in_arrelem : nat.
+Proof. exact (let _ := [| axarrel | O : nat |] in O). Qed.
+
+Axiom axctor : nat.
+Inductive Hc : Prop := hc : (let _ := axctor in True) -> Hc.
+Lemma in_ctor : nat.
+Proof. exact (match hc I with hc _ => O end). Qed.
+
+Axiom axind : nat.
+Inductive Hi : Prop := hi : (let _ := axind in True) -> Hi.
+Lemma in_ind : nat.
+Proof. exact (let _ := Hi in O). Qed.
+
+#[bypass_check(positivity)] Inductive Neg : Type := neg : (Neg -> False) -> Neg.
+Lemma in_positivity : nat.
+Proof. exact (let _ := Neg in O). Qed.
+
+Set Definitional UIP.
+Inductive sq (a : nat) : nat -> SProp := sr : sq a a.
+Unset Definitional UIP.
+Lemma in_uip : nat.
+Proof. exact (let _ := sq in O). Qed.
+EOF
+rocq c -native-compiler no -Q "$d/walk2" SRWalk2 "$d/walk2/W2.v"
+
 cat > "$d/a.req" <<'EOF'
 via SRPar.A.via -
 model_a SRPar.A.model_a -
@@ -310,6 +390,8 @@ in_branch SRWalk.W.in_branch -
 in_fix SRWalk.W.in_fix -
 in_cofix SRWalk.W.in_cofix -
 EOF
+t_names="binder letty letbody cast return fixtype cofixtype arrdefault arrelem ctor ind positivity uip"
+for n in $t_names; do echo "in_$n SRWalk2.W2.in_$n -"; done > "$d/t.req"
 
 fail() { >&2 echo "FAILURE: $*"; exit 1; }
 
@@ -878,6 +960,33 @@ for name in s-j1 s-j3; do
   has "$name" 'axiom in_branch SRWalk.W.axm'
   has "$name" 'axiom in_fix SRWalk.W.axf'
   has "$name" 'axiom in_cofix SRWalk.W.axc'
+done
+
+# (t) Each proof of W2 reaches its axiom or flag in one place only: the
+# type of a binder, of a let, of a fixpoint and of a cofixpoint, the body
+# of a let, the type of a cast, the return clause of a match, the default
+# value and an element of an array, and the constructor types
+# or the flags of an inductive type the body names. A walk that skipped a
+# place misses its line at -j 1 and at -j 3; a record that left out an
+# inductive type misses the lines of in_ctor, in_ind, in_positivity and
+# in_uip at -j 3, which then differs from -j 1. M = 0: -j 3 took every body
+# from the records.
+report t -Q "$d/walk2" SRWalk2 -norec SRWalk2.W2
+[ "$reads" = 0 ] || { cat "$d/t-j3.err" >&2; fail "(t) -j 3: $reads bodies read, all were checked"; }
+for name in t-j1 t-j3; do
+  has "$name" 'axiom in_binder SRWalk2.W2.axbind'
+  has "$name" 'axiom in_letty SRWalk2.W2.axletty'
+  has "$name" 'axiom in_letbody SRWalk2.W2.axletb'
+  has "$name" 'axiom in_cast SRWalk2.W2.axcast'
+  has "$name" 'axiom in_return SRWalk2.W2.axret'
+  has "$name" 'axiom in_fixtype SRWalk2.W2.axfixty'
+  has "$name" 'axiom in_cofixtype SRWalk2.W2.axcofixty'
+  has "$name" 'axiom in_arrdefault SRWalk2.W2.axarrdef'
+  has "$name" 'axiom in_arrelem SRWalk2.W2.axarrel'
+  has "$name" 'axiom in_ctor SRWalk2.W2.axctor'
+  has "$name" 'axiom in_ind SRWalk2.W2.axind'
+  has "$name" 'flag in_positivity assumed-positive SRWalk2.W2.Neg'
+  has "$name" 'flag in_uip uip SRWalk2.W2.sq'
 done
 
 exit 0
