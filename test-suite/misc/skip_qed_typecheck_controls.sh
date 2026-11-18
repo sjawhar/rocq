@@ -278,14 +278,17 @@ says reset_keeps_bad "$unchecked_proof" option set inline
 # -async-proofs on the Qed is delegated, and the worker restores the state it
 # froze before it, which is no rollback: the skip must still apply.
 # -stm-debug makes each process print its steps to stderr, each line led by
-# its process id, which names a proof worker proof:<n>:<m>: a case that
-# reads it fails if the stm stops sending the proof to a worker.
+# "<pid>:<name>:<thread>] ", where a proof worker's name is proof:<n>:<m>.
+# A worker prints some lines as it starts, before any task; it prints
+# "reaching:" only while it builds a proof. ran_in_worker fails a case
+# unless every arm has such a line, so it fails if the stm keeps the proof.
 ran_in_worker() { # case
-  local arm
+  local case=$1 arm
   for arm in plain option set inline; do
-    grep -qE '[0-9]+:proof:[0-9]+:[0-9]+:[0-9]+\] ' "$workdir/$1/$arm.out" ||
-      { cat "$workdir/$1/$arm.out" >&2
-        fail "$1/$arm: no proof worker ran the proof"; }
+    grep -qE '[0-9]+:proof:[0-9]+:[0-9]+:[0-9]+\] reaching: ' \
+      "$workdir/$case/$arm.out" ||
+      { cat "$workdir/$case/$arm.out" >&2
+        fail "$case/$arm: no proof worker built the proof"; }
   done
 }
 delegated=(-async-proofs on -async-proofs-j 1)
@@ -321,8 +324,9 @@ extra=(-async-proofs on -async-proofs-j 1)
 same_status resilient_reset_bad 1 'Section S.' 'Variable n : nat.' "$bad" 'Qed.' \
   'Reset discarded_bad.' 'Definition x := 0.' 'End S.'
 says resilient_reset_bad "$kernel_error" option set inline
-# Whether a rollback checks depends on the kind of document rocq compile
-# builds, not on the process, so a compile that names a worker id still checks.
+# Whether a rollback checks depends on the kind of document, not on whether
+# the process calls itself a worker, so a compile that names a worker id
+# still checks.
 extra=(-worker-id qed_rollback)
 stops_with_kernel_error worker_id_reset_bad "$bad" 'Qed.' \
   'Reset discarded_bad.'
