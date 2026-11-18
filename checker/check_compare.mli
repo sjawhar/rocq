@@ -69,7 +69,8 @@ val read_config : string -> config
     (each [{kind, object?}]), [rewrite_rules], [prechecked]
     ([{library, sha256}]) and [challenge_files] ([{path, sha256}]). Any
     other key, a duplicate key, a byte after the top-level value, a byte
-    sequence that is not UTF-8 or a name that is not a string is an error.
+    sequence that is not UTF-8, a name that is not a string or a pre-checked
+    library whose name is not identifiers joined by dots is an error.
 
     A permitted axiom is named by the name it prints, and is the task's
     declaration of that name: an axiom a theorem's proof reaches passes only
@@ -138,7 +139,7 @@ val read_config : string -> config
     an error as well.
     @raise CErrors.UserError on any of these errors. *)
 
-val prechecked_libraries : config -> string list
+val prechecked_libraries : config -> Names.DirPath.t list
 (** The libraries the config declares pre-checked, in its order. They load
     through the existing [-admit] path: once [check_prechecked_files] has
     checked their pins, [rocqchk] adds each of them to the admit list it
@@ -160,8 +161,9 @@ val check_prechecked_files : config -> unit
     before its pin is checked. When the command line names another file of
     that library, the loader reads that one instead, and [run] hashes it
     after the read.
-    @raise CErrors.UserError when a file's sha256 differs from its pin, or
-    when the load path does not resolve a pre-checked library. *)
+    @raise CErrors.UserError when a file's sha256 differs from its pin, when
+    a file cannot be read, or when the load path does not resolve a
+    pre-checked library. *)
 
 type t
 
@@ -176,7 +178,8 @@ val prepare :
     answer's directories under each root the challenge stands in for, which
     stay behind it; it is called once, inside the challenge load.
     [under_challenge_root] says whether a library name lives under one of
-    those roots: unless pre-checked, those are the answer's own libraries.
+    those roots, the root's name followed by at least one more component:
+    unless pre-checked, those are the answer's own libraries.
     Every other library the answer loaded, unless pre-checked, is a shared
     one, which the challenge loads too, and the run is refused unless the
     file the loader recorded for it, on either side, passes two tests.
@@ -200,7 +203,8 @@ val prepare :
     with the directory each is bound to; the run is refused when the answer
     loaded a library from under one of them that the config does not
     pre-check.
-    @raise CErrors.UserError when a file is missing or its sha256 differs. *)
+    @raise CErrors.UserError when a file is missing, cannot be read or its
+    sha256 differs. *)
 
 val run :
   t -> Environ.env ->
@@ -250,17 +254,20 @@ val run :
 
     @raise CErrors.UserError, before the challenge is loaded, when the file
     the answer's loader read a pre-checked library from is another file than
-    the one [check_prechecked_files] hashed and its sha256 differs from the
-    pin, or when the answer did not load a pre-checked library; when the
-    answer breaks a rule of [prepare] (an open root, a shared library's
-    file); when a pre-checked library rests, directly or not, on a library
-    that is neither pre-checked, nor pinned by its sha256 as a challenge
-    file, nor the image's own, whether the run checks that library or not;
-    when the answer loaded a library under a root the challenge stands in
-    for without a check ([CheckLibrary.unchecked]: a dependency of a library
-    given with [-norec] or [-admit]) that is neither pre-checked, nor pinned
-    by its sha256 as a challenge file, nor in [admitted], so a library an
-    [admitted] one depends on is not exempt.
+    the one [check_prechecked_files] hashed and it cannot be read or its
+    sha256 differs from the pin, or when the answer did not load a
+    pre-checked library; when the answer breaks a rule of [prepare] (an open
+    root, a shared library's file); when a pre-checked library rests,
+    directly or not, on a library that is neither pre-checked, nor pinned by
+    its sha256 as a challenge file, nor the image's own, whether the run
+    checks that library or not; when the answer loaded a library under a
+    root the challenge stands in for without a check
+    ([CheckLibrary.unchecked]: a dependency of a library given with [-norec]
+    or [-admit]) that is neither pre-checked, nor pinned by its sha256 as a
+    challenge file, nor in [admitted], so a library an [admitted] one
+    depends on is not exempt; when, for either of the last two rules, the
+    file the answer's loader read a library from cannot be read where its
+    sha256 decides whether the library is pinned.
     While the challenge is loaded, before any of it is imported: when the
     challenge read a library under a root it stands in for, not pre-checked,
     from a file whose real path is not under the real path of [dir]; when a
@@ -269,7 +276,8 @@ val run :
     digests for a library that is one file for both sides; when the
     challenge read a shared library the answer loaded too from another file
     than the answer (real paths), or a pre-checked library from another file
-    than the answer whose sha256 is not the one the config pins.
+    than the answer that cannot be read or whose sha256 is not the one the
+    config pins.
     After the challenge is loaded: when the config names a theorem the
     challenge does not hold, or one whose name two challenge constants
     print.

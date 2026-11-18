@@ -41,8 +41,10 @@ open Declarations
     clib's [Sha256] (clib/sha256.ml, through [boot]), which the module below
     shadows in this file. clib's [string] and [file] give the same digests
     as [hex_of_string] and [hex_of_file], also as 64 lowercase hexadecimal
-    digits. The one difference is a file that cannot be opened: clib's
-    [file] raises [Sys_error], and [hex_of_file] raises a user error. *)
+    digits. The one difference is a file that cannot be read: clib's [file]
+    raises [Sys_error], and [hex_of_file] raises a user error with the
+    system's message, whether the file does not open or fails once open (a
+    directory opens, and its first read fails). *)
 
 module Sha256 : sig
   val hex_of_string : string -> string
@@ -165,16 +167,18 @@ end = struct
     finish st
 
   let hex_of_file f =
-    let ch = try open_in_bin f with Sys_error e -> CErrors.user_err (Pp.str e) in
-    Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
-        let st = create () in
-        let b = Bytes.create 65536 in
-        let rec loop () =
-          let n = input ch b 0 65536 in
-          if n > 0 then (feed st b 0 n; loop ())
-        in
-        loop ();
-        finish st)
+    try
+      let ch = open_in_bin f in
+      Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
+          let st = create () in
+          let b = Bytes.create 65536 in
+          let rec loop () =
+            let n = input ch b 0 65536 in
+            if n > 0 then (feed st b 0 n; loop ())
+          in
+          loop ();
+          finish st)
+    with Sys_error e -> CErrors.user_err (Pp.str e)
 end
 
 let sha256_of_file = Sha256.hex_of_file
@@ -484,7 +488,8 @@ type theorem = {
   th_axioms : string list option;  (** replaces the global list for this one *)
 }
 
-type prechecked = { pc_library : string; pc_sha256 : string }
+(** [pc_library] is the library's name, parsed once by [read_config]. *)
+type prechecked = { pc_library : DirPath.t; pc_sha256 : string }
 
 type challenge_file = { cf_path : string; cf_sha256 : string }
 
@@ -506,6 +511,11 @@ let answer_universe_constraints = "answer-universe-constraints"
 let prechecked_libraries cfg = List.map (fun p -> p.pc_library) cfg.cfg_prechecked
 
 let cfg_error msg = CErrors.user_err Pp.(str ("The comparator config is wrong: " ^ msg ^ "."))
+
+let dirpath_of_string s =
+  match String.split_on_char '.' s with
+  | [] -> cfg_error ("the library name " ^ s ^ " is empty")
+  | l -> DirPath.make (List.rev_map Id.of_string l)
 
 let fields where keys l =
   List.iter (fun (k, _) ->
@@ -640,7 +650,7 @@ let read_config file =
           fields "a prechecked entry" ["library"; "sha256"] e;
           match get e "library", get e "sha256" with
           | Some l, Some h ->
-            { pc_library = as_string "a prechecked library" l;
+            { pc_library = dirpath_of_string (as_string "a prechecked library" l);
               pc_sha256 = as_string "a prechecked sha256" h }
           | _ -> cfg_error "a prechecked entry needs a library and a sha256")
         (as_list "prechecked" v)
@@ -1049,39 +1059,34 @@ type sort_class = Proposition | Data | Undetermined
    types a constant ([Mod_checking.check_constant_declaration]). The type
    is not reduced, and the challenge environment holds no declaration of
    the answer's, so no body the answer chose is unfolded. [Undetermined]
-   for a sort variable or a global sort ([QSort]), for a type that cannot
-   be typed there, and with no environment ([None]): a field of a module
-   type, whose type may name the other fields of the module type and the
-   functor parameters, which no environment holds. *)
+   for a sort variable or a global sort ([QSort]), and for a type that
+   cannot be typed there. *)
 let stated_sort env (cb : constant_body) =
-  match env with
-  | None -> Undetermined
-  | Some env ->
-    let sort () =
-      let env = CheckFlags.set_local_flags cb.const_typing_flags env in
-      let env = match cb.const_universes with
-        | Monomorphic -> env
-        | Polymorphic ctx ->
-          Environ.push_context ~strict:false (UVars.AbstractContext.repr ctx) env
-      in
-      (Typeops.infer_type env cb.const_type).Environ.utj_type
+  let sort () =
+    let env = CheckFlags.set_local_flags cb.const_typing_flags env in
+    let env = match cb.const_universes with
+      | Monomorphic -> env
+      | Polymorphic ctx ->
+        Environ.push_context ~strict:false (UVars.AbstractContext.repr ctx) env
     in
-    match sort () with
-    | Sorts.Prop | Sorts.SProp -> Proposition
-    | Sorts.Set | Sorts.Type _ -> Data
-    | Sorts.QSort _ -> Undetermined
-    | exception e when CErrors.noncritical e -> Undetermined
+    (Typeops.infer_type env cb.const_type).Environ.utj_type
+  in
+  match sort () with
+  | Sorts.Prop | Sorts.SProp -> Proposition
+  | Sorts.Set | Sorts.Type _ -> Data
+  | Sorts.QSort _ -> Undetermined
+  | exception e when CErrors.noncritical e -> Undetermined
 
-(* [env] is the challenge environment that [stated_sort] reads, [None] for
-   a field of a module type; [is_theorem] says whether the config names
-   the constant as a theorem, and [named] whether another compared
-   challenge declaration names it. The sort and [named] are forced only by
-   a constant the challenge leaves without a body and the answer fills. *)
-let eq_const_body ~env ~is_theorem ~named m (cb1 : constant_body) (cb2 : constant_body) =
+(* [sort] is the class of the sort of the type the challenge states for
+   the constant ([stated_sort]), or [Undetermined] for a field of a module
+   type; [is_theorem] says whether the config names the constant as a
+   theorem, and [named] whether another compared challenge declaration
+   names it. [sort] and [named] are forced only by a constant the
+   challenge leaves without a body and the answer fills. *)
+let eq_const_body ~sort ~is_theorem ~named m (cb1 : constant_body) (cb2 : constant_body) =
   map_relevance cb1.const_relevance cb2.const_relevance;
   let m = eq_universes m cb1.const_universes cb2.const_universes in
   let m = eq_constr m cb1.const_type cb2.const_type in
-  let sort = lazy (stated_sort env cb1) in
   match cb1.const_body, cb2.const_body with
   | Undef _, Undef _ -> m
   | Undef _, (Def _ | OpaqueDef _)
@@ -1297,12 +1302,11 @@ let eq_primitive_type ~challenge_env ~answer_env c1 c2 =
 
     Of a module type, and of a module field of one, the expanded signature
     ([mod_type]) is compared. The algebraic form it was expanded from
-    ([mod_type_alg]) and a module field's implementation ([mod_expr]) are
-    not read, nor any module path they name; the delta resolver
-    ([mod_delta]) only names the fields (below). A field is matched by its
-    label, and the kernel names that the fields hold are compared by
-    [eq_constr] and, for the symbols of a block of rewrite rules, here,
-    each challenge name renamed first ([rename]).
+    ([mod_type_alg]), a module field's implementation ([mod_expr]) and the
+    delta resolver ([mod_delta]) are not read, nor any module path they
+    name. A field is matched by its label, and the kernel names that the
+    fields hold are compared by [eq_constr] and, for the symbols of a block
+    of rewrite rules, here, each challenge name renamed first ([rename]).
 
     A functor is compared parameter by parameter. The challenge's parameter
     [p1] stands for the answer's parameter [p2] of the same position in
@@ -1312,22 +1316,16 @@ let eq_primitive_type ~challenge_env ~answer_env c1 c2 =
     parameters bound around it are those of before it; the levels mapped
     inside stay mapped.
 
-    Each side's structure is at a place: the module path its fields' kernel
-    names are under (the module type's path, [MPbound p] for the type of a
-    functor parameter [p], [MPdot (mp, l)] for a module or module type
-    field [l] of a structure at [mp]), and the delta resolver of the module
-    body it is the signature of, which gives a field its canonical name.
-    So a field's constant is named as [Modops.add_structure] names the
-    fields of a module that it adds to an environment, and under a functor
-    the answer's path is the challenge's with each challenge parameter
-    replaced by the answer's. [eq_primitive_type] reads that name. No
-    environment holds the fields of a module type or the functor
-    parameters, which a field's type may name, so a field is compared with
-    no environment to type it in ([stated_sort]). *)
+    No field is compared for a primitive-type registration
+    ([eq_primitive_type]): the kernel refuses to register a primitive type
+    while it builds a module type or a functor
+    ([Safe_typing.add_retroknowledge]), and the constants of a module,
+    sealed or not, are constants of the environment, whose registrations
+    [compare_declarations] compares. *)
 
-let rec eq_signature ~challenge_env ~answer_env m at1 at2 s1 s2 =
+let rec eq_signature m s1 s2 =
   match s1, s2 with
-  | NoFunctor b1, NoFunctor b2 -> eq_structure ~challenge_env ~answer_env m at1 at2 b1 b2
+  | NoFunctor b1, NoFunctor b2 -> eq_structure m b1 b2
   | MoreFunctor (p1, t1, s1), MoreFunctor (p2, t2, s2) ->
     (* The answer's parameters in scope stay one-to-one with the
        challenge's: were [p2] bound again inside, a name under either
@@ -1341,30 +1339,28 @@ let rec eq_signature ~challenge_env ~answer_env m at1 at2 s1 s2 =
         (Option.default Mod_subst.empty_subst m.params)
     in
     let inner = { m with params = Some params; bound = MBId.Set.add p2 m.bound } in
-    let inner =
-      eq_modtype ~challenge_env ~answer_env inner (ModPath.MPbound p1) mp2 t1 t2
-    in
-    let inner = eq_signature ~challenge_env ~answer_env inner at1 at2 s1 s2 in
+    let inner = eq_modtype inner t1 t2 in
+    let inner = eq_signature inner s1 s2 in
     { inner with params = m.params; bound = m.bound }
   | NoFunctor _, MoreFunctor _ -> diff "a module type is a functor in the answer"
   | MoreFunctor _, NoFunctor _ -> diff "a functor is not a functor in the answer"
 
-and eq_structure ~challenge_env ~answer_env m (mp1, delta1) (mp2, delta2) b1 b2 =
+and eq_structure m b1 b2 =
   List.fold_left (fun m (l, f1) ->
       match List.assoc_opt l b2 with
       | None -> diff "the field %s is missing from the answer" (Id.to_string l)
       | Some f2 ->
         match f1, f2 with
         | SFBconst c1, SFBconst c2 ->
-          eq_primitive_type ~challenge_env ~answer_env
-            (Mod_subst.constant_of_delta_kn delta1 (KerName.make mp1 l))
-            (Mod_subst.constant_of_delta_kn delta2 (KerName.make mp2 l));
           (* A field of a module type is never a config-named theorem: the
-             config names a constant of the environment. With no
-             environment its sort is [Undetermined], so the first rule of
-             [eq_const_body] refuses any body the answer gives it, and
+             config names a constant of the environment. A field of a
+             module type has no environment to type it in: no environment
+             holds the other fields or the functor parameters, which its
+             type may name. So its sort is [Undetermined], the first rule
+             of [eq_const_body] refuses any body the answer gives it, and
              [named] is never asked. *)
-          eq_const_body ~env:None ~is_theorem:false ~named:(Lazy.from_val true) m c1 c2
+          eq_const_body ~sort:(Lazy.from_val Undetermined) ~is_theorem:false
+            ~named:(Lazy.from_val true) m c1 c2
         | SFBmind i1, SFBmind i2 -> eq_mib_body m i1 i2
         | SFBrules r1, SFBrules r2 ->
           (* The symbols the block rewrites must be the same ones, in the
@@ -1378,23 +1374,16 @@ and eq_structure ~challenge_env ~answer_env m (mp1, delta1) (mp2, delta2) b1 b2 
             diff "the field %s rewrites other symbols in the answer" (Id.to_string l);
           m
         | SFBmodule mb1, SFBmodule mb2 ->
-          eq_signature ~challenge_env ~answer_env m
-            (ModPath.MPdot (mp1, l), Mod_declarations.mod_delta mb1)
-            (ModPath.MPdot (mp2, l), Mod_declarations.mod_delta mb2)
-            (Mod_declarations.mod_type mb1) (Mod_declarations.mod_type mb2)
-        | SFBmodtype t1, SFBmodtype t2 ->
-          eq_modtype ~challenge_env ~answer_env m
-            (ModPath.MPdot (mp1, l)) (ModPath.MPdot (mp2, l)) t1 t2
+          eq_signature m (Mod_declarations.mod_type mb1) (Mod_declarations.mod_type mb2)
+        | SFBmodtype t1, SFBmodtype t2 -> eq_modtype m t1 t2
         | (SFBconst _ | SFBmind _ | SFBrules _ | SFBmodule _ | SFBmodtype _), _ ->
           diff "the field %s is of another kind in the answer" (Id.to_string l))
     m b1
 
-(* The module types [t1] of the challenge at [mp1] and [t2] of the answer at
-   [mp2]. *)
-and eq_modtype ~challenge_env ~answer_env m mp1 mp2 t1 t2 =
-  eq_signature ~challenge_env ~answer_env m
-    (mp1, Mod_declarations.mod_delta t1) (mp2, Mod_declarations.mod_delta t2)
-    (Mod_declarations.mod_type t1) (Mod_declarations.mod_type t2)
+(* The module types [t1] of the challenge and [t2] of the answer, by their
+   expanded signatures. *)
+and eq_modtype m t1 t2 =
+  eq_signature m (Mod_declarations.mod_type t1) (Mod_declarations.mod_type t2)
 
 (************************************************************************)
 (** {6 The run} *)
@@ -1411,12 +1400,14 @@ type t = {
   add_challenge_load_path : unit -> unit;
   under_challenge_root : DirPath.t -> bool;
       (** Is this library name under a root the challenge directory stands in
-          for? Those, unless pre-checked, are the answer's own libraries
-          ([origin]). Every other library the answer loaded, unless
-          pre-checked, is a shared one, and [check_provenance] refuses a run
-          unless the file the loader recorded for it lies in no place an
-          answer's file is found in ([answer_place]) and was found in a
-          trusted directory ([trusted_dirs]). *)
+          for: the root's name followed by at least one more component, so
+          that [path_below_root] gives its path? Those, unless pre-checked,
+          are the answer's own libraries ([origin]). Every other library the
+          answer loaded, unless pre-checked, is a shared one, and
+          [check_provenance] refuses a run unless the file the loader
+          recorded for it lies in no place an answer's file is found in
+          ([answer_place]) and was found in a trusted directory
+          ([trusted_dirs]). *)
   open_roots : (DirPath.t * string) list;
       (** The roots the command line binds that the challenge does NOT stand
           in for, with the directory each is bound to. A library under one of
@@ -1473,13 +1464,18 @@ let same_real_file a b = match realpath a, realpath b with
 let hashed_files : (string, string) Hashtbl.t = Hashtbl.create 17
 
 (* The sha256 of [file]. A run hashes each file at most once: every later
-   question about the same file is answered from [hashed_files]. *)
-let file_sha256 file =
+   question about the same file is answered from [hashed_files]. A file
+   that cannot be read refuses the run: [what ()] says which file it is,
+   and the system's message follows. *)
+let file_sha256 ~what file =
   let key = Option.default file (realpath file) in
   match Hashtbl.find_opt hashed_files key with
   | Some h -> h
   | None ->
-    let h = Sha256.hex_of_file file in
+    let h =
+      try Sha256.hex_of_file file
+      with CErrors.UserError msg -> CErrors.user_err Pp.(str (what () ^ ": ") ++ msg ++ str ".")
+    in
     Hashtbl.add hashed_files key h;
     h
 
@@ -1508,11 +1504,6 @@ let answer_place t file =
           else None)
         t.bound_dirs
 
-let dirpath_of_string s =
-  match String.split_on_char '.' s with
-  | [] -> cfg_error ("the library name " ^ s ^ " is empty")
-  | l -> DirPath.make (List.rev_map Id.of_string l)
-
 (* Before the challenge is loaded: the challenge files the config pins must be
    there and have the sha256 it gives. [trusted] are the directories the run
    trusts for the image's own libraries; only those whose real path exists
@@ -1525,7 +1516,7 @@ let prepare cfg ~dir ~out ~add_challenge_load_path ~under_challenge_root ~path_b
           else f.cf_path in
         if not (Sys.file_exists p) then
           CErrors.user_err Pp.(str ("The challenge file " ^ p ^ " is not there."));
-        let got = file_sha256 p in
+        let got = file_sha256 p ~what:(fun () -> "The challenge file " ^ p ^ " cannot be read") in
         if not (String.equal got f.cf_sha256) then
           CErrors.user_err
             (Pp.str ("The challenge file " ^ p ^ " has sha256 " ^ got ^
@@ -1543,7 +1534,7 @@ let prepare cfg ~dir ~out ~add_challenge_load_path ~under_challenge_root ~path_b
      or earlier, leaves yesterday's verdict to be read as today's. *)
   { cfg; dir; out; files;
     challenge_dir = realpath dir;
-    prechecked = List.map (fun p -> dirpath_of_string p.pc_library) cfg.cfg_prechecked;
+    prechecked = prechecked_libraries cfg;
     add_challenge_load_path; under_challenge_root; open_roots;
     cwd = realpath (Sys.getcwd ());
     bound_dirs = List.filter_map realpath bound_dirs;
@@ -1554,12 +1545,16 @@ let prepare cfg ~dir ~out ~add_challenge_load_path ~under_challenge_root ~path_b
     prechecked_closure = DirPath.Set.empty }
 
 (* Refuses [file] as the file of the pre-checked library [p] unless it has the
-   sha256 the config pins for [p]. *)
+   sha256 the config pins for [p], or when it cannot be read. *)
 let check_pin p file =
-  let got = file_sha256 file in
+  let lib = DirPath.to_string p.pc_library in
+  let got =
+    file_sha256 file ~what:(fun () ->
+        "The pre-checked library " ^ lib ^ " is " ^ file ^ ", which cannot be read")
+  in
   if not (String.equal got p.pc_sha256) then
     CErrors.user_err
-      (Pp.str ("The pre-checked library " ^ p.pc_library ^ " is " ^ file ^
+      (Pp.str ("The pre-checked library " ^ lib ^ " is " ^ file ^
                ", whose sha256 is " ^ got ^ ", and the config pins " ^ p.pc_sha256 ^ "."))
 
 (* Before any library is read: each pre-checked library, resolved on the
@@ -1570,9 +1565,7 @@ let check_pin p file =
    that library: the loader reads that one instead, before any pin is
    checked on it, and [check_prechecked_read] hashes it after the read. *)
 let check_prechecked_files cfg =
-  List.iter (fun p ->
-      check_pin p (CheckLibrary.library_file (dirpath_of_string p.pc_library)))
-    cfg.cfg_prechecked
+  List.iter (fun p -> check_pin p (CheckLibrary.library_file p.pc_library)) cfg.cfg_prechecked
 
 (* After the read: the file the answer's loader recorded for each pre-checked
    library must have its pin as well. [check_prechecked_files] hashed the file
@@ -1581,11 +1574,11 @@ let check_prechecked_files cfg =
    did not load is refused: its pin would be checked on no file it read. *)
 let check_prechecked_read t =
   List.iter (fun p ->
-      let dp = dirpath_of_string p.pc_library in
+      let dp = p.pc_library in
       match DirPath.Map.find_opt dp t.answer_files with
       | None ->
         CErrors.user_err
-          Pp.(str ("The answer did not load the pre-checked library " ^ p.pc_library ^
+          Pp.(str ("The answer did not load the pre-checked library " ^ DirPath.to_string dp ^
                    ", which the config names."))
       | Some file ->
         if not (same_real_file file (CheckLibrary.library_file dp)) then check_pin p file)
@@ -1646,24 +1639,30 @@ let origin t dp =
   else if t.under_challenge_root dp then Own
   else Shared
 
+(* The image's own library: a shared one -- outside every root the challenge
+   stands in for, not pre-checked -- whose file, as the answer's loader
+   recorded it, passed [check_provenance] ([outside]): it lies in no place
+   an answer's file is found in ([answer_place]: the working directory, a
+   bound directory) and was found in a directory the run trusts for the
+   image's own libraries ([trusted_dirs]). What this establishes is where
+   the loaded file is, from the path the loader recorded; that no answer
+   wrote such a file rests on the launch keeping the trusted directories out
+   of the answer's reach (check_compare.mli). [check_provenance] refuses a
+   run whose answer loaded a shared library from anywhere else, so in a run
+   that goes on, every shared library the answer loaded is the image's
+   own. *)
+let image_own t dp = match origin t dp with
+  | Shared -> List.exists (DirPath.equal dp) t.outside
+  | Prechecked | Own -> false
+
 (* A library that is one file for both sides: a pre-checked one, whose bytes
-   the config pins, or a shared one -- outside every root the challenge
-   stands in for -- whose file, as the answer's loader recorded it, passed
-   [check_provenance]: it lies in no place an answer's file is found in
-   ([answer_place]: the working directory, a bound directory) and was found
-   in a directory the run trusts for the image's own libraries
-   ([trusted_dirs]). What this establishes is where the loaded file is, from
-   the path the loader recorded; that no answer wrote such a file rests on
-   the launch keeping the trusted directories out of the answer's reach
-   (check_compare.mli). [check_provenance] refuses a run that loaded a
-   shared library from anywhere else, so the two tests agree on every
-   library a run goes on with. The challenge load must read a shared library
-   from the answer's file, and a pre-checked one from the answer's file or
-   from a file of the pinned sha256 ([check_same_files]). *)
+   the config pins, or the image's own ([image_own]). The challenge load must
+   read a shared library from the answer's file, and a pre-checked one from
+   the answer's file or from a file of the pinned sha256
+   ([check_same_files]). *)
 let one_file t dp = match origin t dp with
   | Prechecked -> true
-  | Own -> false
-  | Shared -> List.exists (DirPath.equal dp) t.outside
+  | Own | Shared -> image_own t dp
 
 let rooted_one_file t mp = match mp_root mp with
   | None -> false
@@ -1712,18 +1711,14 @@ let check_provenance t ~side libs =
                         COQPATH (" ^ dirs ^ "). A -compare run refuses it.")))
     libs
 
-(* The image's own library: a shared one whose recorded file passed
-   [check_provenance] on the answer's side. *)
-let image_own t dp = match origin t dp with
-  | Shared -> List.exists (DirPath.equal dp) t.outside
-  | Prechecked | Own -> false
-
 (* Whether the answer's library [dp] is pinned by its sha256 as a challenge
    file: it is the answer's own, the challenge file at its path below the
    root the challenge stands in for ([path_below_root]) is one the config
    pins (real paths), and the file the answer's loader read it from has that
    file's sha256. The bytes then are the challenge's file of that library,
-   whose own pin [prepare] checked. *)
+   whose own pin [prepare] checked. An answer file that cannot be read is
+   not pinned, and the run is refused, naming the library and its file: each
+   caller would refuse a library that is not pinned, and this says why. *)
 let pinned t dp = match origin t dp with
   | Prechecked | Shared -> false
   | Own ->
@@ -1733,8 +1728,12 @@ let pinned t dp = match origin t dp with
       match realpath (Filename.concat t.dir rel) with
       | None -> false
       | Some path ->
-        List.exists (fun (real, sha) ->
-            String.equal real path && String.equal sha (file_sha256 file))
+        let sha () =
+          file_sha256 file ~what:(fun () ->
+              "The answer loaded the library " ^ DirPath.to_string dp ^ " from " ^ file ^
+              ", which cannot be read")
+        in
+        List.exists (fun (real, pin) -> String.equal real path && String.equal pin (sha ()))
           t.pins
 
 (* The dependency digests each library records, as a map by library. *)
@@ -1900,10 +1899,12 @@ let check_same_files t libs =
           | None -> false
         in
         if not answers then
-          let got = file_sha256 file in
-          let pins p =
-            DirPath.equal (dirpath_of_string p.pc_library) dp && String.equal p.pc_sha256 got
+          let got =
+            file_sha256 file ~what:(fun () ->
+                "The challenge loaded the pre-checked library " ^ DirPath.to_string dp ^
+                " from " ^ file ^ ", which cannot be read")
           in
+          let pins p = DirPath.equal p.pc_library dp && String.equal p.pc_sha256 got in
           if not (List.exists pins t.cfg.cfg_prechecked) then
             CErrors.user_err
               Pp.(str ("The challenge loaded the pre-checked library " ^ DirPath.to_string dp ^
@@ -2006,6 +2007,18 @@ let seed_umap t ~challenge_env ~answer_env =
         if seeded dp && Univ.Level.Set.mem u an then add_level m u u else m)
     (UGraph.domain gch) empty_umap
 
+(* The items a reason lists: sorted, the first five, then [(and <n> more)]
+   for the rest; [None] for no item. [around] puts the shown items in the
+   sentence that names them, before the count of the rest. *)
+let summarize ?(around = Fun.id) items =
+  match List.sort String.compare items with
+  | [] -> None
+  | l ->
+    let shown = 5 in
+    let n = List.length l in
+    Some (around (String.concat ", " (CList.firstn (min shown n) l)) ^
+          (if n > shown then Printf.sprintf " (and %d more)" (n - shown) else ""))
+
 (* The two directions are not the same question.
 
    Every challenge constraint, mapped, must hold in the answer: the answer
@@ -2070,7 +2083,6 @@ let check_constraints t ~challenge_env ~answer_env m =
         Pp.(str ("The comparator projected a universe constraint onto " ^
                  Univ.Level.to_string u ^ ", which its level map does not hold."))
   in
-  let shown = 5 in
   let fails ~skip map graph cs =
     let bad = Univ.UnivConstraints.fold (fun (u, k, v) acc ->
         let u' = image map u and v' = image map v in
@@ -2082,14 +2094,7 @@ let check_constraints t ~challenge_env ~answer_env m =
             (Univ.Level.to_string v) :: acc)
         cs []
     in
-    match List.sort String.compare bad with
-    | [] -> None
-    | l ->
-      let n = List.length l in
-      let head = CList.firstn (min shown n) l in
-      Some (Printf.sprintf "the constraint %s does not hold on the other side%s"
-              (String.concat ", " head)
-              (if n > shown then Printf.sprintf " (and %d more)" (n - shown) else ""))
+    summarize ~around:(Printf.sprintf "the constraint %s does not hold on the other side") bad
   in
   let never _ _ = false in
   match fails ~skip:never m.fwd gan (UGraph.constraints_for ~kept:kept_ch gch) with
@@ -2131,9 +2136,9 @@ let check_constraints t ~challenge_env ~answer_env m =
    only of qualities its graph declares ([QGraph.is_declared]): on any
    other it raises an anomaly. The tolerance [answer-universe-constraints]
    skips neither direction. Direction (1) is checked first, and the failing
-   pairs of the first direction that fails are reported as
-   [check_constraints] reports universe constraints: sorted, up to five,
-   then how many more. *)
+   pairs of the first direction that fails are listed as [check_constraints]
+   lists universe constraints ([summarize]): sorted, up to five, then how
+   many more. *)
 let check_elim_constraints ~challenge_env ~answer_env =
   let gch = QGraph.set_ignore_constraints false (Environ.qualities challenge_env)
   and gan = QGraph.set_ignore_constraints false (Environ.qualities answer_env) in
@@ -2148,7 +2153,6 @@ let check_elim_constraints ~challenge_env ~answer_env =
       | Sorts.QVar.Global g -> Sorts.QGlobal.to_string g
       | Sorts.QVar.Var _ | Sorts.QVar.Unif _ -> Sorts.QVar.to_string v
   in
-  let shown = 5 in
   (* The pairs of [from]'s qualities, one of them in Q, that eliminate in
      [from] and not in [onto]. *)
   let fails from onto =
@@ -2164,13 +2168,7 @@ let check_elim_constraints ~challenge_env ~answer_env =
           acc qs)
         [] qs
     in
-    match List.sort String.compare bad with
-    | [] -> None
-    | l ->
-      let n = List.length l in
-      let head = CList.firstn (min shown n) l in
-      Some (String.concat ", " head ^
-            (if n > shown then Printf.sprintf " (and %d more)" (n - shown) else ""))
+    summarize bad
   in
   match fails gch gan with
   | Some e -> Some ("the challenge has an elimination constraint the answer does not: " ^ e)
@@ -2238,7 +2236,12 @@ let rec signature_names acc = function
    inductive blocks and module types this walks -- name ([constr_names] and
    the functions after it), collected once in the run, the first time
    [eq_const_body] asks: for a challenge constant without a body, not
-   stated as data, that the answer gives a transparent body. *)
+   stated as data, that the answer gives a transparent body.
+
+   Returns the declarations that fail; apart from them, the global records
+   that fail, [<universes>] ([check_constraints]) before [<qualities>]
+   ([check_elim_constraints]); and the answer's universe constraints that
+   the tolerance [answer-universe-constraints] skipped, summarized. *)
 let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
   let m = ref (seed_umap t ~challenge_env ~answer_env) in
   let failures = ref [] in
@@ -2279,10 +2282,10 @@ let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
                             KerName.Set.mem (Constant.user c) names
                             || KerName.Set.mem (Constant.canonical c) names)
           in
+          let sort = lazy (stated_sort challenge_env cb) in
           step name (fun m ->
               eq_primitive_type ~challenge_env ~answer_env c c';
-              eq_const_body ~env:(Some challenge_env)
-                ~is_theorem:(CString.Set.mem name theorems) ~named m cb cb'))
+              eq_const_body ~sort ~is_theorem:(CString.Set.mem name theorems) ~named m cb cb'))
     challenge_env ();
   Environ.fold_inductives (fun i mib () ->
       if in_libs libs (MutInd.modpath i) then
@@ -2297,7 +2300,7 @@ let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
         match ModPath.Map.find_opt mp an_modtypes with
         | None -> fail name "missing"
         | Some mt' ->
-          step name (fun m -> eq_modtype ~challenge_env ~answer_env m mp mp mt mt'))
+          step name (fun m -> eq_modtype m mt mt'))
     ch_modtypes;
   (* The declarations set aside as undecided, again, until a pass decides
      none of them. Each pending entry keeps the reason of its last
@@ -2321,7 +2324,12 @@ let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
     check_constraints t ~challenge_env ~answer_env !m
   in
   let qualities = check_elim_constraints ~challenge_env ~answer_env in
-  List.rev !failures, universes, qualities, skipped_answer_constraints
+  let globals =
+    List.filter_map (fun (name, reason) ->
+        Option.map (fun r -> { f_name = name; f_reason = r }) reason)
+      ["<universes>", universes; "<qualities>", qualities]
+  in
+  List.rev !failures, globals, skipped_answer_constraints
 
 (************************************************************************)
 (** {6 The verdict} *)
@@ -2522,7 +2530,7 @@ let run t env access senv0 ~answer_deps ~admitted =
     List.fold_left (fun acc th -> CString.Set.add th.th_name acc) CString.Set.empty
       t.cfg.cfg_theorems
   in
-  let failures, universes, qualities, skipped_answer_constraints =
+  let failures, globals, skipped_answer_constraints =
     compare_declarations t ~challenge_env ~answer_env:env ~libs ~theorems
   in
   let failed_decl =
@@ -2632,12 +2640,9 @@ let run t env access senv0 ~answer_deps ~admitted =
                 | f :: _ ->
                   Some ("the challenge declaration " ^ f.f_name ^ " differs: " ^ f.f_reason)
                 | [] ->
-                  match universes with
-                  | Some u -> Some u
-                  | None ->
-                  match qualities with
-                  | Some q -> Some q
-                  | None ->
+                  match globals with
+                  | g :: _ -> Some g.f_reason
+                  | [] ->
                     match rewrite_rule with
                     | Some c ->
                       Some ("the answer declares a rewrite rule on " ^ Constant.to_string c)
@@ -2681,13 +2686,7 @@ let run t env access senv0 ~answer_deps ~admitted =
   in
   let decls =
     List.map (fun f -> Json.Obj ["name", Json.Str f.f_name; "reason", Json.Str f.f_reason])
-      failures
-    @ (match universes with
-       | None -> []
-       | Some u -> [Json.Obj ["name", Json.Str "<universes>"; "reason", Json.Str u]])
-    @ (match qualities with
-       | None -> []
-       | Some q -> [Json.Obj ["name", Json.Str "<qualities>"; "reason", Json.Str q]])
+      (failures @ globals)
   in
   (* The libraries given with -admit, which the run loads without a check:
      [admitted] as the caller gives it, each by its full logical name, once,

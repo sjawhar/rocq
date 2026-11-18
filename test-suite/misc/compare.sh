@@ -899,14 +899,24 @@ case_norec() {
 # outcome these rules decide, so that the case run with a rocqchk that
 # lacks them stops on that run; its other runs, which pass or which the
 # kernel refuses, follow. Each case keeps its files under one directory of
-# its own, so no link it makes leaves a file system, and removes it at the
-# end.
+# its own and removes it at the end. Every link a case makes points inside
+# that directory, so none leaves a file system, but one: the theories link
+# of shared-user-contrib points to the corelib of the installation in use.
 #
-# The cases, which the count reads too.
+# The cases, which the count and the runner read too.
 library_cases=(pre-dep-forged pre-dep-norec challenge-missing-dep challenge-dir-link
   unchecked-helper unchecked-admit-closure shared-xdg shared-nohome shared-coqpath
   shared-user-contrib same-file-shared same-file-prechecked prechecked-read-file
   prechecked-garbage)
+
+# Whether <name> is one of library_cases.
+is_library_case() { # <name>
+  local c
+  for c in "${library_cases[@]}"; do
+    [ "$c" = "$1" ] && return 0
+  done
+  return 1
+}
 
 # <command>... run in <dir>; a command that fails fails <run>.
 in_dir() { # <run> <dir> <command>...
@@ -1783,13 +1793,9 @@ main() {
       digest) case_digest ;;
       sibling) case_sibling ;;
       norec) case_norec ;;
-      pre-dep-forged|pre-dep-norec|challenge-missing-dep|challenge-dir-link) "case_${1//-/_}" ;;
-      unchecked-helper|unchecked-admit-closure) "case_${1//-/_}" ;;
-      shared-xdg|shared-nohome|shared-coqpath|shared-user-contrib) "case_${1//-/_}" ;;
-      same-file-shared|same-file-prechecked) "case_${1//-/_}" ;;
-      prechecked-read-file|prechecked-garbage) "case_${1//-/_}" ;;
       forgeries) case_forgeries ;;
-      *) run_case "$1" ;;
+      *)
+        if is_library_case "$1"; then "case_${1//-/_}"; else run_case "$1"; fi ;;
     esac
   else
     held=$(held_total)
