@@ -256,10 +256,11 @@ When the proof is completed, you can exit proof mode with commands such as
    then kept in the :file:`.vo` file without a check, and ``rocqchk`` checks
    it, as it checks any proof kept without a check.
    ``rocq compile -vos``, ``rocq compile -vok``, ``rocq repl`` and
-   ``coqidetop``, the ``rocqide`` toplevel, write no file for ``rocqchk`` to
-   check, so they typecheck every opaque proof they run (``rocq compile -vos``
-   skips most of them, but it runs, for instance, a proof that uses
-   :cmd:`Print` and every proof closed under ``Set Universe Polymorphism``).
+   ``coqidetop``, the ``rocqide`` toplevel, write no :file:`.vo` for
+   ``rocqchk`` to check, so they typecheck every opaque proof they run
+   (``rocq compile -vos`` skips most of them, but it runs, for instance, a
+   proof that uses :cmd:`Print` and every proof closed while
+   :flag:`Universe Polymorphism` is on).
    Given the ``-skip-qed-typecheck`` option, which does the
    same as this flag, they warn that it has no effect and go on. In
    ``coqidetop`` with ``-async-proofs on`` and this flag or the
