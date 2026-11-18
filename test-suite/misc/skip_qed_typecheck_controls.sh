@@ -277,7 +277,7 @@ says reset_keeps_bad "$unchecked_proof" option set inline
 # compile builds, and only such a document checks what it discards. With
 # -async-proofs on the Qed is delegated, and the worker restores the state it
 # froze before it, which is no rollback: the skip must still apply.
-# -stm-debug makes each process print its steps to stderr, each line led by
+# -stm-debug makes each process print its steps to stderr, each message led by
 # "<pid>:<name>:<thread>] ", where a proof worker's name is proof:<n>:<m>.
 # A worker prints some lines as it starts, before any task; it prints
 # "reaching:" only while it builds a proof. ran_in_worker fails a case
@@ -291,14 +291,15 @@ ran_in_worker() { # case
         fail "$case/$arm: no proof worker built the proof"; }
   done
 }
-delegated=(-async-proofs on -async-proofs-j 1)
-extra=("${delegated[@]}" -stm-debug)
+async_proofs=(-async-proofs on -async-proofs-j 1)
+extra=("${async_proofs[@]}" -stm-debug)
 skips async_bad "$bad" 'Qed.'
 ran_in_worker async_bad
 # A block that a proof worker runs takes its Fail Qed or Succeed Qed with it.
-# The worker records no check, so the force of the control is the only check
-# there. Without it, Succeed would keep the ill-typed proof unchecked in the
-# .vo, or, under Admitted, nowhere.
+# The worker's document is not one rocq compile builds, so it checks nothing
+# it discards, and the force of the control is the only check there.
+# Without it, the ill-typed proof would pass Succeed: a Qed after it would
+# keep the proof unchecked in the .vo, an Admitted after it in no file.
 stops_with_kernel_error succeed_async_bad "$bad" 'Succeed Qed.' 'Qed.'
 ran_in_worker succeed_async_bad
 stops_with_kernel_error succeed_admitted_async_bad "$bad" 'Succeed Qed.' \
@@ -311,7 +312,7 @@ says fail_admitted_async_bad 'The command has indeed failed with message:' \
 says fail_admitted_async_bad "$kernel_error" plain option set inline
 # -stm-debug prints process ids, so a case that compares outputs runs
 # without it.
-extra=("${delegated[@]}")
+extra=("${async_proofs[@]}")
 same succeed_async_good 0 "$good" 'Succeed Qed.' 'Qed.'
 # The stm runs some commands under a resilience that drops their error, so the
 # error of a check a rollback ran is raised again before the document ends.
@@ -320,7 +321,7 @@ same succeed_async_good 0 "$good" 'Succeed Qed.' 'Qed.'
 # case never reaches the raise in Opaques.Summary.join. Without the skip this
 # file stops at End S, with "Open proofs remain", so only the status is the
 # same in every arm.
-extra=(-async-proofs on -async-proofs-j 1)
+extra=("${async_proofs[@]}")
 same_status resilient_reset_bad 1 'Section S.' 'Variable n : nat.' "$bad" 'Qed.' \
   'Reset discarded_bad.' 'Definition x := 0.' 'End S.'
 says resilient_reset_bad "$kernel_error" option set inline
@@ -348,7 +349,7 @@ extra=(-vok)
 forced_stops vok_bad "$bad" 'Qed.'
 same_status vok_good 0 "$good" 'Qed.'
 says vok_good "$ignored_option" option
-extra=(-vok "${delegated[@]}" -stm-debug)
+extra=(-vok "${async_proofs[@]}" -stm-debug)
 same_status vok_async_bad 1 "$bad" 'Qed.'
 ran_in_worker vok_async_bad
 says vok_async_bad "$ignored_option" option
@@ -383,7 +384,7 @@ for tool in "rocq repl" coqidetop; do
   [ -x "$BIN/${tool%% *}" ] || { echo "skipping $tool: not built"; continue; }
   name=${tool##* }
   forced_stops "${name}_bad" "$bad" 'Qed.'
-  extra=(-async-proofs on -async-proofs-j 1)
+  extra=("${async_proofs[@]}")
   forced_stops "${name}_async_bad" "$bad" 'Qed.'
   # The message is one of the command line's injections, so -w silences it,
   # and the check stays on.
