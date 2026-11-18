@@ -127,8 +127,8 @@
 #      cofixpoint, since a walk that skipped them would miss the axiom.
 #  (t) W2.v: opaque proofs that reach an axiom, or a relaxed typing flag,
 #      in one place only: the type of a binder, of a let and of a
-#      fixpoint and of a cofixpoint, the body of a let, the type of a
-#      cast, the return clause of a match, the default value and an
+#      fixpoint and of a cofixpoint, the bound value of a let, the type of
+#      a cast, the return clause of a match, the default value and an
 #      element of an array literal, and an inductive type that the
 #      body names, whose constructor names the axiom or which holds the
 #      flag, at -j 1 and at -j 3, which takes every body from the records:
@@ -137,10 +137,15 @@
 #      that a record keeps (Check_closure.opaque_body_refs): a walk that
 #      skipped a place misses its axiom at -j 1 and at -j 3, and a record
 #      that left out an inductive type misses its axiom or flag at -j 3.
+#      in_ctor's line is the exception: its proof names the inductive type
+#      Hc through its match (the Case arm of Check_closure.walk adds
+#      ci_ind) and through the constructor hc, so that line fails only when
+#      the walk loses both, or when a record leaves out Hc.
 #  (u) W3.v: opaque proofs that reach an axiom in one place only: the
-#      body of a let after its "in" (in_letin), and the argument of a
-#      primitive projection (in_proj), at -j 1 and at -j 3, which takes
-#      every body from the records: M = 0. A walk that skipped the place
+#      body of a let, after its "in" (in_letin; the let's bound value is
+#      what (t)'s in_letbody covers), and the argument of a primitive
+#      projection (in_proj), at -j 1 and at -j 3, which takes every body
+#      from the records: M = 0. A walk that skipped the place
 #      (Check_closure.push_subterms, its LetIn and Proj arms) misses its
 #      axiom at -j 1 and at -j 3.
 #
@@ -294,10 +299,13 @@ EOF
 rocq c -native-compiler no -Q "$d/walk" SRWalk "$d/walk/W.v"
 
 # W2.v, for (t): each opaque proof reaches its axiom, or its flag, in one
-# place only, named after it; the axiom is hidden in a let that only that
-# place holds. in_ctor and in_ind reach their axiom only through the
-# constructor types of an inductive type the body names, in_positivity and
-# in_uip their flag only through such an inductive type.
+# place only, named after it. Where that place is a type (of a binder, a
+# let, a cast, a return clause, a fixpoint or a cofixpoint), that type is
+# a let that binds the axiom, so that the axiom appears in that place
+# only; the default value of in_arrdefault is such a let too. in_ctor and
+# in_ind reach their axiom only through the constructor types of an
+# inductive type the body names, in_positivity and in_uip their flag only
+# through such an inductive type.
 cat > "$d/walk2/W2.v" <<'EOF'
 From Corelib Require Import PrimArray.
 Open Scope array_scope.
@@ -362,9 +370,10 @@ EOF
 rocq c -native-compiler no -Q "$d/walk2" SRWalk2 "$d/walk2/W2.v"
 
 # W3.v, for (u): each opaque proof reaches its axiom in one place only:
-# in_letin in the body of a let, after its "in", whose bound value and
-# type name no axiom; in_proj in the record argument of a primitive
-# projection, which the elaborated term keeps as a projection node.
+# in_letin in the body of a let, after its "in"; the let's bound value,
+# which (t)'s in_letbody covers, and its type name no axiom. in_proj
+# reaches it in the record argument of a primitive projection, which the
+# elaborated term keeps as a projection node.
 cat > "$d/walk3/W3.v" <<'EOF'
 Axiom axletin : nat.
 Lemma in_letin : nat.
@@ -991,9 +1000,9 @@ for name in s-j1 s-j3; do
 done
 
 # (t) Each proof of W2 reaches its axiom or flag in one place only: the
-# type of a binder, of a let, of a fixpoint and of a cofixpoint, the body
-# of a let, the type of a cast, the return clause of a match, the default
-# value and an element of an array, and the constructor types
+# type of a binder, of a let, of a fixpoint and of a cofixpoint, the bound
+# value of a let, the type of a cast, the return clause of a match, the
+# default value and an element of an array, and the constructor types
 # or the flags of an inductive type the body names. A walk that skipped a
 # place misses its line at -j 1 and at -j 3; a record that left out an
 # inductive type misses the lines of in_ctor, in_ind, in_positivity and
@@ -1017,12 +1026,8 @@ for name in t-j1 t-j3; do
   has "$name" 'flag in_uip uip SRWalk2.W2.sq'
 done
 
-# (u) Each proof of W3 reaches its axiom in one place only: the body of a
-# let after its "in", whose bound value and type name no axiom, in
-# in_letin; the record argument of a primitive projection, which the
-# elaborated term keeps as a projection node, in in_proj. A walk that
-# skipped the place misses its line at -j 1 and at -j 3. M = 0: -j 3 took
-# every body from the records.
+# (u) The places of W3.v, as listed above. M = 0: -j 3 took every body
+# from the records.
 report u -Q "$d/walk3" SRWalk3 -norec SRWalk3.W3
 [ "$reads" = 0 ] || { cat "$d/u-j3.err" >&2; fail "(u) -j 3: $reads bodies read, all were checked"; }
 for name in u-j1 u-j3; do
