@@ -271,9 +271,11 @@ says reset_keeps_bad "$unchecked_proof" option set inline
 # (j) neither a proof worker nor an interactive session is a document rocq
 # compile builds, and only such a document checks what it discards. With
 # -async-proofs on the Qed is delegated, and the worker restores the state it
-# froze before it, which is no rollback: the skip must still apply. The
-# document decides, so a compile that names a worker id still checks.
-extra=(-async-proofs on -async-proofs-j 1)
+# froze before it, which is no rollback: the skip must still apply.
+# -async-proofs-delegation-threshold 0 delegates it in every arm, even when
+# the arm before recorded a short build time for the proof in .case.aux.
+# The document decides, so a compile that names a worker id still checks.
+extra=(-async-proofs on -async-proofs-j 1 -async-proofs-delegation-threshold 0)
 skips async_bad "$bad" 'Qed.'
 # The stm runs some commands under a resilience that drops their error, so the
 # error of a check a rollback ran is raised again before the document ends.
@@ -286,6 +288,15 @@ extra=(-async-proofs on -async-proofs-j 1)
 same_status resilient_reset_bad 1 'Section S.' 'Variable n : nat.' "$bad" 'Qed.' \
   'Reset discarded_bad.' 'Definition x := 0.' 'End S.'
 says resilient_reset_bad "$kernel_error" option set inline
+# A block that a proof worker runs takes its Fail Qed or Succeed Qed with it.
+# The worker records no check, so the force of the control is the only check
+# there. Without it, Succeed would keep the ill-typed proof unchecked in the
+# .vo, or, under Admitted, nowhere.
+extra=(-async-proofs on -async-proofs-j 1 -async-proofs-delegation-threshold 0)
+rolls_back succeed_async_bad "$bad" 'Succeed Qed.' 'Qed.'
+rolls_back succeed_admitted_async_bad "$bad" 'Succeed Qed.' 'Admitted.'
+same succeed_async_good 0 "$good" 'Succeed Qed.' 'Qed.'
+same_status fail_admitted_async_bad 0 "$bad" 'Fail Qed.' 'Admitted.'
 extra=(-worker-id qed_rollback)
 rolls_back worker_id_reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
 
@@ -306,7 +317,8 @@ extra=(-vok)
 forced_stops vok_bad "$bad" 'Qed.'
 same_status vok_good 0 "$good" 'Qed.'
 says vok_good "$ignored_option" option
-extra=(-vok -async-proofs on -async-proofs-j 1)
+extra=(-vok -async-proofs on -async-proofs-j 1
+  -async-proofs-delegation-threshold 0)
 same_status vok_async_bad 1 "$bad" 'Qed.'
 says vok_async_bad "$ignored_option" option
 # -l loads its file before the first line of the case, so the arm that sets
@@ -330,8 +342,9 @@ extra=()
 # proof too: the check is forced on before the session reads anything, the
 # files -l loads included, and the option only warns, since a project passes
 # it to every command through its _CoqProject, an editor among them. These
-# cases read the body through -l, with the proof the session keeps, and with
-# one delegated to a proof worker.
+# cases read the body through -l, with and without -async-proofs on: either
+# way a toplevel runs each sentence of a -l file as it reads it, so the Qed
+# finds its proof already run and checks it in the main process.
 for tool in "rocq repl" coqidetop; do
   # coqidetop belongs to a package a build can leave out.
   [ -x "$BIN/${tool%% *}" ] || { echo "skipping $tool: not built"; continue; }
