@@ -19,8 +19,12 @@
     axiom closure, and writes a JSON verdict.
 
     The comparison is structural: two declarations are equal when their terms
-    are the same after a one-to-one renaming of universe levels. There is no
-    conversion and no reduction, and no constant is unfolded. *)
+    are the same after a one-to-one renaming of universe levels and, inside
+    the signature of a functor, of its parameters. There is no conversion and
+    no reduction, and no constant is unfolded. Whether the answer may fill a
+    constant that the challenge leaves without a body is read from the sort
+    of the type the challenge states for it ([stated_sort]), not from that
+    type reduced. *)
 
 open Util
 open Names
@@ -673,14 +677,37 @@ let read_config file =
     rest of the map is built while the declarations are compared.
 
     A level of a polymorphic context is a [Level.var], bound by position, so
-    it is compared by its index and never enters the map. *)
+    it is compared by its index and never enters the map.
+
+    A functor parameter is named by a counter of the process that compiled
+    the functor ([MBId.make]), which the two sides need not share. While the
+    signature of a functor is compared ([eq_signature]), the map also holds
+    the substitution in force: each challenge parameter of the functors
+    being compared, to the answer's parameter of the same position. Each
+    challenge name is renamed by it before it is compared ([rename]), as
+    the kernel's subtyping check ([Subtyping.check_modtypes]) renames a
+    functor's parameters. Outside a functor there is no substitution and no
+    name is renamed. *)
 
 type umap = {
   fwd : Univ.Level.t Univ.Level.Map.t;  (** challenge to answer *)
   bwd : Univ.Level.t Univ.Level.Map.t;  (** answer to challenge *)
+  params : Mod_subst.substitution option;
+      (** the challenge's parameters of the functors whose signatures are
+          being compared, each to the answer's; [None] outside them *)
+  bound : MBId.Set.t;  (** the answer's parameters of those functors *)
 }
 
-let empty_umap = { fwd = Univ.Level.Map.empty; bwd = Univ.Level.Map.empty }
+let empty_umap = {
+  fwd = Univ.Level.Map.empty; bwd = Univ.Level.Map.empty;
+  params = None; bound = MBId.Set.empty;
+}
+
+(* The challenge's name [x], with each functor parameter it lies under
+   renamed to the answer's ([umap.params]); [f] substitutes a name. *)
+let rename m f x = match m.params with
+  | None -> x
+  | Some s -> f s x
 
 type diff = string
 
@@ -689,15 +716,16 @@ exception Diff of diff
 let diff fmt = Printf.ksprintf (fun s -> raise (Diff s)) fmt
 
 (* A universe whose levels no comparison so far has mapped, and that one
-   pass cannot map alone (two entries of one increment). The declaration is
-   compared again once the others have been, since a later declaration --
-   the one that introduced those levels -- may map them. *)
+   pass cannot map alone (two entries of one increment), or a constraint of
+   a template context on a global level the map does not hold yet. The
+   declaration is compared again once the others have been, since a later
+   declaration -- the one that introduced those levels -- may map them. *)
 exception Undecided of diff
 
 let level_name u = Univ.Level.to_string u
 
 let add_level m u v =
-  { fwd = Univ.Level.Map.add u v m.fwd; bwd = Univ.Level.Map.add v u m.bwd }
+  { m with fwd = Univ.Level.Map.add u v m.fwd; bwd = Univ.Level.Map.add v u m.bwd }
 
 let map_level m u v =
   match Univ.Level.var_index u, Univ.Level.var_index v with
@@ -846,10 +874,11 @@ let map_annot a1 a2 =
 (** {6 Structural equality of terms}
 
     No conversion, no reduction, and no constant is unfolded: two terms are
-    equal when they have the same shape, the same kernel names and universes
-    the map pairs. Binder names are not compared, their relevance is. A
-    [Cast] is a type ascription the kernel has already used, so it is
-    stripped on both sides. *)
+    equal when they have the same shape, the same kernel names (a challenge
+    name under a functor parameter renamed to the answer's parameter first,
+    [rename]) and universes the map pairs. Binder names are not compared,
+    their relevance is. A [Cast] is a type ascription the kernel has already
+    used, so it is stripped on both sides. *)
 
 let rec eq_constr m c1 c2 =
   let open Constr in
@@ -871,19 +900,23 @@ let rec eq_constr m c1 c2 =
     if not (Int.equal (Array.length a1) (Array.length a2)) then diff "number of arguments";
     Array.fold_left2 eq_constr (eq_constr m f1 f2) a1 a2
   | Const (c1, u1), Const (c2, u2) ->
+    let c1 = rename m Mod_subst.subst_constant c1 in
     if not (Constant.CanOrd.equal c1 c2) then
       diff "constant %s against %s" (Constant.to_string c1) (Constant.to_string c2);
     map_instance m u1 u2
   | Ind ((i1, n1), u1), Ind ((i2, n2), u2) ->
+    let i1 = rename m Mod_subst.subst_mind i1 in
     if not (MutInd.CanOrd.equal i1 i2 && Int.equal n1 n2) then
       diff "inductive %s against %s" (MutInd.to_string i1) (MutInd.to_string i2);
     map_instance m u1 u2
   | Construct (((i1, n1), k1), u1), Construct (((i2, n2), k2), u2) ->
+    let i1 = rename m Mod_subst.subst_mind i1 in
     if not (MutInd.CanOrd.equal i1 i2 && Int.equal n1 n2 && Int.equal k1 k2) then
       diff "constructor of %s against %s" (MutInd.to_string i1) (MutInd.to_string i2);
     map_instance m u1 u2
   | Case (ci1, u1, pms1, p1, iv1, s1, br1), Case (ci2, u2, pms2, p2, iv2, s2, br2) ->
     let (m1, n1) = ci1.ci_ind and (m2, n2) = ci2.ci_ind in
+    let m1 = rename m Mod_subst.subst_mind m1 in
     if not (MutInd.CanOrd.equal m1 m2 && Int.equal n1 n2) then diff "match on another inductive";
     if not (Int.equal ci1.ci_npar ci2.ci_npar) then diff "match parameters";
     let m = map_instance m u1 u2 in
@@ -915,6 +948,7 @@ let rec eq_constr m c1 c2 =
     if not (Int.equal i1 i2) then diff "cofixpoint structure";
     eq_recdecl m (nas1, tl1, bl1) (nas2, tl2, bl2)
   | Proj (p1, r1, c1), Proj (p2, r2, c2) ->
+    let p1 = rename m Mod_subst.subst_proj p1 in
     if not (Projection.CanOrd.equal p1 p2) then
       diff "projection %s against %s" (Projection.to_string p1) (Projection.to_string p2);
     map_relevance r1 r2;
@@ -964,41 +998,95 @@ let eq_universes m u1 u2 = match u1, u2 with
   | Monomorphic, Polymorphic _ -> diff "a monomorphic declaration is polymorphic in the answer"
   | Polymorphic _, Monomorphic -> diff "a polymorphic declaration is monomorphic in the answer"
 
-(* What the challenge leaves without a body, the answer may fill only when
-   that is the task: a proof. [Admitted], [Axiom] and [Parameter] give the
-   same .vo content, so the kind of the declaration cannot tell them apart;
-   its type can. A constant whose type is a proposition is a lemma, and
-   proving it is the whole point. A constant whose type is data -- an
-   [open definition], which the spec lists as a non-goal -- must stay
-   without a body, or the answer could choose the function the statements
-   are about. A theorem the config names is a proof whatever its sort.
+(* What the challenge leaves without a body ([Admitted], [Axiom] and
+   [Parameter] give the same .vo content, so the kind of the declaration
+   cannot tell them apart), the answer may fill under two rules, both read
+   from the sort of the type the challenge states for the constant
+   ([stated_sort]), never from that type reduced nor from the answer's.
 
-   The sort is the one the answer environment gives the answer's own type,
-   which R2 has already found equal to the challenge's. A type the answer
-   environment cannot type is treated as data: the kernel check of the
-   answer would have refused it. *)
-let is_proposition env (cb : constant_body) =
-  let env = match cb.const_universes with
-    | Monomorphic -> env
-    | Polymorphic ctx ->
-      Environ.push_context ~strict:false (UVars.AbstractContext.repr ctx) env
-  in
-  match Typeops.infer_type env cb.const_type with
-  | j ->
-    (match j.Environ.utj_type with
-     | Sorts.Prop | Sorts.SProp -> true
-     | Sorts.Set | Sorts.Type _ | Sorts.QSort _ -> false)
-  | exception e when CErrors.noncritical e -> false
+   (1) The answer may give it a body, opaque or transparent, only when the
+   challenge states it as a proposition or the config names it as a
+   theorem. Proving a lemma is the point. A constant of any other sort --
+   an open definition -- must stay without a body, or the answer could
+   choose the function the statements are about, unless the config names
+   it: the challenge then asks the answer to choose it, as for a function
+   [f] left open with a lemma [f_spec] about it.
 
-let eq_const_body ~env ~is_theorem m (cb1 : constant_body) (cb2 : constant_body) =
+   (2) A constant that another compared challenge declaration names in what
+   the comparison reads of it, a type or a transparent body but not an
+   opaque proof ([named], which [compare_declarations] computes with
+   [constr_names]), must stay opaque, whether the config names it or not,
+   unless the challenge states it as data. The challenge states that
+   declaration about a constant that does not unfold, and a transparent
+   body would let conversion unfold it there, which changes what the
+   declaration states:
+   with [L : exists n, n = 0] left without a body,
+   [L = ex_intro _ 0 eq_refl] is not provable, and once [L] is defined as
+   that term it is proved by reflexivity. A constant that no other
+   declaration names changes no statement but its own. A function
+   [f : nat -> nat] that the config names is not held to this: it is data,
+   and [f_spec] is stated about the function the answer chooses.
+
+   In [Prop] or [SProp], the constant is a proposition. In [Set] or [Type],
+   it is data, even when its type unfolds to a proposition, so a challenge
+   that wants a lemma kept opaque states it in [Prop]. In a sort variable
+   or a global sort, when the type cannot be typed, and for a field of a
+   module type, the run cannot tell, and each rule takes its refusing side:
+   such a constant is no proposition for (1) and no data for (2). *)
+type sort_class = Proposition | Data | Undetermined
+
+(* The class of the sort of the type that the challenge states for its
+   constant [cb]: the sort [Typeops.infer_type] gives that type in [env],
+   the challenge environment, under the constant's own typing flags
+   ([CheckFlags.set_local_flags]) and universe context, as the kernel check
+   types a constant ([Mod_checking.check_constant_declaration]). The type
+   is not reduced, and the challenge environment holds no declaration of
+   the answer's, so no body the answer chose is unfolded. [Undetermined]
+   for a sort variable or a global sort ([QSort]), for a type that cannot
+   be typed there, and with no environment ([None]): a field of a module
+   type, whose type may name the other fields of the module type and the
+   functor parameters, which no environment holds. *)
+let stated_sort env (cb : constant_body) =
+  match env with
+  | None -> Undetermined
+  | Some env ->
+    let sort () =
+      let env = CheckFlags.set_local_flags cb.const_typing_flags env in
+      let env = match cb.const_universes with
+        | Monomorphic -> env
+        | Polymorphic ctx ->
+          Environ.push_context ~strict:false (UVars.AbstractContext.repr ctx) env
+      in
+      (Typeops.infer_type env cb.const_type).Environ.utj_type
+    in
+    match sort () with
+    | Sorts.Prop | Sorts.SProp -> Proposition
+    | Sorts.Set | Sorts.Type _ -> Data
+    | Sorts.QSort _ -> Undetermined
+    | exception e when CErrors.noncritical e -> Undetermined
+
+(* [env] is the challenge environment that [stated_sort] reads, [None] for
+   a field of a module type; [is_theorem] says whether the config names
+   the constant as a theorem, and [named] whether another compared
+   challenge declaration names it. The sort and [named] are forced only by
+   a constant the challenge leaves without a body and the answer fills. *)
+let eq_const_body ~env ~is_theorem ~named m (cb1 : constant_body) (cb2 : constant_body) =
   map_relevance cb1.const_relevance cb2.const_relevance;
   let m = eq_universes m cb1.const_universes cb2.const_universes in
   let m = eq_constr m cb1.const_type cb2.const_type in
+  let sort = lazy (stated_sort env cb1) in
   match cb1.const_body, cb2.const_body with
   | Undef _, Undef _ -> m
-  | Undef _, (Def _ | OpaqueDef _) ->
-    if is_theorem || is_proposition env cb2 then m
-    else diff "the challenge leaves this declaration open and the answer defines it"
+  | Undef _, (Def _ | OpaqueDef _)
+    when not is_theorem
+         && (match Lazy.force sort with Proposition -> false | Data | Undetermined -> true) ->
+    diff "the challenge leaves this declaration open and the answer defines it"
+  | Undef _, Def _
+    when (match Lazy.force sort with Data -> false | Proposition | Undetermined -> true)
+         && Lazy.force named ->
+    diff "the challenge leaves this constant without a body, another challenge \
+          declaration names it, and the answer gives it a transparent body"
+  | Undef _, (Def _ | OpaqueDef _) -> m
   | Undef _, _ -> diff "an assumption is a primitive or a symbol in the answer"
   (* An opaque body is never compared, but a proof stays a proof: a Qed in
      the challenge may not become a transparent definition, which would let
@@ -1066,14 +1154,80 @@ let eq_one_ind m (mip1 : one_inductive_body) (mip2 : one_inductive_body) =
   let m = Array.fold_left2 eq_constr m mip1.mind_user_lc mip2.mind_user_lc in
   eq_record m mip1.mind_record mip2.mind_record
 
+(* The template data of two template-polymorphic blocks ([mind_template]),
+   by which the kernel types an application of the block: which parameters
+   bind a sort, and its levels ([template_param_arguments]); the block's
+   sort in terms of those ([template_concl]); the context that binds them
+   ([template_context]); and the levels it instantiates them with where it
+   reads the block at no application ([template_defaults]). A level that
+   the template context binds is a [Level.var], compared by its position,
+   as [eq_universes] compares a polymorphic context's; every other level
+   goes through the map, so the same block declared after one more
+   universe compares equal. The context's universe constraints are equal
+   when, each global level they name taken through the map, they are the
+   same set; a global level that no comparison has mapped yet leaves the
+   block undecided ([Undecided]). Its elimination constraints relate
+   qualities, which are compared by identity. A difference names the
+   field. *)
+let[@warning "+9"] eq_template m
+    { template_param_arguments; template_concl; template_context; template_defaults }
+    (t2 : template_universes) =
+  let field what f = try f () with Diff d -> diff "the template-polymorphic %s: %s" what d in
+  if not (Int.equal (List.length template_param_arguments)
+            (List.length t2.template_param_arguments))
+  then diff "the template-polymorphic parameters";
+  if UVars.AbstractContext.size template_context
+     <> UVars.AbstractContext.size t2.template_context
+  then diff "the template-polymorphic universe context has another size";
+  let m =
+    field "default universes" (fun () ->
+        map_instance m template_defaults t2.template_defaults)
+  in
+  let m = field "conclusion" (fun () -> map_sort m template_concl t2.template_concl) in
+  let m =
+    List.fold_left2 (fun m a1 a2 -> match a1, a2 with
+        | Some s1, Some s2 -> field "parameters" (fun () -> map_sort m s1 s2)
+        | None, None -> m
+        | (None | Some _), _ -> diff "the template-polymorphic parameters")
+      m template_param_arguments t2.template_param_arguments
+  in
+  let (e1, c1) = UVars.UContext.constraints (UVars.AbstractContext.repr template_context) in
+  let (e2, c2) = UVars.UContext.constraints (UVars.AbstractContext.repr t2.template_context) in
+  let other () = diff "the template-polymorphic universe context has other constraints" in
+  if not (Sorts.ElimConstraints.equal e1 e2) then other ();
+  if not (Int.equal (Univ.UnivConstraints.cardinal c1) (Univ.UnivConstraints.cardinal c2)) then
+    other ();
+  let level u = match Univ.Level.var_index u, Univ.Level.name u with
+    | Some _, _ | None, None -> u
+    | None, Some _ ->
+      match Univ.Level.Map.find_opt u m.fwd with
+      | Some v -> v
+      | None ->
+        raise (Undecided (Printf.sprintf
+          "the template-polymorphic universe context constrains the universe %s, \
+           which no comparison has mapped"
+          (level_name u)))
+  in
+  let c1 =
+    Univ.UnivConstraints.fold (fun (u, k, v) acc ->
+        Univ.UnivConstraints.add (level u, k, level v) acc)
+      c1 Univ.UnivConstraints.empty
+  in
+  if not (Univ.UnivConstraints.equal c1 c2) then other ();
+  m
+
 let eq_mib_body m (mib1 : mutual_inductive_body) (mib2 : mutual_inductive_body) =
   if mib1.mind_finite <> mib2.mind_finite then diff "the recursivity kind";
   if not (Int.equal mib1.mind_nparams mib2.mind_nparams) then diff "the number of parameters";
   if not (Int.equal mib1.mind_nparams_rec mib2.mind_nparams_rec) then
     diff "the number of uniform parameters";
   if mib1.mind_private <> mib2.mind_private then diff "the private flag";
-  if Option.has_some mib1.mind_template <> Option.has_some mib2.mind_template then
-    diff "a template-polymorphic inductive type is not template-polymorphic in the answer";
+  let template = match mib1.mind_template, mib2.mind_template with
+    | None, None -> None
+    | Some t1, Some t2 -> Some (t1, t2)
+    | (None | Some _), _ ->
+      diff "a template-polymorphic inductive type is not template-polymorphic in the answer"
+  in
   eq_typing_flags mib1.mind_typing_flags mib2.mind_typing_flags;
   eq_variance mib1.mind_variance mib2.mind_variance;
   eq_variance mib1.mind_sec_variance mib2.mind_sec_variance;
@@ -1081,7 +1235,50 @@ let eq_mib_body m (mib1 : mutual_inductive_body) (mib2 : mutual_inductive_body) 
   let m = eq_rel_context m mib1.mind_params_ctxt mib2.mind_params_ctxt in
   if not (Int.equal (Array.length mib1.mind_packets) (Array.length mib2.mind_packets)) then
     diff "the number of types in the block";
-  Array.fold_left2 eq_one_ind m mib1.mind_packets mib2.mind_packets
+  let m = Array.fold_left2 eq_one_ind m mib1.mind_packets mib2.mind_packets in
+  (* after the types, whose terms may map a global level the template
+     context's constraints name *)
+  match template with
+  | None -> m
+  | Some (t1, t2) -> eq_template m t1 t2
+
+(* The primitive type that [env] registers the constant [c] as
+   ([Primitive int := #int63_type.]): [#int63_type], [#float64_type],
+   [#string_type] or [#array_type], or [None]. A registration names a
+   constant, compared with [c] by canonical name, as conversion compares
+   constants, so another name of a registered constant is that primitive
+   type too. The record is bound field by field, so a field the kernel adds
+   to it is a compile error here. The registrations of inductive types are
+   not read: they choose the inductive type in which a primitive operation
+   builds its result, and a primitive operation is a [Primitive] constant,
+   which [eq_const_body] compares. *)
+let primitive_type env c =
+  let[@warning "+9"] Retroknowledge.{
+      retro_int63; retro_float64; retro_string; retro_array;
+      retro_bool = _; retro_carry = _; retro_pair = _; retro_cmp = _; retro_f_cmp = _;
+      retro_f_class = _;
+    } = Environ.retroknowledge env
+  in
+  let is = function Some c' -> Constant.CanOrd.equal c c' | None -> false in
+  let name t = Some ("#" ^ CPrimitives.prim_type_to_string t) in
+  if is retro_int63 then name CPrimitives.PT_int63
+  else if is retro_float64 then name CPrimitives.PT_float64
+  else if is retro_string then name CPrimitives.PT_string
+  else if is retro_array then name CPrimitives.PT_array
+  else None
+
+(* A compared constant, [c1] as the challenge environment names it and [c2]
+   as the answer environment does, is the same primitive type on both
+   sides, or none on either ([primitive_type]). A primitive type's body is
+   [Undef], as a parameter's, so [eq_const_body] does not see the
+   difference, which changes what the constant is: a parameter that the
+   answer registers as a primitive type has literals, so the answer could
+   prove it inhabited. *)
+let eq_primitive_type ~challenge_env ~answer_env c1 c2 =
+  let t1 = primitive_type challenge_env c1 and t2 = primitive_type answer_env c2 in
+  if not (Option.equal String.equal t1 t2) then
+    let name = function Some t -> "the primitive type " ^ t | None -> "no primitive type" in
+    diff "this constant is %s in the challenge and %s in the answer" (name t1) (name t2)
 
 (************************************************************************)
 (** {6 Module types}
@@ -1089,25 +1286,78 @@ let eq_mib_body m (mib1 : mutual_inductive_body) (mib2 : mutual_inductive_body) 
     A field of a [Module Type] is not a constant of the environment, so the
     walk over the environment's constants does not see it. Each challenge
     module type is compared with the answer's module type of the same path,
-    field by field. *)
+    field by field.
 
-let rec eq_signature ~env m s1 s2 =
+    Of a module type, and of a module field of one, the expanded signature
+    ([mod_type]) is compared. The algebraic form it was expanded from
+    ([mod_type_alg]) and a module field's implementation ([mod_expr]) are
+    not read, nor any module path they name; the delta resolver
+    ([mod_delta]) only names the fields (below). A field is matched by its
+    label, and the kernel names that the fields hold are compared by
+    [eq_constr] and, for the symbols of a block of rewrite rules, here,
+    each challenge name renamed first ([rename]).
+
+    A functor is compared parameter by parameter. The challenge's parameter
+    [p1] stands for the answer's parameter [p2] of the same position in
+    [p1]'s own type and in the rest of the signature ([umap.params]), as
+    the kernel's subtyping check ([Subtyping.check_modtypes]) maps them.
+    Once the functor is compared, the substitution and the answer's
+    parameters bound around it are those of before it; the levels mapped
+    inside stay mapped.
+
+    Each side's structure is at a place: the module path its fields' kernel
+    names are under (the module type's path, [MPbound p] for the type of a
+    functor parameter [p], [MPdot (mp, l)] for a module or module type
+    field [l] of a structure at [mp]), and the delta resolver of the module
+    body it is the signature of, which gives a field its canonical name.
+    So a field's constant is named as [Modops.add_structure] names the
+    fields of a module that it adds to an environment, and under a functor
+    the answer's path is the challenge's with each challenge parameter
+    replaced by the answer's. [eq_primitive_type] reads that name. No
+    environment holds the fields of a module type or the functor
+    parameters, which a field's type may name, so a field is compared with
+    no environment to type it in ([stated_sort]). *)
+
+let rec eq_signature ~challenge_env ~answer_env m at1 at2 s1 s2 =
   match s1, s2 with
-  | NoFunctor b1, NoFunctor b2 -> eq_structure ~env m b1 b2
-  | MoreFunctor (_, t1, s1), MoreFunctor (_, t2, s2) ->
-    eq_signature ~env (eq_modtype ~env m t1 t2) s1 s2
+  | NoFunctor b1, NoFunctor b2 -> eq_structure ~challenge_env ~answer_env m at1 at2 b1 b2
+  | MoreFunctor (p1, t1, s1), MoreFunctor (p2, t2, s2) ->
+    (* The answer's parameters in scope stay one-to-one with the
+       challenge's: were [p2] bound again inside, a name under either
+       binding would stand for both. *)
+    if MBId.Set.mem p2 m.bound then diff "the answer binds one functor parameter twice";
+    let mp2 = ModPath.MPbound p2 in
+    (* [add_mbid], not [join]: each challenge parameter is renamed once, so
+       one that has the name of an answer parameter is not renamed again. *)
+    let params =
+      Mod_subst.add_mbid p1 mp2 (Mod_subst.empty_delta_resolver mp2)
+        (Option.default Mod_subst.empty_subst m.params)
+    in
+    let inner = { m with params = Some params; bound = MBId.Set.add p2 m.bound } in
+    let inner =
+      eq_modtype ~challenge_env ~answer_env inner (ModPath.MPbound p1) mp2 t1 t2
+    in
+    let inner = eq_signature ~challenge_env ~answer_env inner at1 at2 s1 s2 in
+    { inner with params = m.params; bound = m.bound }
   | NoFunctor _, MoreFunctor _ -> diff "a module type is a functor in the answer"
   | MoreFunctor _, NoFunctor _ -> diff "a functor is not a functor in the answer"
 
-and eq_structure ~env m b1 b2 =
+and eq_structure ~challenge_env ~answer_env m (mp1, delta1) (mp2, delta2) b1 b2 =
   List.fold_left (fun m (l, f1) ->
       match List.assoc_opt l b2 with
       | None -> diff "the field %s is missing from the answer" (Id.to_string l)
       | Some f2 ->
         match f1, f2 with
-        (* A field of a module type is never a config-named theorem: the
-           config names a constant of the environment. *)
-        | SFBconst c1, SFBconst c2 -> eq_const_body ~env ~is_theorem:false m c1 c2
+        | SFBconst c1, SFBconst c2 ->
+          eq_primitive_type ~challenge_env ~answer_env
+            (Mod_subst.constant_of_delta_kn delta1 (KerName.make mp1 l))
+            (Mod_subst.constant_of_delta_kn delta2 (KerName.make mp2 l));
+          (* A field of a module type is never a config-named theorem: the
+             config names a constant of the environment. With no
+             environment its sort is [Undetermined], so the first rule of
+             [eq_const_body] refuses any body the answer gives it, and
+             [named] is never asked. *)
+          eq_const_body ~env:None ~is_theorem:false ~named:(Lazy.from_val true) m c1 c2
         | SFBmind i1, SFBmind i2 -> eq_mib_body m i1 i2
         | SFBrules r1, SFBrules r2 ->
           (* The symbols the block rewrites must be the same ones, in the
@@ -1116,18 +1366,28 @@ and eq_structure ~env m b1 b2 =
              switch of the config, which refuses every one of them unless
              the task permits them. *)
           let names b = List.map fst b.rewrules_rules in
-          if not (CList.equal Constant.CanOrd.equal (names r1) (names r2)) then
+          let names1 = List.map (rename m Mod_subst.subst_constant) (names r1) in
+          if not (CList.equal Constant.CanOrd.equal names1 (names r2)) then
             diff "the field %s rewrites other symbols in the answer" (Id.to_string l);
           m
         | SFBmodule mb1, SFBmodule mb2 ->
-          eq_signature ~env m (Mod_declarations.mod_type mb1) (Mod_declarations.mod_type mb2)
-        | SFBmodtype t1, SFBmodtype t2 -> eq_modtype ~env m t1 t2
+          eq_signature ~challenge_env ~answer_env m
+            (ModPath.MPdot (mp1, l), Mod_declarations.mod_delta mb1)
+            (ModPath.MPdot (mp2, l), Mod_declarations.mod_delta mb2)
+            (Mod_declarations.mod_type mb1) (Mod_declarations.mod_type mb2)
+        | SFBmodtype t1, SFBmodtype t2 ->
+          eq_modtype ~challenge_env ~answer_env m
+            (ModPath.MPdot (mp1, l)) (ModPath.MPdot (mp2, l)) t1 t2
         | (SFBconst _ | SFBmind _ | SFBrules _ | SFBmodule _ | SFBmodtype _), _ ->
           diff "the field %s is of another kind in the answer" (Id.to_string l))
     m b1
 
-and eq_modtype ~env m t1 t2 =
-  eq_signature ~env m (Mod_declarations.mod_type t1) (Mod_declarations.mod_type t2)
+(* The module types [t1] of the challenge at [mp1] and [t2] of the answer at
+   [mp2]. *)
+and eq_modtype ~challenge_env ~answer_env m mp1 mp2 t1 t2 =
+  eq_signature ~challenge_env ~answer_env m
+    (mp1, Mod_declarations.mod_delta t1) (mp2, Mod_declarations.mod_delta t2)
+    (Mod_declarations.mod_type t1) (Mod_declarations.mod_type t2)
 
 (************************************************************************)
 (** {6 The run} *)
@@ -1906,9 +2166,66 @@ let check_elim_constraints ~challenge_env ~answer_env =
     | Some e -> Some ("the answer has an elimination constraint the challenge does not: " ^ e)
     | None -> None
 
+(* The kernel names of the constants that a challenge declaration names in
+   what the comparison reads of it -- a constant's type and transparent
+   body, a block's parameters, arities, constructor types and projection
+   types, and every field of a module type, the types of its functor
+   parameters included -- each under its user name and its canonical one,
+   so a reference through another name of the constant counts. An opaque
+   body is not read: it is not compared, and what it names unfolds into no
+   statement. Nor is a rewrite rule, of which the comparison reads the
+   symbols only. *)
+let rec constr_names acc c = match Constr.kind c with
+  | Constr.Const (k, _) ->
+    KerName.Set.add (Constant.user k) (KerName.Set.add (Constant.canonical k) acc)
+  | _ -> Constr.fold constr_names acc c
+
+let const_names acc (cb : constant_body) =
+  let acc = constr_names acc cb.const_type in
+  match cb.const_body with
+  | Def b -> constr_names acc b
+  | Undef _ | OpaqueDef _ | Primitive _ | Symbol _ -> acc
+
+let mind_names acc (mib : mutual_inductive_body) =
+  let context acc ctx =
+    List.fold_left (fun acc d ->
+        Context.Rel.Declaration.fold_constr (fun c acc -> constr_names acc c) d acc)
+      acc ctx
+  in
+  Array.fold_left (fun acc mip ->
+      let acc = context acc mip.mind_arity_ctxt in
+      let acc = constr_names acc mip.mind_user_arity in
+      let acc = Array.fold_left constr_names acc mip.mind_user_lc in
+      match mip.mind_record with
+      | PrimRecord p -> Array.fold_left constr_names acc p.tys
+      | NotRecord | FakeRecord -> acc)
+    (context acc mib.mind_params_ctxt) mib.mind_packets
+
+let rec signature_names acc = function
+  | NoFunctor struc ->
+    List.fold_left (fun acc (_, field) -> match field with
+        | SFBconst cb -> const_names acc cb
+        | SFBmind mib -> mind_names acc mib
+        | SFBrules _ -> acc
+        | SFBmodule mb -> signature_names acc (Mod_declarations.mod_type mb)
+        | SFBmodtype mtb -> signature_names acc (Mod_declarations.mod_type mtb))
+      acc struc
+  | MoreFunctor (_, mtb, sign) ->
+    signature_names (signature_names acc (Mod_declarations.mod_type mtb)) sign
+
 (* Every challenge declaration, in the order the name sorts. A declaration the
    answer does not hold is a failure; a declaration only the answer holds is
-   not visited. *)
+   not visited.
+
+   A constant is compared in three steps: whether the answer holds it at
+   all, the primitive type each side registers it as ([eq_primitive_type],
+   on each side the constant under the canonical name that side's
+   environment gives it), and then [eq_const_body]. Its [named] reads the
+   names that the compared challenge declarations -- the constants,
+   inductive blocks and module types this walks -- name ([constr_names] and
+   the functions after it), collected once in the run, the first time
+   [eq_const_body] asks: for a challenge constant without a body, not
+   stated as data, that the answer gives a transparent body. *)
 let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
   let m = ref (seed_umap t ~challenge_env ~answer_env) in
   let failures = ref [] in
@@ -1920,15 +2237,39 @@ let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
     | exception Diff d -> fail name d
     | exception Undecided d -> deferred := (name, f, d) :: !deferred
   in
+  (* The module types an environment holds, by path. *)
+  let modtypes env = Environ.(Internal.View.((view env).env_modtypes)) in
+  let ch_modtypes = modtypes challenge_env in
+  let names = lazy (
+    let acc =
+      Environ.fold_constants (fun c cb acc ->
+          if in_libs libs (Constant.modpath c) then const_names acc cb else acc)
+        challenge_env KerName.Set.empty
+    in
+    let acc =
+      Environ.fold_inductives (fun i mib acc ->
+          if in_libs libs (MutInd.modpath i) then mind_names acc mib else acc)
+        challenge_env acc
+    in
+    ModPath.Map.fold (fun mp mt acc ->
+        if in_libs libs mp then signature_names acc (Mod_declarations.mod_type mt) else acc)
+      ch_modtypes acc)
+  in
   Environ.fold_constants (fun c cb () ->
       if in_libs libs (Constant.modpath c) then
         let name = Constant.to_string c in
-        match Environ.lookup_constant_opt c answer_env with
-        | None -> fail name "missing"
-        | Some cb' ->
+        if not (Environ.mem_constant c answer_env) then fail name "missing"
+        else
+          let cb', _, canonical = Environ.lookup_constant_key c answer_env in
+          let c' = Constant.make (Constant.user c) canonical in
+          let named = lazy (let names = Lazy.force names in
+                            KerName.Set.mem (Constant.user c) names
+                            || KerName.Set.mem (Constant.canonical c) names)
+          in
           step name (fun m ->
-              eq_const_body ~env:answer_env ~is_theorem:(CString.Set.mem name theorems)
-                m cb cb'))
+              eq_primitive_type ~challenge_env ~answer_env c c';
+              eq_const_body ~env:(Some challenge_env)
+                ~is_theorem:(CString.Set.mem name theorems) ~named m cb cb'))
     challenge_env ();
   Environ.fold_inductives (fun i mib () ->
       if in_libs libs (MutInd.modpath i) then
@@ -1936,14 +2277,15 @@ let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
         if not (Environ.mem_mind i answer_env) then fail name "missing"
         else step name (fun m -> eq_mib_body m mib (Environ.lookup_mind i answer_env)))
     challenge_env ();
-  let an_modtypes = (Environ.Internal.View.view answer_env).Environ.Internal.View.env_modtypes in
+  let an_modtypes = modtypes answer_env in
   ModPath.Map.iter (fun mp mt ->
       if in_libs libs mp then
         let name = ModPath.to_string mp in
         match ModPath.Map.find_opt mp an_modtypes with
         | None -> fail name "missing"
-        | Some mt' -> step name (fun m -> eq_modtype ~env:answer_env m mt mt'))
-    (Environ.Internal.View.view challenge_env).Environ.Internal.View.env_modtypes;
+        | Some mt' ->
+          step name (fun m -> eq_modtype ~challenge_env ~answer_env m mp mp mt mt'))
+    ch_modtypes;
   (* The declarations set aside as undecided, again, until a pass decides
      none of them. Each pending entry keeps the reason of its last
      comparison, so what is still undecided fails with that reason; no
