@@ -137,6 +137,12 @@
 #      that a record keeps (Check_closure.opaque_body_refs): a walk that
 #      skipped a place misses its axiom at -j 1 and at -j 3, and a record
 #      that left out an inductive type misses its axiom or flag at -j 3.
+#  (u) W3.v: opaque proofs that reach an axiom in one place only: the
+#      body of a let after its "in" (in_letin), and the argument of a
+#      primitive projection (in_proj), at -j 1 and at -j 3, which takes
+#      every body from the records: M = 0. A walk that skipped the place
+#      (Check_closure.push_subterms, its LetIn and Proj arms) misses its
+#      axiom at -j 1 and at -j 3.
 #
 # A case where /dev/shm is missing, not writable, or writable by other
 # users without its sticky bit needs another mount of /dev/shm than the
@@ -153,7 +159,7 @@ t=$(mktemp -d)
 # The TMPDIR made in /dev/shm for (q), once it is made.
 s=
 trap 'rm -rf "$d" "$t"; [ -z "$s" ] || rm -rf "$s"' EXIT
-mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/walk2" "$d/good" "$d/bad" "$d/spliced"
+mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/walk2" "$d/walk3" "$d/good" "$d/bad" "$d/spliced"
 
 {
   cat <<'EOF'
@@ -355,6 +361,24 @@ Proof. exact (let _ := sq in O). Qed.
 EOF
 rocq c -native-compiler no -Q "$d/walk2" SRWalk2 "$d/walk2/W2.v"
 
+# W3.v, for (u): each opaque proof reaches its axiom in one place only:
+# in_letin in the body of a let, after its "in", whose bound value and
+# type name no axiom; in_proj in the record argument of a primitive
+# projection, which the elaborated term keeps as a projection node.
+cat > "$d/walk3/W3.v" <<'EOF'
+Axiom axletin : nat.
+Lemma in_letin : nat.
+Proof. exact (let x := O in axletin). Qed.
+
+Set Primitive Projections.
+Record R : Set := mkR { fld : nat }.
+Unset Primitive Projections.
+Axiom axproj : nat.
+Lemma in_proj : nat.
+Proof. exact (fld (mkR axproj)). Qed.
+EOF
+rocq c -native-compiler no -Q "$d/walk3" SRWalk3 "$d/walk3/W3.v"
+
 cat > "$d/a.req" <<'EOF'
 via SRPar.A.via -
 model_a SRPar.A.model_a -
@@ -392,6 +416,10 @@ in_cofix SRWalk.W.in_cofix -
 EOF
 t_names="binder letty letbody cast return fixtype cofixtype arrdefault arrelem ctor ind positivity uip"
 for n in $t_names; do echo "in_$n SRWalk2.W2.in_$n -"; done > "$d/t.req"
+cat > "$d/u.req" <<'EOF'
+in_letin SRWalk3.W3.in_letin -
+in_proj SRWalk3.W3.in_proj -
+EOF
 
 fail() { >&2 echo "FAILURE: $*"; exit 1; }
 
@@ -987,6 +1015,19 @@ for name in t-j1 t-j3; do
   has "$name" 'axiom in_ind SRWalk2.W2.axind'
   has "$name" 'flag in_positivity assumed-positive SRWalk2.W2.Neg'
   has "$name" 'flag in_uip uip SRWalk2.W2.sq'
+done
+
+# (u) Each proof of W3 reaches its axiom in one place only: the body of a
+# let after its "in", whose bound value and type name no axiom, in
+# in_letin; the record argument of a primitive projection, which the
+# elaborated term keeps as a projection node, in in_proj. A walk that
+# skipped the place misses its line at -j 1 and at -j 3. M = 0: -j 3 took
+# every body from the records.
+report u -Q "$d/walk3" SRWalk3 -norec SRWalk3.W3
+[ "$reads" = 0 ] || { cat "$d/u-j3.err" >&2; fail "(u) -j 3: $reads bodies read, all were checked"; }
+for name in u-j1 u-j3; do
+  has "$name" 'axiom in_letin SRWalk3.W3.axletin'
+  has "$name" 'axiom in_proj SRWalk3.W3.axproj'
 done
 
 exit 0
