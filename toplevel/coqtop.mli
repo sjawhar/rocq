@@ -35,6 +35,21 @@ val start_coq : ('a * Stm.AsyncOpts.stm_opt,'b) custom_toplevel -> string list -
 
 val init_toploop : Coqargs.t -> Stm.AsyncOpts.stm_opt -> Coqargs.injection_command list -> Vernac.State.t
 
+(** [typecheck_every_qed opts injections] calls
+    {!Opaques.force_qed_typecheck}, and adds to [injections] the warning that
+    [-skip-qed-typecheck] has no effect when it is on. It is for a command
+    that writes no [.vo], a toplevel, [rocq compile -vos] or
+    [rocq compile -vok]: nothing such a command reads ever reaches [rocqchk],
+    so its exit status, under [-batch] for a toplevel, is the whole verdict on
+    the proofs it runs. It warns rather than refuses because a project passes
+    that option to every command through its [_CoqProject], an editor,
+    [make vos] and [make vok] among them. Call it
+    before the command creates its document, so that the rc file and the
+    files [-l] loads are read under the force, and the warning under the [-w]
+    of the command line. *)
+val typecheck_every_qed :
+  Coqargs.t -> Coqargs.injection_command list -> Coqargs.injection_command list
+
 (** The specific characterization of the coqtop_toplevel *)
 
 type query = PrintTags | PrintModUid of string list

@@ -38,6 +38,11 @@ type injection_command =
   | WarnNativeDeprecated
   (** Used so that "-w -native-compiler-deprecated-option -native-compiler FLAG"
       does not cause a warning, similarly to above. *)
+  | WarnSkipQedTypecheckIgnored
+  (** Used so that "-w -skip-qed-typecheck-ignored" silences the message that
+      Coqtop.typecheck_every_qed adds for "-skip-qed-typecheck", similarly to
+      above: that function forces the check on before the command reads
+      anything, which is before the injections that -w sets. *)
 
 type coqargs_logic_config = {
   impredicative_set : bool;

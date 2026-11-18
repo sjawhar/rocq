@@ -237,7 +237,38 @@ When the proof is completed, you can exit proof mode with commands such as
    on every proof of the file, even after ``Unset Skip Qed Typecheck``.
    :cmd:`Print Assumptions` reports each constant whose proof was not
    typechecked. Subproofs declared by :tacn:`abstract` are still typechecked
-   when the tactic runs.
+   when the tactic runs, and so is a proof declared under :cmd:`Fail` or
+   :cmd:`Succeed`, which discard the proof: it would reach no :file:`.vo`
+   for ``rocqchk`` to check, and skipping its check would change the verdict
+   of the control.
+   A command that rolls the document back past a proof whose check this flag
+   skipped, such as :cmd:`Reset`, discards it in the same way, and typechecks
+   it at that command: the error :cmd:`Qed` raises without the flag is raised
+   there or, unless ``-async-proofs`` is ``off``, when the document ends.
+   A proof delegated to a proof worker (``-async-proofs on``) or processed
+   lazily (``-async-proofs lazy``) is the exception while it has not been
+   computed: a rollback discards it without a check, with the flag or
+   without it.
+   A proof nested in another (:flag:`Nested Proofs Allowed`) is typechecked
+   at its :cmd:`Qed` even with this flag on, because closing it discards its
+   declaration and declares it again. This does not hold when the nested
+   proof itself is delegated to a proof worker (``-async-proofs on``): it is
+   then kept in the :file:`.vo` file without a check, and ``rocqchk`` checks
+   it, as it checks any proof kept without a check.
+   ``rocq compile -vos``, ``rocq compile -vok``, ``rocq repl`` and
+   ``coqidetop``, the ``rocqide`` toplevel, write no :file:`.vo` for
+   ``rocqchk`` to check, so they typecheck every opaque proof they run
+   (``rocq compile -vos`` skips most of them, but it runs, for instance, a
+   proof that uses :cmd:`Print` and every proof closed while
+   :flag:`Universe Polymorphism` is on).
+   Given the ``-skip-qed-typecheck`` option, which does the
+   same as this flag, they warn that it has no effect and go on. In
+   ``coqidetop`` with ``-async-proofs on`` and this flag or the
+   ``-skip-qed-typecheck`` option on, the proof worker
+   does not typecheck a proof delegated to it. The main process still
+   typechecks it, but it can defer that check until the document is joined
+   or the proof is needed, so the editor can show such a proof as accepted
+   until then.
 
    .. warning:: A library compiled with this flag on can contain an ill-typed
       proof, for instance one built with ``exact_no_check``, until ``rocqchk``

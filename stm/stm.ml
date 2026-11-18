@@ -2239,6 +2239,17 @@ let init_core () =
 
 let new_doc { doc_type ; injections } =
 
+  (* Before the restore below, which restores the opaque table too. Only a
+     document rocq compile builds checks what a rollback discards: its exit
+     status is the verdict the skip must not change. A proof worker's
+     document is interactive: the worker declares a delegated proof, then
+     restores the state from before it, and that restore must not check the
+     proof. A toplevel forces the check on, so its interactive document skips
+     no check anyway. *)
+  Opaques.start_document
+    ~check_discarded_proofs:
+      (match doc_type with Interactive _ -> false | VoDoc _ | VosDoc _ -> true);
+
   (* We must reset the whole state before creating a document! *)
   State.restore_root_state ();
 

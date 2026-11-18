@@ -23,6 +23,13 @@ let skip_qed_typecheck = ref false
 let { Goptions.get = skip_qed_typecheck_flag } =
   Goptions.declare_bool_option_and_ref ~key:["Skip";"Qed";"Typecheck"] ~value:false ()
 
+let qed_typecheck_forced = ref false
+
+let with_qed_typecheck_forced f =
+  Flags.with_option qed_typecheck_forced f ()
+
+let force_qed_typecheck () = qed_typecheck_forced := true
+
 type opaque_proof =
 | Checked of Safe_typing.opaque_certificate
 | Unchecked of Constr.t * Univ.ContextSet.t Opaqueproof.delayed_universes
@@ -42,6 +49,48 @@ type opaque_result =
 | OpaqueValue of Opaqueproof.opaque_proofterm * bool
 (** The boolean is [true] when the kernel did not type the proof. *)
 
+(** The kernel check that a proof declared under the skip did not get, by
+    handle, see {!start_document}. The table is an ordinary reference,
+    outside the backtrackable summary below, because a rollback restores that
+    summary and would restore away the record of the proof it discards. Each
+    check holds the safe environment current when its proof is computed: at
+    its [Qed], or later for a proof delegated to a worker. The handle is still
+    unfilled there, so the check needs none of the state the rollback
+    replaces. Each check also holds the uuid of the computation of its
+    proof, which identifies the proof. The handle alone does not. The counter
+    of handles is in the safe environment, which a rollback restores, so the
+    proof declared after a rollback can get the handle of a proof the
+    rollback discarded. A later rollback to a state that holds the discarded
+    proof then finds a proof under that handle, but not the proof of the
+    check. *)
+let skipped_checks : (Future.UUID.t * (unit -> unit)) Opaqueproof.HandleMap.t ref =
+  ref Opaqueproof.HandleMap.empty
+
+(** The error of a check {!Summary.unfreeze} ran. A command that rolls the
+    document back can be one whose error the stm drops, which it does for a
+    command it runs under its resilience, so {!Summary.join} raises it
+    again. *)
+let discarded_error : Exninfo.iexn option ref = ref None
+
+(** Whether this document records those checks at all. *)
+let check_discarded_proofs = ref false
+
+(** [record_skipped_check i uuid pf] records the check of the proof [pf] for
+    the handle [i], with [uuid], the uuid of the computation of [pf], when
+    this document records those checks. *)
+let record_skipped_check i uuid pf =
+  if !check_discarded_proofs then
+    let senv = Global.safe_env () in
+    let check () =
+      ignore (Safe_typing.check_opaque senv i pf : Safe_typing.opaque_certificate)
+    in
+    skipped_checks := Opaqueproof.HandleMap.add i (uuid, check) !skipped_checks
+
+let start_document ~check_discarded_proofs:check =
+  skipped_checks := Opaqueproof.HandleMap.empty;
+  discarded_error := None;
+  check_discarded_proofs := check
+
 (** Current table of opaque terms *)
 
 module Summary =
@@ -50,9 +99,33 @@ struct
   let state : t ref = ref Opaqueproof.HandleMap.empty
   let init () = state := Opaqueproof.HandleMap.empty
   let freeze () = !state
-  let unfreeze s = state := s
+
+  let unfreeze s =
+    (* Restoring the live table, which is what a command that rolls nothing
+       back restores, discards nothing. *)
+    if s != !state then begin
+      (* The restored table keeps a proof when it holds that same proof under
+         its handle, see [skipped_checks]. *)
+      let holds i (uuid, _) = match Opaqueproof.HandleMap.find_opt i s with
+        | Some (OpaqueCertif c) -> Future.UUID.equal (Future.uuid c) uuid
+        | Some (OpaqueValue _) | None -> false
+      in
+      let kept, discarded = Opaqueproof.HandleMap.partition holds !skipped_checks in
+      let () = skipped_checks := kept in
+      let () = state := s in
+      (* In handle order, so that the error is the one of the earliest Qed,
+         as it is without the skip. *)
+      try Opaqueproof.HandleMap.iter (fun _ (_, check) -> check ()) discarded
+      with e when CErrors.noncritical e ->
+        let e = Exninfo.capture e in
+        let () = discarded_error := Some e in
+        Exninfo.iraise e
+    end
 
   let join ?(except=Future.UUIDSet.empty) () =
+    (* The error of a check [unfreeze] ran, which the command that rolls back
+       may not have carried out of the document. *)
+    let () = Option.iter Exninfo.iraise !discarded_error in
     let iter i pf = match pf with
     | OpaqueValue _ -> ()
     | OpaqueCertif cert ->
@@ -117,11 +190,18 @@ let declare_defined_opaque ?feedback_id ~poly i (body : Safe_typing.private_cons
      the thunk is evaluated, not the one where this function is called. It does
      not matter because the former must be an extension of the latter or
      otherwise the call to Safe_typing would throw an anomaly. *)
-  (* The flag is read when the proof is declared, at Qed. *)
-  let skip_flag = skip_qed_typecheck_flag () in
+  (* Both spellings of the skip are read when the proof is declared, at Qed,
+     and so is the force. A proof declared while the force is on is checked
+     in full. *)
+  let skip = (!skip_qed_typecheck || skip_qed_typecheck_flag ())
+             && not !qed_typecheck_forced
+  in
   let proof = Future.chain body begin fun pf ->
       let proof =
-        if !skip_qed_typecheck || skip_flag then unchecked_opaque ~poly i pf
+        if skip then
+          (* The check this Qed is not running, see [skipped_checks]. *)
+          let () = record_skipped_check i (Future.uuid body) pf in
+          unchecked_opaque ~poly i pf
         else Checked (Safe_typing.check_opaque (Global.safe_env ()) i pf)
       in
       let () = Option.iter (fun id -> Feedback.feedback ~id Feedback.Complete) feedback_id in

@@ -91,7 +91,14 @@ let compile opts stm_options injections copts ~echo ~f_in ~f_out =
       Stm.reset_task_queue ();
       ()
 
+(* A compile that writes no .vo (-vos, -vok) writes nothing rocqchk checks, so
+   it typechecks every opaque proof it runs, see Coqtop.typecheck_every_qed. *)
 let compile opts stm_opts copts injections ~echo ~f_in ~f_out =
+  let injections =
+    if copts.compilation_mode <> BuildVo
+    then Coqtop.typecheck_every_qed opts injections
+    else injections
+  in
   ignore(CoqworkmgrApi.get 1);
   compile opts stm_opts injections copts ~echo ~f_in ~f_out;
   CoqworkmgrApi.giveback 1
