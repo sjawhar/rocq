@@ -1137,15 +1137,19 @@ type t = {
   dir : string;
   out : string;
   files : string list;           (** the challenge files, absolute or as given *)
+  challenge_dir : string option;
+      (** The real path of [dir]; [None] when it cannot be found, and then
+          no file lies under it ([check_challenge_dir]). *)
   prechecked : DirPath.t list;
   add_challenge_load_path : unit -> unit;
   under_challenge_root : DirPath.t -> bool;
       (** Is this library name under a root the challenge directory stands in
           for? Those are the answer's own libraries. Every other library the
-          answer loaded is a shared one, provided its recorded file lies
-          outside every place the answer can write ([answer_places]); a run
-          that loaded one from inside such a place is refused
-          ([check_provenance]). *)
+          answer loaded, unless pre-checked, is a shared one, and
+          [check_provenance] refuses a run unless the file the loader
+          recorded for it lies in no place an answer's file is found in
+          ([answer_place]) and was found in a trusted directory
+          ([trusted_dirs]). *)
   open_roots : (DirPath.t * string) list;
       (** The roots the command line binds that the challenge does NOT stand
           in for, with the directory each is bound to. A library under one of
@@ -1159,10 +1163,14 @@ type t = {
   bound_dirs : string list;
       (** The real paths of the directories the command line binds, each
           with its subdirectories. *)
+  trusted_dirs : string list;
+      (** The real paths of the directories the run trusts for the image's
+          own libraries, each with its subdirectories: the corelib
+          directory, user-contrib and the directories of ROCQPATH and
+          COQPATH, those of them whose real path exists. *)
   outside : DirPath.t list;
-      (** The libraries the answer loaded whose recorded file lies in no
-          place an answer's file is found in ([answer_place]); filled by
-          [run]. *)
+      (** The shared libraries the answer loaded whose recorded file passed
+          [check_provenance]; filled by [run]. *)
   path_below_root : DirPath.t -> string option;
       (** The path of a library's [.vo] file below the directory of the root
           the challenge stands in for that holds it ([Some "X/Y.vo"] for
@@ -1239,9 +1247,11 @@ let dirpath_of_string s =
   | l -> DirPath.make (List.rev_map Id.of_string l)
 
 (* Before anything is loaded: the files the config pins must be there and have
-   the sha256 it gives. *)
+   the sha256 it gives. [trusted] are the directories the run trusts for the
+   image's own libraries; only those whose real path exists are kept, as
+   real paths. *)
 let prepare cfg ~dir ~out ~add_challenge_load_path ~under_challenge_root ~path_below_root
-    ~open_roots ~bound_dirs =
+    ~open_roots ~bound_dirs ~trusted =
   let files =
     List.map (fun f ->
         let p = if Filename.is_relative f.cf_path then Filename.concat dir f.cf_path
@@ -1265,10 +1275,12 @@ let prepare cfg ~dir ~out ~add_challenge_load_path ~under_challenge_root ~path_b
      its command line (coqchk_main.ml), so no stop before the verdict, here
      or earlier, leaves yesterday's verdict to be read as today's. *)
   { cfg; dir; out; files;
+    challenge_dir = realpath dir;
     prechecked = List.map (fun p -> dirpath_of_string p.pc_library) cfg.cfg_prechecked;
     add_challenge_load_path; under_challenge_root; open_roots;
     cwd = realpath (Sys.getcwd ());
     bound_dirs = List.filter_map realpath bound_dirs;
+    trusted_dirs = List.filter_map realpath trusted;
     outside = [];
     path_below_root; pins;
     answer_files = DirPath.Map.empty;
@@ -1363,17 +1375,19 @@ let origin t dp =
   else Shared
 
 (* A library that is one file for both sides: a pre-checked one, whose bytes
-   the config pins, or a shared one: outside every root the challenge stands
-   in for, AND loaded by the answer from a recorded file that lies in no place
-   an answer's file is found in ([answer_place]: the working directory, a
-   bound directory), so the image's load path or another directory the
-   command line does not name. What this establishes is where the loaded
-   file is, from the path the loader recorded; that no answer wrote such a
-   file rests on the launch keeping the image's load path out of the
-   answer's reach (check_compare.mli). [check_provenance] refuses a run that
-   loaded a library outside the challenge's roots from inside such a place,
-   so the two tests agree on every library a run goes on with. The challenge
-   load resolves a shared library to the same file ([load_challenge]). *)
+   the config pins, or a shared one -- outside every root the challenge
+   stands in for -- whose file, as the answer's loader recorded it, passed
+   [check_provenance]: it lies in no place an answer's file is found in
+   ([answer_place]: the working directory, a bound directory) and was found
+   in a directory the run trusts for the image's own libraries
+   ([trusted_dirs]). What this establishes is where the loaded file is, from
+   the path the loader recorded; that no answer wrote such a file rests on
+   the launch keeping the trusted directories out of the answer's reach
+   (check_compare.mli). [check_provenance] refuses a run that loaded a
+   shared library from anywhere else, so the two tests agree on every
+   library a run goes on with. The challenge load must read a shared library
+   from the answer's file, and a pre-checked one from the answer's file or
+   from a file of the pinned sha256 ([check_same_files]). *)
 let one_file t dp = match origin t dp with
   | Prechecked -> true
   | Own -> false
@@ -1384,25 +1398,46 @@ let rooted_one_file t mp = match mp_root mp with
   | Some dp -> one_file t dp
 
 (* A library a side loaded that is neither under a root the challenge stands
-   in for nor pre-checked must come from outside every place an answer's
-   file is found in: otherwise a file the answer put in the working
-   directory, which the load path binds implicitly, could stand in for an
-   image library of the same name. [libs] are a side's loaded libraries with
-   the files the loader recorded. Returns those that pass. *)
+   in for nor pre-checked counts as the image's own, so its file must lie in
+   no place an answer's file is found in ([answer_place]): otherwise a file
+   the answer put in the working directory, which the load path binds
+   implicitly, could stand in for an image library of the same name. And the
+   directory the loader found it in must lie, by its real path, under one of
+   the directories the run trusts for the image's own libraries
+   ([trusted_dirs]): otherwise a file in a directory the load path binds
+   without a [-Q], such as an XDG directory, could. A directory whose real
+   path cannot be found is under none. [libs] are a side's loaded libraries
+   with the files the loader recorded. Returns those that pass. *)
 let check_provenance t ~side libs =
   CList.map_filter (fun (dp, file) ->
       match origin t dp with
       | Prechecked | Own -> None
       | Shared ->
         match answer_place t file with
-        | None -> Some dp
         | Some place ->
           CErrors.user_err
             Pp.(str ("The " ^ side ^ " loaded the library " ^ DirPath.to_string dp ^
                      " from " ^ file ^ ", in " ^ place ^ ", where an answer's files are \
                       found. No root the challenge stands in for holds it and the config \
                       does not pre-check it, so it would count as the image's own. A \
-                      -compare run refuses it.")))
+                      -compare run refuses it."))
+        | None ->
+          let trusted = match realpath (Filename.dirname file) with
+            | None -> false
+            | Some found_in -> List.exists (fun dir -> path_under ~dir found_in) t.trusted_dirs
+          in
+          if trusted then Some dp
+          else
+            let dirs = match t.trusted_dirs with
+              | [] -> "none in this run"
+              | l -> String.concat ", " l
+            in
+            CErrors.user_err
+              Pp.(str ("The " ^ side ^ " loaded the library " ^ DirPath.to_string dp ^
+                       " from " ^ file ^ ", which is under none of the directories a \
+                        -compare run trusts for the image's own libraries: the corelib \
+                        directory, user-contrib and the directories of ROCQPATH and \
+                        COQPATH (" ^ dirs ^ "). A -compare run refuses it.")))
     libs
 
 (* The image's own library: a shared one whose recorded file passed
@@ -1531,6 +1566,79 @@ let check_dep_digests t ~challenge ~answer =
           ch_deps)
     challenge
 
+(* The challenge load puts the challenge directory in front of the answer's
+   directories under the roots it stands in for, and leaves those behind it:
+   a challenge library that the directory does not hold would be read from
+   the answer's file and then compared with itself. So a library the
+   challenge loaded under such a root must have been read from a file whose
+   real path lies under the real path of the challenge directory, unless it
+   is pre-checked: a pre-checked library may resolve to the answer's file,
+   and [check_same_files] tests that it is read from pinned bytes. A file or
+   a challenge directory whose real path cannot be found is not under it.
+   [libs] are the challenge's loaded libraries with the files the loader
+   recorded. *)
+let check_challenge_dir t libs =
+  List.iter (fun (dp, file) ->
+      match origin t dp with
+      | Prechecked | Shared -> ()
+      | Own ->
+        let inside = match t.challenge_dir, realpath file with
+          | Some dir, Some f -> path_under ~dir f
+          | None, _ | _, None -> false
+        in
+        if not inside then
+          CErrors.user_err
+            Pp.(str ("The challenge loaded the library " ^ DirPath.to_string dp ^ " from " ^
+                     file ^ ", which is not under the challenge directory. A challenge \
+                      library under a root the challenge stands in for is read from the \
+                      challenge directory unless it is pre-checked. A -compare run \
+                      refuses it.")))
+    libs
+
+(* A library that is one file for both sides ([one_file]) is so only if the
+   challenge load reads it from the file the answer read. The challenge's
+   load path is the answer's with the challenge directory bound in front
+   under the roots it stands in for, but that binding can take a directory
+   from another logical path (a link in the challenge directory to a
+   directory the load path already binds), and a name the two sides share
+   may then resolve to another file. So a shared library the answer loaded
+   too must come from the answer's file, by real path. A pre-checked library
+   must come from the answer's file, or from another file of the sha256 the
+   config pins, such as a copy in the challenge directory: the answer's file
+   has that sha256 as well ([check_prechecked_files],
+   [check_prechecked_read]), so either way the bytes are pinned. [libs] are
+   the challenge's loaded libraries with the files the loader recorded. *)
+let check_same_files t libs =
+  List.iter (fun (dp, file) ->
+      match origin t dp with
+      | Own -> ()
+      | Shared ->
+        (match DirPath.Map.find_opt dp t.answer_files with
+         | Some an_file when not (same_real_file file an_file) ->
+           CErrors.user_err
+             Pp.(str ("The challenge loaded the shared library " ^ DirPath.to_string dp ^
+                      " from " ^ file ^ ", and the answer loaded it from " ^ an_file ^
+                      ": the two sides would read different files under one library \
+                       name. A -compare run refuses it."))
+         | Some _ | None -> ())
+      | Prechecked ->
+        let answers = match DirPath.Map.find_opt dp t.answer_files with
+          | Some an_file -> same_real_file an_file file
+          | None -> false
+        in
+        if not answers then
+          let got = file_sha256 file in
+          let pins p =
+            DirPath.equal (dirpath_of_string p.pc_library) dp && String.equal p.pc_sha256 got
+          in
+          if not (List.exists pins t.cfg.cfg_prechecked) then
+            CErrors.user_err
+              Pp.(str ("The challenge loaded the pre-checked library " ^ DirPath.to_string dp ^
+                       " from " ^ file ^ ", which is not the file the answer loaded it \
+                        from, and whose sha256 is " ^ got ^ ", not the one the config \
+                        pins. A -compare run refuses it.")))
+    libs
+
 (* The challenge load, between two swaps of this process's per-library tables.
    The challenge libraries have the answer's names, so they need tables of
    their own; nothing of the challenge is left in them afterwards.
@@ -1546,18 +1654,26 @@ let check_dep_digests t ~challenge ~answer =
 
    Only the challenge files' closure is compared declaration by declaration.
 
-   What pins a shared library the answer alone Requires, and so what this
-   load rests on: the config's sha256 when it is pre-checked, and otherwise
-   only (1) that it is resolved on the same load path, which the challenge
-   load changes solely by putting the challenge directory in front of the
-   roots it stands in for, so a library outside those roots resolves to the
-   same file for both sides; (2) that every library naming it as a
-   dependency records the same digest on both sides, which the check above
-   has just established; and (3) [check_open_roots], which has already
-   refused the run if a root the answer could write to were left open. A
-   library that none of the three reaches does not exist: a library comes
-   from a bound root or from the image's own load path. Each of the three
-   refuses the run rather than reporting a verdict. *)
+   What pins each library this load reads, and so what the comparison rests
+   on:
+   - a challenge library under a root the challenge stands in for, unless
+     pre-checked, is read from a file under the challenge directory
+     ([check_challenge_dir]);
+   - a pre-checked library is read from the file the answer's loader read,
+     whose sha256 is the one the config pins ([check_prechecked_files],
+     [check_prechecked_read]), or from another file of that sha256
+     ([check_same_files]);
+   - a shared library lies in no place an answer's file is found in and was
+     found in a directory the run trusts for the image's own libraries
+     ([check_provenance], on this side as on the answer's), it is read from
+     the file the answer's loader read when the answer loaded it too
+     ([check_same_files]), and every library naming it as a dependency
+     records the same digest on both sides ([check_dep_digests]).
+   [check_open_roots] has already refused the run if the answer loaded a
+   library the config does not pre-check from a bound root the challenge
+   does not stand in for. Each check refuses the run rather than reporting a
+   verdict, and the checks of this load all run before anything is
+   imported. *)
 let load_challenge t senv0 ~answer_deps =
   let saved = CheckLibrary.swap_tables (CheckLibrary.fresh_tables ()) in
   let restore () = ignore (CheckLibrary.swap_tables saved) in
@@ -1581,9 +1697,12 @@ let load_challenge t senv0 ~answer_deps =
           answer_deps
       in
       let needed, all = CheckLibrary.intern_challenge t.files shared in
-      ignore (check_provenance t ~side:"challenge" (CheckLibrary.challenge_files all));
+      let files = CheckLibrary.challenge_files all in
+      check_challenge_dir t files;
+      ignore (check_provenance t ~side:"challenge" files);
       let challenge_deps = CheckLibrary.challenge_deps needed in
       check_dep_digests t ~challenge:(CheckLibrary.challenge_deps all) ~answer:answer_deps;
+      check_same_files t files;
       let senv = CheckLibrary.import_challenge senv0 all in
       Safe_typing.env_of_safe_env senv, challenge_deps)
 

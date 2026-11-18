@@ -173,6 +173,20 @@ let init_load_path env : unit =
     (fun () -> init_load_path env)
     ()
 
+(* The directories a -compare run trusts for the image's own libraries
+   ([Check_compare.prepare]'s [trusted]): the corelib directory, user-contrib
+   and each directory of ROCQPATH and COQPATH, located as [init_load_path]
+   locates them. The plugins directory and the XDG directories are left
+   out, so a shared library found only there is refused; an XDG directory
+   is one the answer's side can write. Set right after [init_load_path]; it
+   stays empty under -boot, which binds none of them. *)
+let compare_trusted = ref []
+
+let trusted_dirs rocqenv =
+  Boot.Path.to_string (Boot.Env.corelib rocqenv)
+  :: Boot.Path.to_string (Boot.Env.user_contrib rocqenv)
+  :: Envars.coqpath ()
+
 let impredicative_set = ref false
 let set_impredicative_set () = impredicative_set := true
 
@@ -662,7 +676,9 @@ let init_with_argv argv =
     Flags.if_verbose (fun () -> print_header coqenv ()) ();
     let () = match coqenv with
       | Boot -> ()
-      | Env coqenv -> init_load_path coqenv
+      | Env coqenv ->
+        init_load_path coqenv;
+        compare_trusted := trusted_dirs coqenv
     in
     (* additional loadpath, given with -R/-Q options *)
     NewProfile.profile "add_load_paths" (fun () ->
@@ -832,7 +848,7 @@ let run_compare env =
     try
       let t =
         Check_compare.prepare cfg ~dir ~out ~under_challenge_root ~path_below_root ~open_roots
-          ~bound_dirs:(List.map fst !user_includes)
+          ~bound_dirs:(List.map fst !user_includes) ~trusted:!compare_trusted
           ~add_challenge_load_path:(fun () ->
               List.iter (fun (_, rocq_root) ->
                   if substitutes rocq_root then add_rec_path ~unix_path:dir ~rocq_root)

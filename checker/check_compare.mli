@@ -26,25 +26,34 @@
     The answer's tree may Require more of the image than the challenge
     files do, so the challenge environment loads the same SHARED libraries
     the answer loaded -- those outside the roots the challenge stands in
-    for -- and a constraint one of them carries is then not read as one the
-    answer invented. That rests on a shared library being something the
-    answer cannot write, so the one trusted source of them is the IMAGE's
-    installed load path: the corelib directory and user-contrib.
+    for and not pre-checked -- and a constraint one of them carries is then
+    not read as one the answer invented. That rests on a shared library
+    being something the answer cannot write, so a run takes a shared
+    library only from the directories it trusts for the image's own
+    libraries: the corelib directory, user-contrib and the directories of
+    [ROCQPATH] and [COQPATH], as this run locates them ([-coqlib], the
+    environment, the installation). The plugins directory and the XDG
+    directories are not trusted, and a run with [-boot] trusts none.
 
     A graded run therefore binds exactly one root with [-Q], the answer's
-    project root, and leaves [ROCQPATH], [COQPATH], [-coqlib] and the XDG
-    directories unset, and starts in a working directory that holds no
-    [.vo] -- each of those is a load path the answer's side could otherwise
-    fill. The option refuses what it can see: a bound root the challenge
-    does not stand in for and whose libraries the config does not pin
-    (every library of such a root must be pre-checked), any bound root
+    project root, starts in a working directory that holds no [.vo], and is
+    launched so that the answer's side cannot write a trusted directory:
+    [ROCQPATH], [COQPATH] and [-coqlib], when given at all, name the image's
+    directories. The option refuses what it can see: a bound root the
+    challenge does not stand in for and whose libraries the config does not
+    pin (every library of such a root must be pre-checked), any bound root
     that is empty or is one of the image's own top-level names, and, on
-    either side, a library outside the challenge's roots and not
-    pre-checked whose recorded file lies directly in the working directory
-    or under a bound directory ([prepare]). A library that passes is shared
-    by where its file is, not by who wrote it. What is left -- the
-    environment the grader hands the process, and so who can write the
-    image's load path -- is the grader's to get right, and
+    either side, a shared library whose recorded file lies directly in the
+    working directory or under a bound directory, or that was found in a
+    directory under none of the trusted ones ([prepare]). It also refuses a
+    challenge library under a root the challenge stands in for, not
+    pre-checked, read from outside the challenge directory, a shared library
+    both sides loaded that the challenge read from another file than the
+    answer, and a pre-checked library the challenge read from another file
+    than the answer unless that file has the pinned sha256 ([run]). A
+    library that passes is shared by where its file is, not by who wrote
+    it. What is left -- the environment the grader hands the process, and so
+    who can write a trusted directory -- is the grader's to get right, and
     dispatch://BET-894's R5 and R1 are where it is written down.
 
     The test suite stands in for the image with [ROCQPATH], because a test
@@ -95,17 +104,17 @@ val read_config : string -> config
     rewrite rule. Without it, every theorem fails when a library the answer
     loaded declares one, whatever symbol it rewrites: each library except a
     pre-checked one and a shared one that is one file for both sides (outside
-    every root the challenge stands in for, and read from no place an
-    answer's file is found in). A library a pre-checked one rests on counts
-    unless it is one of those. A library only the answer has counts, and so
-    does a rule inside a module whose signature hides it. A rule the
-    challenge declares counts too, since the answer's copy of it declares it
-    again: such a task needs the option. A [Symbol] declaration with no rule
-    is not a rule: it is an assumption, and the closure reports it among the
-    theorem's axioms like an [Axiom], so a theorem whose proof reaches a
-    symbol fails unless the config permits that symbol by name, under the
-    rule for permitted axioms (a symbol the answer itself declares is never
-    the task's).
+    every root the challenge stands in for, found in a trusted directory and
+    in no place an answer's file is found in: [prepare]). A library a
+    pre-checked one rests on counts unless it is one of those. A library
+    only the answer has counts, and so does a rule inside a module whose
+    signature hides it. A rule the challenge declares counts too, since the
+    answer's copy of it declares it again: such a task needs the option. A
+    [Symbol] declaration with no rule is not a rule: it is an assumption,
+    and the closure reports it among the theorem's axioms like an [Axiom],
+    so a theorem whose proof reaches a symbol fails unless the config
+    permits that symbol by name, under the rule for permitted axioms (a
+    symbol the answer itself declares is never the task's).
 
     [answer-universe-constraints] is a kind-only tolerance for the global
     universe comparison, and one that names an object is an error. It skips
@@ -155,7 +164,8 @@ val prepare :
   config -> dir:string -> out:string -> add_challenge_load_path:(unit -> unit) ->
   under_challenge_root:(Names.DirPath.t -> bool) ->
   path_below_root:(Names.DirPath.t -> string option) ->
-  open_roots:(Names.DirPath.t * string) list -> bound_dirs:string list -> t
+  open_roots:(Names.DirPath.t * string) list -> bound_dirs:string list ->
+  trusted:string list -> t
 (** Resolve the challenge files under [dir] and check the sha256 of each.
     [add_challenge_load_path] puts [dir] on the load path in place of the
     answer's directories; it is called once, inside the challenge load.
@@ -163,13 +173,19 @@ val prepare :
     those roots: those are the answer's own libraries. Every other library
     the answer loaded, unless pre-checked, is a shared one, which the
     challenge loads too, and the run is refused unless the file the loader
-    recorded for it, on either side, lies outside every place an answer's
-    file is found in: directly in the working directory, which the load
-    path binds implicitly, or anywhere under one of [bound_dirs], the
-    directories the command line binds (real paths, links resolved). That
+    recorded for it, on either side, passes two tests. First, it lies
+    outside every place an answer's file is found in: directly in the
+    working directory, which the load path binds implicitly, or anywhere
+    under one of [bound_dirs], the directories the command line binds (real
+    paths, links resolved). Second, the directory the loader found it in
+    lies, by its real path, under one of [trusted], the directories the run
+    trusts for the image's own libraries: the corelib directory,
+    user-contrib and the directories of [ROCQPATH] and [COQPATH] (none
+    under [-boot]); only those whose real path exists count, and a
+    directory whose real path cannot be found is under none of them. That
     is a statement about where the file is, not about who wrote it: a file
-    elsewhere is the image's only as far as the launch keeps the answer from
-    writing the image's load path (above).
+    there is the image's only as far as the launch keeps the answer from
+    writing the trusted directories (above).
     [path_below_root] gives the path of a library's [.vo] file below the
     directory of the root the challenge stands in for that holds it
     ([Some "X/Y.vo"] for [<root>.X.Y]), and [None] for a library under no
@@ -202,7 +218,8 @@ val run :
     by real path) is one of [challenge_files], and the file the answer's
     loader read it from has the sha256 the config gives that file. A library
     is the image's own when it is under no such root, not pre-checked, and
-    its file passes the test of [prepare] above.
+    its file, as the answer's loader recorded it, passes the two tests of
+    [prepare] above.
 
     The verdict is one JSON object with the keys [format], [theorems],
     [declarations] and [admitted], in that order. [admitted] lists the
@@ -211,18 +228,27 @@ val run :
     @raise CErrors.UserError, before the challenge is loaded, when the file
     the answer's loader read a pre-checked library from is another file than
     the one [check_prechecked_files] hashed and its sha256 differs from the
-    pin, or when the answer did not load a pre-checked library; when the run
-    breaks a rule of [prepare]; when a pre-checked library rests, directly or
-    not, on a library that is neither pre-checked, nor pinned by its sha256
-    as a challenge file, nor the image's own, whether the run checks that
-    library or not; when the answer loaded a library under a root the
-    challenge stands in for without a check ([CheckLibrary.unchecked]: a
-    dependency of a library given with [-norec] or [-admit]) that is neither
-    pre-checked, nor pinned by its sha256 as a challenge file, nor in
-    [admitted], so a library an [admitted] one depends on is not exempt.
-    After the challenge is loaded: when the two sides record different
-    dependency digests for a library that is one file for both sides, or
-    when the config names a theorem the challenge does not hold.
+    pin, or when the answer did not load a pre-checked library; when the
+    answer breaks a rule of [prepare] (an open root, a shared library's
+    file); when a pre-checked library rests, directly or not, on a library
+    that is neither pre-checked, nor pinned by its sha256 as a challenge
+    file, nor the image's own, whether the run checks that library or not;
+    when the answer loaded a library under a root the challenge stands in
+    for without a check ([CheckLibrary.unchecked]: a dependency of a library
+    given with [-norec] or [-admit]) that is neither pre-checked, nor pinned
+    by its sha256 as a challenge file, nor in [admitted], so a library an
+    [admitted] one depends on is not exempt.
+    While the challenge is loaded, before any of it is imported: when the
+    challenge read a library under a root it stands in for, not pre-checked,
+    from a file whose real path is not under the real path of [dir]; when a
+    shared library the challenge loaded breaks the rule of [prepare] for a
+    shared library's file; when the two sides record different dependency
+    digests for a library that is one file for both sides; when the
+    challenge read a shared library the answer loaded too from another file
+    than the answer (real paths), or a pre-checked library from another file
+    than the answer whose sha256 is not the one the config pins.
+    After the challenge is loaded: when the config names a theorem the
+    challenge does not hold.
     A verdict is never an error: the file is written and the run exits 0. *)
 
 val sha256_of_file : string -> string
