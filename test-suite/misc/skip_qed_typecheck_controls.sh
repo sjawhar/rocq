@@ -277,30 +277,37 @@ says reset_keeps_bad "$unchecked_proof" option set inline
 # compile builds, and only such a document checks what it discards. With
 # -async-proofs on the Qed is delegated, and the worker restores the state it
 # froze before it, which is no rollback: the skip must still apply.
-# A delegation threshold of 0 delegates the proof whatever build time a
-# hint gives for it. -d misc shows the master sending the proof to a
-# worker: a case that reads $enqueued fails if the stm stops delegating it.
-delegated=(-async-proofs on -async-proofs-j 1
-  -async-proofs-delegation-threshold 0)
-enqueued='Enqueue task proof: discarded_bad'
-extra=("${delegated[@]}" -d misc)
+# -stm-debug makes each process print its steps to stderr, each line led by
+# its process id, which names a proof worker proof:<n>:<m>: a case that
+# reads it fails if the stm stops sending the proof to a worker.
+ran_in_worker() { # case
+  local arm
+  for arm in plain option set inline; do
+    grep -qE '[0-9]+:proof:[0-9]+:[0-9]+:[0-9]+\] ' "$workdir/$1/$arm.out" ||
+      { cat "$workdir/$1/$arm.out" >&2
+        fail "$1/$arm: no proof worker ran the proof"; }
+  done
+}
+delegated=(-async-proofs on -async-proofs-j 1)
+extra=("${delegated[@]}" -stm-debug)
 skips async_bad "$bad" 'Qed.'
-says async_bad "$enqueued" plain option set inline
+ran_in_worker async_bad
 # A block that a proof worker runs takes its Fail Qed or Succeed Qed with it.
 # The worker records no check, so the force of the control is the only check
 # there. Without it, Succeed would keep the ill-typed proof unchecked in the
 # .vo, or, under Admitted, nowhere.
 stops_with_kernel_error succeed_async_bad "$bad" 'Succeed Qed.' 'Qed.'
-says succeed_async_bad "$enqueued" plain option set inline
+ran_in_worker succeed_async_bad
 stops_with_kernel_error succeed_admitted_async_bad "$bad" 'Succeed Qed.' \
   'Admitted.'
-says succeed_admitted_async_bad "$enqueued" plain option set inline
+ran_in_worker succeed_admitted_async_bad
 same_status fail_admitted_async_bad 0 "$bad" 'Fail Qed.' 'Admitted.'
-says fail_admitted_async_bad "$enqueued" plain option set inline
+ran_in_worker fail_admitted_async_bad
 says fail_admitted_async_bad 'The command has indeed failed with message:' \
   plain option set inline
 says fail_admitted_async_bad "$kernel_error" plain option set inline
-# -d misc prints process ids, so a case that compares outputs runs without it.
+# -stm-debug prints process ids, so a case that compares outputs runs
+# without it.
 extra=("${delegated[@]}")
 same succeed_async_good 0 "$good" 'Succeed Qed.' 'Qed.'
 # The stm runs some commands under a resilience that drops their error, so the
@@ -314,7 +321,8 @@ extra=(-async-proofs on -async-proofs-j 1)
 same_status resilient_reset_bad 1 'Section S.' 'Variable n : nat.' "$bad" 'Qed.' \
   'Reset discarded_bad.' 'Definition x := 0.' 'End S.'
 says resilient_reset_bad "$kernel_error" option set inline
-# The document decides, so a compile that names a worker id still checks.
+# Whether a rollback checks depends on the kind of document rocq compile
+# builds, not on the process, so a compile that names a worker id still checks.
 extra=(-worker-id qed_rollback)
 stops_with_kernel_error worker_id_reset_bad "$bad" 'Qed.' \
   'Reset discarded_bad.'
@@ -336,9 +344,9 @@ extra=(-vok)
 forced_stops vok_bad "$bad" 'Qed.'
 same_status vok_good 0 "$good" 'Qed.'
 says vok_good "$ignored_option" option
-extra=(-vok "${delegated[@]}" -d misc)
+extra=(-vok "${delegated[@]}" -stm-debug)
 same_status vok_async_bad 1 "$bad" 'Qed.'
-says vok_async_bad "$enqueued" plain option set inline
+ran_in_worker vok_async_bad
 says vok_async_bad "$ignored_option" option
 # -l loads its file before the first line of the case, so the arm that sets
 # the flag there reaches it with the skip off: only the option arm and the
