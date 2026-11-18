@@ -1,0 +1,2 @@
+"name":"Top\.A\.thm","verdict":"fail","reason":"the challenge declaration Top\.A\.MT differs: the challenge leaves this declaration open and the answer defines it"
+"declarations":\[\{"name":"Top\.A\.MT","reason":"the challenge leaves this declaration open and the answer defines it"\}\]
