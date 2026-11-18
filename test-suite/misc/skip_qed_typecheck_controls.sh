@@ -191,7 +191,8 @@ same_status() { # case expected-status body...
   done
 }
 
-rolls_back() { # case body...
+# Every arm stops with status 1 and with the kernel's error.
+stops_with_kernel_error() { # case body...
   local case=$1
   shift
   same_status "$case" 1 "$@"
@@ -199,31 +200,35 @@ rolls_back() { # case body...
 }
 
 # Reset by name, Reset Initial, and Reset of the module that holds the proof.
-rolls_back reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
-rolls_back reset_initial_bad "$bad" 'Qed.' 'Reset Initial.'
-rolls_back reset_module_bad 'Module M.' "$bad" 'Qed.' 'End M.' 'Reset M.'
+stops_with_kernel_error reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
+stops_with_kernel_error reset_initial_bad "$bad" 'Qed.' 'Reset Initial.'
+stops_with_kernel_error reset_module_bad 'Module M.' "$bad" 'Qed.' 'End M.' \
+  'Reset M.'
 
 # One rollback discards three proofs: the well-typed one passes its check, and
 # of the two that do not, the error is the earlier one's, as it is without the
-# skip, which is what rolls_back reads.
+# skip, which is what stops_with_kernel_error reads.
 bad2='Lemma discarded_bad2 : True.
 Proof. exact_no_check 0.'
-rolls_back reset_three "$good" 'Qed.' "$bad" 'Qed.' "$bad2" 'Qed.' 'Reset kept_good.'
+stops_with_kernel_error reset_three "$good" 'Qed.' "$bad" 'Qed.' \
+  "$bad2" 'Qed.' 'Reset kept_good.'
 
 # Reset kept_good gives discarded_bad the handle of kept_good, and Reset m1
 # brings kept_good back under it: the check of discarded_bad must still run.
-rolls_back reset_reused_handle_bad 'Definition m0 := 0.' "$good" 'Qed.' \
-  'Definition m1 := 0.' 'Reset kept_good.' "$bad" 'Qed.' 'Reset m1.'
+stops_with_kernel_error reset_reused_handle_bad 'Definition m0 := 0.' \
+  "$good" 'Qed.' 'Definition m1 := 0.' 'Reset kept_good.' \
+  "$bad" 'Qed.' 'Reset m1.'
 
 # The stm closes a proof nested in another by discarding its declaration and
 # declaring it again, so the check of such a proof runs at its Qed, even here
 # where the file keeps the proof.
-rolls_back nested_bad 'Set Nested Proofs Allowed.' 'Lemma outer : True.' \
-  "$bad" 'Qed.' 'exact I.' 'Qed.'
+stops_with_kernel_error nested_bad 'Set Nested Proofs Allowed.' \
+  'Lemma outer : True.' "$bad" 'Qed.' 'exact I.' 'Qed.'
 
 # The stm reads a navigation command without its control, so Fail catches
 # nothing here.
-rolls_back fail_reset_bad "$bad" 'Qed.' 'Fail Reset discarded_bad.'
+stops_with_kernel_error fail_reset_bad "$bad" 'Qed.' \
+  'Fail Reset discarded_bad.'
 
 # (g) a navigation command that cannot roll back after a Qed is rejected
 # before it discards anything, with or without the skip, and the file stops
@@ -272,11 +277,32 @@ says reset_keeps_bad "$unchecked_proof" option set inline
 # compile builds, and only such a document checks what it discards. With
 # -async-proofs on the Qed is delegated, and the worker restores the state it
 # froze before it, which is no rollback: the skip must still apply.
-# -async-proofs-delegation-threshold 0 delegates it in every arm, even when
-# the arm before recorded a short build time for the proof in .case.aux.
-# The document decides, so a compile that names a worker id still checks.
-extra=(-async-proofs on -async-proofs-j 1 -async-proofs-delegation-threshold 0)
+# A delegation threshold of 0 delegates the proof whatever build time a
+# hint gives for it. -d misc shows the master sending the proof to a
+# worker: a case that reads $enqueued fails if the stm stops delegating it.
+delegated=(-async-proofs on -async-proofs-j 1
+  -async-proofs-delegation-threshold 0)
+enqueued='Enqueue task proof: discarded_bad'
+extra=("${delegated[@]}" -d misc)
 skips async_bad "$bad" 'Qed.'
+says async_bad "$enqueued" plain option set inline
+# A block that a proof worker runs takes its Fail Qed or Succeed Qed with it.
+# The worker records no check, so the force of the control is the only check
+# there. Without it, Succeed would keep the ill-typed proof unchecked in the
+# .vo, or, under Admitted, nowhere.
+stops_with_kernel_error succeed_async_bad "$bad" 'Succeed Qed.' 'Qed.'
+says succeed_async_bad "$enqueued" plain option set inline
+stops_with_kernel_error succeed_admitted_async_bad "$bad" 'Succeed Qed.' \
+  'Admitted.'
+says succeed_admitted_async_bad "$enqueued" plain option set inline
+same_status fail_admitted_async_bad 0 "$bad" 'Fail Qed.' 'Admitted.'
+says fail_admitted_async_bad "$enqueued" plain option set inline
+says fail_admitted_async_bad 'The command has indeed failed with message:' \
+  plain option set inline
+says fail_admitted_async_bad "$kernel_error" plain option set inline
+# -d misc prints process ids, so a case that compares outputs runs without it.
+extra=("${delegated[@]}")
+same succeed_async_good 0 "$good" 'Succeed Qed.' 'Qed.'
 # The stm runs some commands under a resilience that drops their error, so the
 # error of a check a rollback ran is raised again before the document ends.
 # The stm applies that resilience only when -async-proofs is not off, so this
@@ -288,22 +314,15 @@ extra=(-async-proofs on -async-proofs-j 1)
 same_status resilient_reset_bad 1 'Section S.' 'Variable n : nat.' "$bad" 'Qed.' \
   'Reset discarded_bad.' 'Definition x := 0.' 'End S.'
 says resilient_reset_bad "$kernel_error" option set inline
-# A block that a proof worker runs takes its Fail Qed or Succeed Qed with it.
-# The worker records no check, so the force of the control is the only check
-# there. Without it, Succeed would keep the ill-typed proof unchecked in the
-# .vo, or, under Admitted, nowhere.
-extra=(-async-proofs on -async-proofs-j 1 -async-proofs-delegation-threshold 0)
-rolls_back succeed_async_bad "$bad" 'Succeed Qed.' 'Qed.'
-rolls_back succeed_admitted_async_bad "$bad" 'Succeed Qed.' 'Admitted.'
-same succeed_async_good 0 "$good" 'Succeed Qed.' 'Qed.'
-same_status fail_admitted_async_bad 0 "$bad" 'Fail Qed.' 'Admitted.'
+# The document decides, so a compile that names a worker id still checks.
 extra=(-worker-id qed_rollback)
-rolls_back worker_id_reset_bad "$bad" 'Qed.' 'Reset discarded_bad.'
+stops_with_kernel_error worker_id_reset_bad "$bad" 'Qed.' \
+  'Reset discarded_bad.'
 
 # A command that writes no .vo forces the check; the option only warns.
 forced_stops() { # case body...
   local case=$1
-  rolls_back "$@"
+  stops_with_kernel_error "$@"
   says "$case" "$ignored_option" option
 }
 
@@ -317,9 +336,9 @@ extra=(-vok)
 forced_stops vok_bad "$bad" 'Qed.'
 same_status vok_good 0 "$good" 'Qed.'
 says vok_good "$ignored_option" option
-extra=(-vok -async-proofs on -async-proofs-j 1
-  -async-proofs-delegation-threshold 0)
+extra=(-vok "${delegated[@]}" -d misc)
 same_status vok_async_bad 1 "$bad" 'Qed.'
+says vok_async_bad "$enqueued" plain option set inline
 says vok_async_bad "$ignored_option" option
 # -l loads its file before the first line of the case, so the arm that sets
 # the flag there reaches it with the skip off: only the option arm and the
@@ -344,7 +363,9 @@ extra=()
 # it to every command through its _CoqProject, an editor among them. These
 # cases read the body through -l, with and without -async-proofs on: either
 # way a toplevel runs each sentence of a -l file as it reads it, so the Qed
-# finds its proof already run and checks it in the main process.
+# finds its proof already run and checks it in the main process. The
+# -async-proofs on cases pin that: a proof a toplevel sent to a worker would
+# leave its check to a join that -batch never runs.
 for tool in "rocq repl" coqidetop; do
   # coqidetop belongs to a package a build can leave out.
   [ -x "$BIN/${tool%% *}" ] || { echo "skipping $tool: not built"; continue; }
@@ -355,7 +376,7 @@ for tool in "rocq repl" coqidetop; do
   # The message is one of the command line's injections, so -w silences it,
   # and the check stays on.
   extra=(-w -skip-qed-typecheck-ignored)
-  rolls_back "${name}_quiet_bad" "$bad" 'Qed.'
+  stops_with_kernel_error "${name}_quiet_bad" "$bad" 'Qed.'
   ! grep -qF "$ignored_option" "$workdir/${name}_quiet_bad/option.out" ||
     { cat "$workdir/${name}_quiet_bad/option.out" >&2
       fail "${name}_quiet_bad: -w did not silence the message"; }
