@@ -995,9 +995,9 @@ type tables = {
 }
 
 (* Empty library tables, with the load path as it is when this is called.
-   [Check_compare.load_challenge] installs them for the challenge load, adds
-   its own directory to that load path, and decides which file each library
-   the challenge side reads may come from. *)
+   [Check_compare.load_challenge] installs them for the challenge load, binds
+   the challenge directory in that load path, and decides which file each
+   library the challenge side reads may come from. *)
 let fresh_tables () = {
   tb_libraries = LibraryMap.empty;
   tb_opaque_sources = LibraryMap.empty;

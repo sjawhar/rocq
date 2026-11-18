@@ -125,8 +125,8 @@
 # (unchecked-admit-closure), answer (shared-xdg, shared-nohome,
 # shared-coqpath, shared-user-contrib), linked and unlinked
 # (same-file-shared, same-file-prechecked), read-file and honest
-# (prechecked-read-file), garbage and honest (prechecked-garbage) and
-# <forgery> (forgeries).
+# (prechecked-read-file), garbage, directory and honest
+# (prechecked-garbage) and <forgery> (forgeries).
 #
 # The challenge and the answer are compiled from the SAME source layout, at
 # the same paths and under the same logical root (Top), which is what the
@@ -1587,7 +1587,9 @@ case_prechecked_read_file() {
 # marshal header there is no longer one, so the segment does not
 # unmarshal. Its sha256 is checked before any library is read: refused by
 # the pin's text, naming the file, and the loader never reads it (no
-# "Corrupted file", no anomaly). Then the honest answer passes.
+# "Corrupted file", no anomaly). Then that P/Q.vo is a directory: refused
+# before the file is opened, naming it, as one that is not a regular file.
+# Then the honest answer passes.
 case_prechecked_garbage() {
   local w c=prechecked-garbage code got pin
   w=$(mktemp -d)
@@ -1607,6 +1609,15 @@ case_prechecked_garbage() {
   ! grep -Eq 'Corrupted file|Try to rebuild it|[Aa]nomaly' "$w/log" \
     || { cat "$w/log"; fail "$c/garbage: the loader read the file before its sha256 was checked"; }
   passed "  ok $c/garbage"
+  rm -f "$w/out.json"
+  rm -f "$w/garbage/P/Q.vo"
+  mkdir "$w/garbage/P/Q.vo"
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/garbage" Top Top.A)
+  keep_verdict "$w/out.json" "$c" directory
+  expect_refused "$c/directory" "$code" "$w" \
+    "The pre-checked library Top\.P\.Q is [^ ]*/P/Q\.vo, which cannot be read: Is a directory, not a regular file\."
+  passed "  ok $c/directory"
   rm -f "$w/out.json"
   code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
   keep_verdict "$w/out.json" "$c" honest
@@ -1755,8 +1766,8 @@ held_of() { # <case>
     sha256|vos|digest|sibling) echo 1 ;;
     pre-dep-norec|shared-xdg|shared-nohome|shared-coqpath|shared-user-contrib) echo 1 ;;
     challenge-missing-dep|challenge-dir-link|unchecked-admit-closure) echo 3 ;;
-    same-file-shared|same-file-prechecked|prechecked-read-file|prechecked-garbage) echo 3 ;;
-    pre-dep-forged|unchecked-helper) echo 4 ;;
+    same-file-shared|same-file-prechecked|prechecked-read-file) echo 3 ;;
+    pre-dep-forged|unchecked-helper|prechecked-garbage) echo 4 ;;
     norec) echo $((1 + ${#norec_forms[@]})) ;;
     forgeries) echo $((1 + ${#forgery_names[@]})) ;;
     *) held_case "$cases_dir/$1" ;;

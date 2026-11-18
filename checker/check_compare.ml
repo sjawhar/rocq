@@ -41,10 +41,11 @@ open Declarations
     clib's [Sha256] (clib/sha256.ml, through [boot]), which the module below
     shadows in this file. clib's [string] and [file] give the same digests
     as [hex_of_string] and [hex_of_file], also as 64 lowercase hexadecimal
-    digits. The one difference is a file that cannot be read: clib's [file]
-    raises [Sys_error], and [hex_of_file] raises a user error with the
-    system's message, whether the file does not open or fails once open (a
-    directory opens, and its first read fails). *)
+    digits. The one difference is a file that is not a regular file or
+    cannot be read: clib's [file] opens it, and raises [Sys_error], blocks
+    or reads without end, and [hex_of_file] raises a user error, one of its
+    own, before opening it, for a file that is not a regular file, and the
+    system's message for a file that does not open or fails once open. *)
 
 module Sha256 : sig
   val hex_of_string : string -> string
@@ -166,22 +167,47 @@ end = struct
     feed st (Bytes.of_string s) 0 (String.length s);
     finish st
 
+  (* A file that is not a regular one, as [Unix.stat] sees it through links,
+     is refused before it is opened: a FIFO would block the open, and a link
+     to /dev/zero would never end. The message is the system's without the
+     file's name, which [open_in_bin]'s starts with: each caller names the
+     file itself. *)
   let hex_of_file f =
-    try
-      let ch = open_in_bin f in
-      Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
-          let st = create () in
-          let b = Bytes.create 65536 in
-          let rec loop () =
-            let n = input ch b 0 65536 in
-            if n > 0 then (feed st b 0 n; loop ())
-          in
-          loop ();
-          finish st)
-    with Sys_error e -> CErrors.user_err (Pp.str e)
+    let refuse e = CErrors.user_err (Pp.str e) in
+    let not_regular kind = refuse ("Is " ^ kind ^ ", not a regular file") in
+    match (Unix.stat f).Unix.st_kind with
+    | exception Unix.Unix_error (e, _, _) -> refuse (Unix.error_message e)
+    | Unix.S_DIR -> not_regular "a directory"
+    | Unix.S_CHR -> not_regular "a character device"
+    | Unix.S_BLK -> not_regular "a block device"
+    | Unix.S_LNK -> not_regular "a symbolic link"
+    | Unix.S_FIFO -> not_regular "a named pipe"
+    | Unix.S_SOCK -> not_regular "a socket"
+    | Unix.S_REG ->
+      try
+        let ch = open_in_bin f in
+        Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
+            let st = create () in
+            let b = Bytes.create 65536 in
+            let rec loop () =
+              let n = input ch b 0 65536 in
+              if n > 0 then (feed st b 0 n; loop ())
+            in
+            loop ();
+            finish st)
+      with Sys_error e ->
+        let named = f ^ ": " in
+        if CString.is_prefix named e then
+          refuse (String.sub e (String.length named) (String.length e - String.length named))
+        else refuse e
 end
 
-let sha256_of_file = Sha256.hex_of_file
+(* [rocqchk -sha256 FILE]: the error names the file, as every other caller
+   of [Sha256.hex_of_file] does. *)
+let sha256_of_file f =
+  try Sha256.hex_of_file f
+  with CErrors.UserError msg ->
+    CErrors.user_err Pp.(str ("The file " ^ f ^ " cannot be read: ") ++ msg ++ str ".")
 
 (************************************************************************)
 (** {6 JSON}
@@ -512,10 +538,10 @@ let prechecked_libraries cfg = List.map (fun p -> p.pc_library) cfg.cfg_precheck
 
 let cfg_error msg = CErrors.user_err Pp.(str ("The comparator config is wrong: " ^ msg ^ "."))
 
+(* [String.split_on_char] gives at least one component, and [Id.of_string]
+   refuses an empty one, so the empty name too. *)
 let dirpath_of_string s =
-  match String.split_on_char '.' s with
-  | [] -> cfg_error ("the library name " ^ s ^ " is empty")
-  | l -> DirPath.make (List.rev_map Id.of_string l)
+  DirPath.make (List.rev_map Id.of_string (String.split_on_char '.' s))
 
 let fields where keys l =
   List.iter (fun (k, _) ->
@@ -1317,11 +1343,31 @@ let eq_primitive_type ~challenge_env ~answer_env c1 c2 =
     inside stay mapped.
 
     No field is compared for a primitive-type registration
-    ([eq_primitive_type]): the kernel refuses to register a primitive type
-    while it builds a module type or a functor
-    ([Safe_typing.add_retroknowledge]), and the constants of a module,
-    sealed or not, are constants of the environment, whose registrations
-    [compare_declarations] compares. *)
+    ([eq_primitive_type]). The constants of a module, sealed or not, are
+    constants of the environment, whose registrations
+    [compare_declarations] compares. What keeps a registration off a field
+    of a module type of an answer library is rocqchk's own check of that
+    library (checker/mod_checking.ml), since the answer's files need not be
+    coqc's:
+    - [check_module_type] checks a module type with no registration in
+      force, and [check_module] and [check_signature] withhold them
+      ([without_constant_registrations]) while they check the type of a
+      sealed, algebraic or declared module or the body of a functor;
+    - [check_module] refuses a registration that no module body declares,
+      and [get_retroknowlege] one that gives its constant another canonical
+      name, so a registered constant is a field of a module body, named as
+      declared;
+    - a field whose canonical name differs from its user name, as a delta
+      resolver that maps a module-type field to a registered constant makes
+      it, must be a [Def] convertible with the constant its canonical name
+      names ([check_structure_field], through
+      [Subtyping.check_constant_alias]), and [eq_const_body] compares that
+      body: a challenge field left open refuses any body the answer gives
+      it.
+    The one exception is a library given with -admit, which is not checked:
+    a forged delta resolver of one of its module types, mapping a field to
+    a registered constant, is not caught here. The verdict lists that
+    library under [admitted]. *)
 
 let rec eq_signature m s1 s2 =
   match s1, s2 with
@@ -1465,8 +1511,9 @@ let hashed_files : (string, string) Hashtbl.t = Hashtbl.create 17
 
 (* The sha256 of [file]. A run hashes each file at most once: every later
    question about the same file is answered from [hashed_files]. A file
-   that cannot be read refuses the run: [what ()] says which file it is,
-   and the system's message follows. *)
+   that is not a regular file or cannot be read refuses the run: [what ()]
+   says which file it is, and the reason [Sha256.hex_of_file] gives
+   follows. *)
 let file_sha256 ~what file =
   let key = Option.default file (realpath file) in
   match Hashtbl.find_opt hashed_files key with
@@ -1593,6 +1640,12 @@ let check_prechecked_read t =
    refuses: the run stops unless the config pre-checks every library the
    answer loaded from under that root, which pins its sha256.
 
+   Unlike the rule of [under_challenge_root], this one counts a library
+   named exactly as an open root too, which is stricter: such a library is
+   refused unless pre-checked, even when it is under a root the challenge
+   stands in for (with -Q d1 A -Q d2 A.B and A.B open, the library A.B,
+   which is d1/B.vo).
+
    Production binds one root, the answer's project root, which every checked
    answer library lives under and the challenge therefore stands in for, so
    the list is empty there. A test harness that binds a stand-in for the
@@ -1629,9 +1682,9 @@ let in_libs libs mp = match mp_root mp with
    lies under a root the challenge stands in for, and a shared one when it
    does not. The checks that tell these three apart read this. Two tests are
    of other classes: [check_open_roots] asks only whether a library under an
-   open root is pre-checked, and [check_constraints] tells a level of a
-   library under a root the challenge stands in for, pre-checked or not,
-   from every other level. *)
+   open root, or named as one, is pre-checked, and [check_constraints] tells
+   a level of a library under a root the challenge stands in for,
+   pre-checked or not, from every other level. *)
 type origin = Prechecked | Own | Shared
 
 let origin t dp =

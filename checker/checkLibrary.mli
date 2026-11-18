@@ -21,6 +21,11 @@ type object_file =
 | PhysicalFile of physical_path
 | LogicalFile of section_path
 
+val path_of_dirpath : DirPath.t -> section_path
+(** A library's full logical name as a [LogicalFile] names it: its last
+    component is the [basename], and the others, last first, the [dirpath].
+    @raise Failure on the empty name. *)
+
 type logical_path = DirPath.t
 
 val default_root_prefix : DirPath.t

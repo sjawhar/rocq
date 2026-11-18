@@ -201,8 +201,8 @@ val prepare :
     such root: [dir] holds the challenge's file of that library at that path.
     [open_roots] are the bound roots the challenge does NOT stand in for,
     with the directory each is bound to; the run is refused when the answer
-    loaded a library from under one of them that the config does not
-    pre-check.
+    loaded a library from under one of them, or named as one of them, that
+    the config does not pre-check.
     @raise CErrors.UserError when a file is missing, cannot be read or its
     sha256 differs. *)
 
@@ -286,4 +286,7 @@ val run :
 val sha256_of_file : string -> string
 (** The hex SHA-256 of a file. [rocqchk -sha256 FILE] prints it, which is how
     the test suite checks this implementation against the standard vectors
-    and against [sha256sum]. *)
+    and against [sha256sum].
+    @raise CErrors.UserError, naming the file, when it is not a regular file
+    (by [Unix.stat], which follows links), before opening it, or when it
+    cannot be read. *)

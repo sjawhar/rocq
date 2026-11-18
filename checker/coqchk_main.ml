@@ -309,17 +309,13 @@ let add_compile s =
 (* Under -compare, the pin of each pre-checked library is checked before any
    library is read ([Check_compare.check_prechecked_files]), and the
    pre-checked libraries then join the admit list, after the libraries given
-   with -admit: [admit_list] itself holds only the latter ([run_compare]).
-   Each is a name [Check_compare.read_config] parsed, which has at least one
-   component. *)
+   with -admit: [admit_list] itself holds only the latter ([run_compare]). *)
 let compile_files senv =
   let prechecked = match !compare_config with
     | None -> []
     | Some cfg ->
       Check_compare.check_prechecked_files cfg;
-      List.map (fun dp ->
-          let ids = List.map Id.to_string (DirPath.repr dp) in
-          CheckLibrary.LogicalFile { basename = List.hd ids; dirpath = List.tl ids })
+      List.map (fun dp -> CheckLibrary.LogicalFile (CheckLibrary.path_of_dirpath dp))
         (Check_compare.prechecked_libraries cfg)
   in
   CheckLibrary.recheck_library ~output_context:!Check_stat.output_context senv
@@ -759,8 +755,10 @@ let run_compare env =
     let answer_deps = CheckLibrary.interned_deps () in
     (* The challenge directory stands in for the answer's directory under
        each root that an answer library named on the command line lives
-       under. A root that only a pre-checked library or another shared tree
-       uses is left alone: the challenge directory does not hold it.
+       under, by the one rule of "under a root" below: a checked name equal
+       to a root does not select it. A root that only a pre-checked library
+       or another shared tree uses is left alone: the challenge directory
+       does not hold it.
 
        Both selection forms that name a library to CHECK count: the
        positional names ([compile_list], checked with their dependencies)
@@ -780,17 +778,19 @@ let run_compare env =
     in
     let substitutes root =
       let r = DirPath.to_string root in
-      List.exists (fun n -> String.equal n r || CString.is_prefix (r ^ ".") n) checked_names
+      List.exists (fun n -> CString.is_prefix (r ^ ".") n) checked_names
     in
     (* [challenge_roots] are the roots the challenge stands in for, one per
        -Q or -R that binds such a root, in command-line order, and
        [prefixes] each of them with the dot after it, which starts every
-       library name under it. A library is under one of those roots when
-       its name is the root's followed by at least one more component; a
-       library whose name is a root's own is under none, since the root's
-       directory cannot hold it. [under_challenge_root] and
-       [path_below_root] test the same prefixes, so they agree on every
-       library, and [open_roots] are the bound roots not in the list.
+       library name under it. A library is under a root when its name is
+       the root's followed by at least one more component; a library whose
+       name is a root's own is not under that root, since that root's
+       directory cannot hold it (with -Q d1 A -Q d2 A.B, the library A.B is
+       under A and not under A.B). [substitutes] applies that one rule to
+       the checked names, and [under_challenge_root] and [path_below_root]
+       to every library, so the two agree on each, and [open_roots] are the
+       bound roots not in the list.
 
        A library under one of those roots, unless pre-checked, is the
        answer's own: the challenge directory holds its counterpart, at the
