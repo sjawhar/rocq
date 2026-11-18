@@ -118,6 +118,13 @@
 #      record would match, so nothing is recorded, the counts are not
 #      written, and -j 3 prints what -j 1 prints, and "records off:
 #      merge-inductives".
+#  (s) W.v: opaque proofs that reach an axiom only in a branch of a match,
+#      only in the body of a fixpoint, and only in the body of a
+#      cofixpoint, at -j 1 and at -j 3, which takes every body from the
+#      records: M = 0. The report lists each axiom for its proof, which
+#      guards that the walk (Check_closure.push_subterms) enters the
+#      branches of a match and the bodies of a fixpoint and of a
+#      cofixpoint, since a walk that skipped them would miss the axiom.
 #
 # A case where /dev/shm is missing, not writable, or writable by other
 # users without its sticky bit needs another mount of /dev/shm than the
@@ -134,7 +141,7 @@ t=$(mktemp -d)
 # The TMPDIR made in /dev/shm for (q), once it is made.
 s=
 trap 'rm -rf "$d" "$t"; [ -z "$s" ] || rm -rf "$s"' EXIT
-mkdir "$d/lib" "$d/prims" "$d/big" "$d/good" "$d/bad" "$d/spliced"
+mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/good" "$d/bad" "$d/spliced"
 
 {
   cat <<'EOF'
@@ -249,6 +256,25 @@ for i in $(seq 2 200); do sum="$sum + filler_$i"; done
 } > "$d/big/K.v"
 rocq c -native-compiler no -Q "$d/big" SRBig "$d/big/K.v"
 
+# W.v, for (s): each opaque proof names its axiom in one subterm only:
+# in_branch in a branch of a match, in_fix in the body of a fixpoint,
+# outside the match of that body, and in_cofix in the body of a cofixpoint.
+cat > "$d/walk/W.v" <<'EOF'
+Axiom axm : nat -> bool.
+Lemma in_branch : nat -> bool.
+Proof. exact (fun n => match n with O => true | S m => axm m end). Qed.
+
+Axiom axf : nat -> nat.
+Lemma in_fix : nat -> nat.
+Proof. exact (fix F (n : nat) : nat := axf (match n with O => O | S m => F m end)). Qed.
+
+CoInductive str : Set := scons : nat -> str -> str.
+Axiom axc : nat.
+Lemma in_cofix : str.
+Proof. exact (cofix G : str := scons axc G). Qed.
+EOF
+rocq c -native-compiler no -Q "$d/walk" SRWalk "$d/walk/W.v"
+
 cat > "$d/a.req" <<'EOF'
 via SRPar.A.via -
 model_a SRPar.A.model_a -
@@ -279,6 +305,11 @@ string SRPrim.Prims.s -
 array SRPrim.Prims.a -
 EOF
 for j in $(seq 1 12); do echo "big_$j SRBig.K.big_$j -"; done > "$d/k.req"
+cat > "$d/s.req" <<'EOF'
+in_branch SRWalk.W.in_branch -
+in_fix SRWalk.W.in_fix -
+in_cofix SRWalk.W.in_cofix -
+EOF
 
 fail() { >&2 echo "FAILURE: $*"; exit 1; }
 
@@ -831,5 +862,22 @@ run r-j3 3 -statement-report "$d/r.req" -merge-inductives "${dargs[@]}"
 same r-j1 r-j3 0 "(r) -j 3 with -merge-inductives"
 not_recorded r-j3 "(r) -j 3 with -merge-inductives"
 records_line r-j3 "rocqchk: statement report: records off: merge-inductives"
+
+# (s) Each proof names its axiom in one subterm only, which a walk that
+# skipped that subterm would not reach: a branch of the match of
+# in_branch, whose scrutinee and return type name no axiom; the body of
+# the fixpoint of in_fix, whose type is nat -> nat, outside the match of
+# that body; the body of the cofixpoint of in_cofix, whose type is str.
+# Each worker finds the objects of a body with the same walk
+# (Check_closure.opaque_body_refs), and M = 0 shows that -j 3 took every
+# body from the records: the lines below are, at -j 3, what the workers'
+# walk found, and at -j 1, what the report's own walk found.
+report s -Q "$d/walk" SRWalk -norec SRWalk.W
+[ "$reads" = 0 ] || { cat "$d/s-j3.err" >&2; fail "(s) -j 3: $reads bodies read, all were checked"; }
+for name in s-j1 s-j3; do
+  has "$name" 'axiom in_branch SRWalk.W.axm'
+  has "$name" 'axiom in_fix SRWalk.W.axf'
+  has "$name" 'axiom in_cofix SRWalk.W.axc'
+done
 
 exit 0

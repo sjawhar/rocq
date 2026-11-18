@@ -126,33 +126,52 @@ let no_object = GlobRef.VarRef (Id.of_string "dummy")
 (* The slots of the stack below that a cache starts with. *)
 let stack_start = 1024
 
-(* The node last walked at each slot, and the generation it was walked in.
-   Each walk takes a new generation ([fresh_gen]), so that it sees no entry
-   of another. Where [noting], the slots the current generation wrote are
-   noted too, the first [touched_count] of [touched], so that [forget] can
-   empty them: only the cache of [opaque_body_refs] needs that.
-
-   The terms the current walk has still to visit, each with the view that
-   typed it, are a stack: the first [size] of [terms] and of [views], the
-   last one on top ([push]). A walk keeps the arrays the walks before it
-   left, which are doubled when full and never shrunk, so that it allocates
-   nothing to visit a node. Only the first [peak] slots of [terms] can hold
-   a term, and the walk empties them as it ends ([end_walk]).
-
-   [objects] holds the objects the walk built last ([const_ref], [ind_ref]),
-   one at each slot. *)
+(* What [walk] keeps from one node to the next, in three parts that last
+   differently: the table of [seen] ([keys] to [touched_count]), which
+   each walk takes in a new generation; the stack of the terms to visit
+   ([terms] to [peak]), which lasts one walk; and [objects], which lasts as
+   long as the cache. One walk at a time on a cache, since its stack is the
+   current walk's: an [add] must not walk. A walk that an [add] started on
+   the same cache would empty the stack as it ended ([end_walk]), and the
+   walk that called that [add] would lose the terms it had still to visit,
+   and their objects, with no error. *)
 type walk_cache = {
   keys : Constr.t array;
+  (* the node last walked at each slot of [seen]: kept until a later walk
+     writes the slot or, where [noting], until the walk that wrote it ends
+     ([end_walk]) *)
   gens : int array;
+  (* the generation that wrote each slot of [keys], kept until a later
+     generation writes the slot *)
   mutable gen : int;
+  (* the generation of the current walk, or of the last one: each walk takes
+     a new one ([fresh_gen]), so that it sees no slot another walk wrote *)
   noting : bool;
+  (* whether the cache notes in [touched] the slots each walk writes, for
+     its whole life: only the cache of [opaque_body_refs] does *)
   touched : int array;
+  (* where [noting], the slots of [keys] that the current walk wrote, each
+     once, the first [touched_count]: the next walk writes over them *)
   mutable touched_count : int;
+  (* the slots of [touched] that the current walk filled, from its start
+     ([fresh_gen]) to the start of the next walk; always 0 where not
+     [noting] *)
   mutable terms : Constr.t array;
+  (* the stack of the terms the current walk has still to visit: the first
+     [size], the last one on top ([push]); the array is kept from one walk
+     to the next, doubled when full and never shrunk, so that [push]
+     allocates only where the stack outgrows it *)
   mutable views : view array;
+  (* the view that typed each term of [terms], at the same slot, kept the
+     same way *)
   mutable size : int;
+  (* the terms on the stack: 0 between two walks ([end_walk]) *)
   mutable peak : int;
+  (* the first slots of [terms] that the current walk wrote, the only ones
+     that can hold a term: [end_walk] empties them, and sets [peak] to 0 *)
   objects : GlobRef.t array;
+  (* the object the walks built last at each slot ([const_ref], [ind_ref]),
+     kept as long as the cache: nothing empties it *)
 }
 
 let walk_cache ~noting = {
@@ -190,13 +209,6 @@ let seen cache gen c =
     false
   end
 
-(* Empties the slots that the current generation wrote, so that the cache
-   no longer holds the term it walked. *)
-let forget cache =
-  for j = 0 to cache.touched_count - 1 do
-    cache.keys.(cache.touched.(j)) <- Constr.mkProp
-  done
-
 (* Pushes the term [c], in the view [view], on the stack of terms to visit. *)
 let push cache view c =
   let n = cache.size in
@@ -215,14 +227,21 @@ let push cache view c =
 let push_array cache view a =
   for i = 0 to Array.length a - 1 do push cache view a.(i) done
 
-(* Pushes the subterms of a node that the walk enters, from the first to the
-   last in the order of [Constr.fold], and, as [Constr.fold] does, raises
-   [Invalid_argument] for a fixpoint that has not as many bodies as types.
-   [Constr.iter] is not used: it takes the subterms of a fixpoint in another
-   order, and makes a closure for each [match]. *)
+(* Pushes the subterms of a node that [walk] enters, from the first to the
+   last in the order of [Constr.fold]. For a fixpoint that has not as many
+   bodies as types, it raises, before it pushes any, the exception that
+   [Constr.fold] raises there: [Invalid_argument "Array.fold_left2"], with
+   the message of [CArray.fold_left2], which [Constr.fold] calls, copied: a
+   change of that message must be made here too. [Constr.fold] itself is
+   not used: it needs a closure that captures [view], made at each node, and
+   its [Case] and [Fix] arms make closures of their own.
+   [Constr.iter] is not used either: it takes the subterms of a fixpoint in
+   another order, and makes a closure for each [match]. *)
 let push_subterms cache view c =
   let open Constr in
   match kind c with
+  (* the nodes [walk] does not enter, which have no subterms but [Evar]:
+     [Constr.fold] folds an [Evar]'s instance, which [walk] never reaches *)
   | Rel _ | Var _ | Meta _ | Evar _ | Sort _ | Const _ | Ind _ | Construct _
   | Int _ | Float _ | String _ -> ()
   | Cast (t, _, ty) -> push cache view t; push cache view ty
@@ -242,12 +261,17 @@ let push_subterms cache view c =
   | Array (_, elems, def, ty) ->
     push_array cache view elems; push cache view def; push cache view ty
 
-(* Empties the stack, and the slots of [terms] that the walk wrote, so that
-   the cache no longer holds the terms it walked. *)
+(* Ends a walk: empties the stack, the slots of [terms] that the walk wrote
+   and, where [noting], the slots of [keys] that it wrote, so that the cache
+   keeps no term the walk visited alive, but in the slots of [keys] of a
+   cache not [noting]. *)
 let end_walk cache =
   for i = 0 to cache.peak - 1 do cache.terms.(i) <- Constr.mkProp done;
   cache.size <- 0;
-  cache.peak <- 0
+  cache.peak <- 0;
+  for j = 0 to cache.touched_count - 1 do
+    cache.keys.(cache.touched.(j)) <- Constr.mkProp
+  done
 
 (* The object [GlobRef.ConstRef kn]: the one at the slot of [objects] that
    the hash [kn] carries picks, where it is made of that very name ([==]),
@@ -285,7 +309,7 @@ type state = {
   (* each object reached so far, keyed by its constant or by the first
      inductive of its block, in the declaration view that typed its use *)
   cache : walk_cache;
-  (* the cache of [seen] *)
+  (* the cache of [seen], the stack and the objects of [walk] *)
 }
 
 and node = {
@@ -435,8 +459,6 @@ let add_ref view obj ((public, implementation) as refs) = match view with
     if GlobRef.Set_env.mem obj implementation then refs
     else public, GlobRef.Set_env.add obj implementation
 
-let add_mind add cache view mind refs = add view (ind_ref cache mind) refs
-
 (* The primitive type a literal has, which the kernel looks up to type it. *)
 let add_prim add cache view prim refs = match prim with
   | Some c -> add view (const_ref cache c) refs
@@ -455,20 +477,24 @@ let refs_to_list (public, implementation) =
    primitive type of a literal or an array, are objects the term relies on
    even though no subterm names them.
 
-   The walk takes the terms of [todo] in their order, each when the stack
-   is empty, and the subterms of a node from the last to the first: the
-   order of a list of the terms to visit, to the front of which a node adds
-   its subterms in the order of [Constr.fold]. The objects it adds do not
-   depend on that order: [seen] only skips a node walked before in the same
-   generation, whose subterms were pushed then, so every node that [todo]
-   reaches is walked and adds its objects. The order only decides which of
-   two objects that [GlobRef.UserOrd] does not tell apart (one user name,
-   two canonical names) a set keeps: the first one added.
+   The walk pushes each term of [todo] in its order, when the stack is
+   empty, and visits the term on the top of the stack, which it pops. A
+   node it enters pushes its subterms in the order of [Constr.fold]
+   ([push_subterms]), so the walk takes them from the last to the first,
+   and is done with all that the last one leads to before it takes the one
+   below it. The objects it adds do not depend on that order: [seen] only
+   skips a node walked before in the same generation, whose subterms were
+   pushed then, so every node that [todo] reaches is walked and adds its
+   objects. The order only decides which of two objects that
+   [GlobRef.UserOrd] does not tell apart (one user name, two canonical
+   names) a set keeps: the first one added.
 
-   Visiting a node allocates nothing, except where a set gains an object
-   ([add_ref]), where [objects] has not the one the node names ([const_ref],
-   [ind_ref]), and where the stack outgrows its arrays ([push]). The walk
-   empties the stack as it ends, by an exception too ([end_walk]). *)
+   The walk's own code allocates nothing to visit a node, except where a
+   set gains an object ([add_ref]), where [objects] has not the one the
+   node names ([const_ref], [ind_ref]), and where the stack outgrows its
+   arrays ([push]). That claim leaves out [Constr.hash_bounded], which
+   [seen] calls for each compound node the walk pops, and which may
+   allocate. The walk ends with [end_walk], by an exception too. *)
 let walk add env cache todo =
   let gen = fresh_gen cache in
   let retro = Environ.retroknowledge env in
@@ -488,13 +514,13 @@ let walk add env cache todo =
       | String _ -> go (add_prim add cache view retro.Retroknowledge.retro_string refs) todo
       | Const (kn, _) -> go (add view (const_ref cache kn) refs) todo
       | Ind ((mind, _), _) | Construct (((mind, _), _), _) ->
-        go (add_mind add cache view mind refs) todo
+        go (add view (ind_ref cache mind) refs) todo
       | Cast _ | Prod _ | Lambda _ | LetIn _ | App _ | Proj _ | Case _ | Fix _ | CoFix _ | Array _ ->
         if seen cache gen c then go refs todo
         else
           let refs = match kind c with
-            | Case (ci, _, _, _, _, _, _) -> add_mind add cache view (fst ci.ci_ind) refs
-            | Proj (p, _, _) -> add_mind add cache view (Projection.mind p) refs
+            | Case (ci, _, _, _, _, _, _) -> add view (ind_ref cache (fst ci.ci_ind)) refs
+            | Proj (p, _, _) -> add view (ind_ref cache (Projection.mind p)) refs
             | Array _ -> add_prim add cache view retro.Retroknowledge.retro_array refs
             | _ -> refs
           in
@@ -538,26 +564,22 @@ let add_finite view obj refs =
    The first object whose names are not finite ends the walk, and the body
    has no objects to record, [None].
 
-   The cache of these walks, 6 MiB on a 64-bit machine, is made once:
-   [prepare_opaque_body_refs] makes it in the main process before any
-   worker is forked, so that the workers share it until they write to it.
-   Each call empties the slots it wrote once it is done ([forget]), as the
-   walk empties its stack ([end_walk]): a worker checks one body after
-   another, and the cache would otherwise keep the last body it walked
-   alive. The objects it keeps ([const_ref], [ind_ref]) hold names only. *)
+   The cache of these walks is made once: [prepare_opaque_body_refs] makes
+   it in the main process before any worker is forked, so that the workers
+   share it until they write to it. On a 64-bit machine it takes 6 MiB plus
+   48 KiB, plus a stack that grows to fit the largest walk it has run, which
+   it keeps. Each walk, as it ends ([end_walk]), empties its stack and the
+   slots of [seen] that it wrote: a worker checks one body after another,
+   and the cache would otherwise keep the last body it walked alive. The
+   objects it keeps ([const_ref], [ind_ref]) hold names only. *)
 let body_walk_cache = lazy (walk_cache ~noting:true)
 
 let prepare_opaque_body_refs () = ignore (Lazy.force body_walk_cache)
 
 let opaque_body_refs env c =
-  let cache = Lazy.force body_walk_cache in
-  match walk add_finite env cache [Public, c] with
-  | public, _ -> forget cache; Some (GlobRef.Set_env.elements public)
-  | exception Name_not_finite -> forget cache; None
-  | exception e ->
-    let e = Exninfo.capture e in
-    forget cache;
-    Exninfo.iraise e
+  match walk add_finite env (Lazy.force body_walk_cache) [Public, c] with
+  | public, _ -> Some (GlobRef.Set_env.elements public)
+  | exception Name_not_finite -> None
 
 let push_context view ctx todo =
   List.fold_left (fun todo d ->

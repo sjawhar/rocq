@@ -908,16 +908,17 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   14 bytes of the 256 MiB it copies, which leaves room for about 19 Mi of
   them. Each takes about 120 bytes or more, with its entries in the arrays
   and the map that decoding uses, so up to about 2 GiB more. Before the
-  first worker starts, the main process also makes a cache of 6 MiB, which
-  each worker that records copies in part, as it writes to it. These
-  figures are estimates for a 64-bit machine, from the data that
-  ``rocqchk`` keeps. Libraries within these bounds can make ``rocqchk``
-  use more memory with the records than without them: for instance, many
-  opaque proofs that each name many objects, which the report does not
-  reach, are recorded all the same. A limit on the size of files
-  (``ulimit -f``) that the records meet costs only records: such a write
-  fails, instead of killing ``rocqchk``, and the report reads the proofs
-  whose records are lost.
+  first worker starts, the main process also makes a cache of 6 MiB plus
+  48 KiB, plus a stack that grows to fit the largest walk through a proof
+  and is kept; each worker that records copies the cache in part, as it
+  writes to it. These figures are estimates for a 64-bit machine, from the
+  data that ``rocqchk`` keeps. Libraries within these bounds can make
+  ``rocqchk`` use more memory with the records than without them: for
+  instance, many opaque proofs that each name many objects, which the
+  report does not reach, are recorded all the same. A limit on the size of
+  files (``ulimit -f``) that the records meet costs only records: such a
+  write fails, instead of killing ``rocqchk``, and the report reads the
+  proofs whose records are lost.
 
   Nothing is recorded with ``-compare``, ``-merge-inductives`` or
   ``-merge-inductives-verbose``. Nor is anything recorded where

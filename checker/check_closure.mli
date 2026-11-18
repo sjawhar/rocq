@@ -97,9 +97,10 @@ val opaque_body_refs : Environ.env -> Constr.t -> Names.GlobRef.t list option
     ([ReportRecords]). *)
 
 val prepare_opaque_body_refs : unit -> unit
-(** Makes the cache that [opaque_body_refs] uses, 6 MiB on a 64-bit
-    machine, if it is not made yet: in the main process before any worker
-    is forked, the workers share it until they write to it. *)
+(** Makes the cache that [opaque_body_refs] uses, if it is not made yet: in
+    the main process before any worker is forked, the workers share it until
+    they write to it. On a 64-bit machine it takes 6 MiB plus 48 KiB, plus a
+    stack that grows to fit the largest walk it has run, which it keeps. *)
 
 (** {6 The closure, for [rocqchk -compare]} *)
 
