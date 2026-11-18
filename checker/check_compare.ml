@@ -1828,6 +1828,84 @@ let check_constraints t ~challenge_env ~answer_env m =
     | Some e -> Some ("the answer has a universe constraint the challenge does not: " ^ e), None
     | None -> None, None
 
+(* The global elimination constraints: which sort qualities eliminate to
+   which. An environment's quality graph ([Environ.qualities]) holds the
+   constant qualities Prop, SProp and Type and every global sort a loaded
+   library declares ([Sort s]), with the elimination constraints between
+   them ([Constraint s -> Prop]). Such a constraint is not part of any
+   declaration the comparison walks, yet it decides what a match on a value
+   of a type in that sort may return, and so what a statement over it says.
+
+   Qualities are compared by identity, with no map: in 9.2 a global sort is
+   a [Sorts.QGlobal.t], its library and its name, which [QGlobal.equal]
+   compares, and the kernel numbers no quality, so the challenge's sort and
+   the answer's sort of one library and one name are one quality.
+
+   Let Q be the global sorts of the challenge graph. (1) Every ordered pair
+   (a, b), a <> b, of the challenge graph's qualities with a or b in Q that
+   eliminates in the challenge must have both qualities declared in the
+   answer graph and eliminate there. (2) Every ordered pair (a, b), a <> b,
+   of the answer graph's qualities with a or b in Q that eliminates in the
+   answer must have both qualities declared in the challenge graph and
+   eliminate there. [QGraph.eliminates_to] is reachability in the graph, so
+   a path through a sort only the answer declares counts, and a pair of a
+   challenge sort and a sort only the answer declares that eliminates in the
+   answer fails. Pairs of two sorts only the answer declares, and pairs of
+   two constants, are not compared.
+
+   Both graphs are read with [ignore_constraints] off, so that
+   [eliminates_to] answers from the constraints themselves, and it is asked
+   only of qualities its graph declares ([QGraph.is_declared]): on any
+   other it raises an anomaly. The tolerance [answer-universe-constraints]
+   skips neither direction. Direction (1) is checked first, and the failing
+   pairs of the first direction that fails are reported as
+   [check_constraints] reports universe constraints: sorted, up to five,
+   then how many more. *)
+let check_elim_constraints ~challenge_env ~answer_env =
+  let gch = QGraph.set_ignore_constraints false (Environ.qualities challenge_env)
+  and gan = QGraph.set_ignore_constraints false (Environ.qualities answer_env) in
+  let globals = Sorts.Quality.Set.filter Sorts.Quality.is_qglobal (QGraph.domain gch) in
+  let eliminates g a b =
+    QGraph.is_declared a g && QGraph.is_declared b g && QGraph.eliminates_to g a b
+  in
+  let name = function
+    | Sorts.Quality.QConstant c -> Pp.string_of_ppcmds (Sorts.Quality.Constants.pr c)
+    | Sorts.Quality.QVar v ->
+      match Sorts.QVar.repr v with
+      | Sorts.QVar.Global g -> Sorts.QGlobal.to_string g
+      | Sorts.QVar.Var _ | Sorts.QVar.Unif _ -> Sorts.QVar.to_string v
+  in
+  let shown = 5 in
+  (* The pairs of [from]'s qualities, one of them in Q, that eliminate in
+     [from] and not in [onto]. *)
+  let fails from onto =
+    let qs = Sorts.Quality.Set.elements (QGraph.domain from) in
+    let bad = List.fold_left (fun acc a ->
+        List.fold_left (fun acc b ->
+            if Sorts.Quality.equal a b
+            || not (Sorts.Quality.Set.mem a globals || Sorts.Quality.Set.mem b globals)
+            || not (eliminates from a b)
+            || eliminates onto a b
+            then acc
+            else Printf.sprintf "%s -> %s" (name a) (name b) :: acc)
+          acc qs)
+        [] qs
+    in
+    match List.sort String.compare bad with
+    | [] -> None
+    | l ->
+      let n = List.length l in
+      let head = CList.firstn (min shown n) l in
+      Some (String.concat ", " head ^
+            (if n > shown then Printf.sprintf " (and %d more)" (n - shown) else ""))
+  in
+  match fails gch gan with
+  | Some e -> Some ("the challenge has an elimination constraint the answer does not: " ^ e)
+  | None ->
+    match fails gan gch with
+    | Some e -> Some ("the answer has an elimination constraint the challenge does not: " ^ e)
+    | None -> None
+
 (* Every challenge declaration, in the order the name sorts. A declaration the
    answer does not hold is a failure; a declaration only the answer holds is
    not visited. *)
@@ -1887,7 +1965,8 @@ let compare_declarations t ~challenge_env ~answer_env ~libs ~theorems =
   let universes, skipped_answer_constraints =
     check_constraints t ~challenge_env ~answer_env !m
   in
-  List.rev !failures, universes, skipped_answer_constraints
+  let qualities = check_elim_constraints ~challenge_env ~answer_env in
+  List.rev !failures, universes, qualities, skipped_answer_constraints
 
 (************************************************************************)
 (** {6 The verdict} *)
@@ -2086,7 +2165,7 @@ let run t env access senv0 ~answer_deps ~admitted =
     List.fold_left (fun acc th -> CString.Set.add th.th_name acc) CString.Set.empty
       t.cfg.cfg_theorems
   in
-  let failures, universes, skipped_answer_constraints =
+  let failures, universes, qualities, skipped_answer_constraints =
     compare_declarations t ~challenge_env ~answer_env:env ~libs ~theorems
   in
   let failed_decl =
@@ -2199,6 +2278,9 @@ let run t env access senv0 ~answer_deps ~admitted =
                   match universes with
                   | Some u -> Some u
                   | None ->
+                  match qualities with
+                  | Some q -> Some q
+                  | None ->
                     match rewrite_rule with
                     | Some c ->
                       Some ("the answer declares a rewrite rule on " ^ Constant.to_string c)
@@ -2246,6 +2328,9 @@ let run t env access senv0 ~answer_deps ~admitted =
     @ (match universes with
        | None -> []
        | Some u -> [Json.Obj ["name", Json.Str "<universes>"; "reason", Json.Str u]])
+    @ (match qualities with
+       | None -> []
+       | Some q -> [Json.Obj ["name", Json.Str "<qualities>"; "reason", Json.Str q]])
   in
   (* The libraries given with -admit, which the run loads without a check:
      [admitted] as the caller gives it, each by its full logical name, once,

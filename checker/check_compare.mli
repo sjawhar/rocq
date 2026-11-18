@@ -118,12 +118,13 @@ val read_config : string -> config
 
     [answer-universe-constraints] is a kind-only tolerance for the global
     universe comparison, and one that names an object is an error. It skips
-    only the answer-to-challenge direction; the challenge-to-answer
-    direction, declaration comparison, axiom checks and kernel checking
-    still run. If that skipped direction would have failed, the record of
-    every theorem the answer holds carries the flag with an object that
-    summarizes the first failing constraints and their remaining count. It is
-    not recorded when the direction already passes.
+    only the answer-to-challenge direction of the universe comparison; the
+    challenge-to-answer direction, both directions of the comparison of
+    elimination constraints ([run]), declaration comparison, axiom checks
+    and kernel checking still run. If that skipped direction would have
+    failed, the record of every theorem the answer holds carries the flag
+    with an object that summarizes the first failing constraints and their
+    remaining count. It is not recorded when the direction already passes.
 
     [assumed-positive], [unsafe-fixpoint] and [type-in-type] are an error
     with an object or without: each is how a proof of False is written, and
@@ -222,8 +223,24 @@ val run :
     [prepare] above.
 
     The verdict is one JSON object with the keys [format], [theorems],
-    [declarations] and [admitted], in that order. [admitted] lists the
-    libraries of [admitted], and is [[]] when no [-admit] is given.
+    [declarations] and [admitted], in that order. [declarations] holds a
+    record [{name, reason}] for each challenge declaration the answer lacks
+    or changes, then the record named [<universes>] when the global universe
+    comparison fails, then the record named [<qualities>] when the global
+    elimination constraints differ. The latter compares, by identity (a
+    global sort is its library and its name), every pair of distinct
+    qualities of which at least one is a global sort of the challenge's
+    environment: a pair that eliminates in the challenge must eliminate in
+    the answer ([the challenge has an elimination constraint the answer does
+    not:]), checked first, and a pair that eliminates in the answer must
+    eliminate in the challenge ([the answer has an elimination constraint
+    the challenge does not:]), elimination following paths through any
+    quality; its reason lists the failing pairs [a -> b], sorted, at most
+    five, then [(and n more)]. A theorem whose own declaration and the
+    others compare equal fails with the [<universes>] reason, else the
+    [<qualities>] one, before any reason about rewrite rules, axioms or
+    flags. [admitted] lists the libraries of [admitted], and is [[]] when no
+    [-admit] is given.
 
     @raise CErrors.UserError, before the challenge is loaded, when the file
     the answer's loader read a pre-checked library from is another file than
