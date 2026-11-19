@@ -1,0 +1,2 @@
+"name":"Top\.A\.thm","verdict":"fail","reason":"the challenge declaration Top\.A\.T differs: this constant is the primitive type #int63_type in the challenge and no primitive type in the answer"
+"declarations":\[\{"name":"Top\.A\.T","reason":"this constant is the primitive type #int63_type in the challenge and no primitive type in the answer"\}\]

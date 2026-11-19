@@ -100,8 +100,10 @@ let add_rec_path ~unix_path ~rocq_root =
 (* By the option -R/-Q of the command line *)
 let includes = ref []
 (* The same list, kept past [init_with_argv]: the challenge load of
-   [-compare] puts the challenge directory on the load path in place of each
-   of these physical directories, under the same logical root. *)
+   [-compare] binds the challenge directory, on the load path, in front of
+   each of these physical directories whose root the challenge stands in
+   for, under the same logical root; the answer's directories stay behind
+   it. *)
 let user_includes = ref []
 let push_include (s, alias) = includes := (s,alias) :: !includes
 
@@ -139,14 +141,16 @@ let note_image_roots ~unix_path ~rocq_root =
             image_roots := e :: !image_roots)
         entries
 
-let init_load_path rocqenv =
+(* [rocqpath] is the list of directories of ROCQPATH and COQPATH, computed
+   once by the caller: [Envars.coqpath] warns on each call while COQPATH is
+   set to other than ROCQPATH. *)
+let init_load_path rocqenv ~rocqpath =
   (* the to_string casting won't be necessary once Boot handles
      include paths *)
   let plugins = Boot.Env.plugins rocqenv |> Boot.Path.to_string in
   let theories = Boot.Env.corelib rocqenv |> Boot.Path.to_string in
   let user_contrib = Boot.Env.user_contrib rocqenv |> Boot.Path.to_string in
   let xdg_dirs = Envars.xdg_dirs in
-  let rocqpath = Envars.coqpath in
   let add_rec_path ~unix_path ~rocq_root =
     note_image_roots ~unix_path ~rocq_root;
     add_rec_path ~unix_path ~rocq_root
@@ -163,15 +167,29 @@ let init_load_path rocqenv =
   List.iter (fun s -> add_rec_path ~unix_path:s ~rocq_root:CheckLibrary.default_root_prefix)
     (xdg_dirs ~warn:(fun x -> Feedback.msg_warning (str x)));
   (* then directories in ROCQPATH *)
-  List.iter (fun s -> add_rec_path ~unix_path:s ~rocq_root:CheckLibrary.default_root_prefix) (rocqpath());
+  List.iter (fun s -> add_rec_path ~unix_path:s ~rocq_root:CheckLibrary.default_root_prefix) rocqpath;
   (* then current directory: bound non-recursively, so it adds no image
      root (see [image_roots]) *)
   add_path ~unix_path:"." ~rocq_root:CheckLibrary.default_root_prefix
 
-let init_load_path env : unit =
+let init_load_path env ~rocqpath : unit =
   NewProfile.profile "init_load_path"
-    (fun () -> init_load_path env)
+    (fun () -> init_load_path env ~rocqpath)
     ()
+
+(* The directories a -compare run trusts for the image's own libraries
+   ([Check_compare.prepare]'s [trusted]): the corelib directory, user-contrib
+   and [rocqpath], the directories of ROCQPATH and COQPATH that
+   [init_load_path] binds. The plugins directory and the XDG directories are
+   left out, so a shared library found only there is refused; an XDG
+   directory is one the answer's side can write. Set right after
+   [init_load_path]; it stays empty under -boot, which binds none of them. *)
+let compare_trusted = ref []
+
+let trusted_dirs rocqenv ~rocqpath =
+  Boot.Path.to_string (Boot.Env.corelib rocqenv)
+  :: Boot.Path.to_string (Boot.Env.user_contrib rocqenv)
+  :: rocqpath
 
 let impredicative_set = ref false
 let set_impredicative_set () = impredicative_set := true
@@ -288,10 +306,21 @@ let add_compile s =
     We no longer use [Arg.parse], in order to use share [Usage.print_usage]
     between coqtop and coqc. *)
 
+(* Under -compare, the pin of each pre-checked library is checked before any
+   library is read ([Check_compare.check_prechecked_files]), and the
+   pre-checked libraries then join the admit list, after the libraries given
+   with -admit: [admit_list] itself holds only the latter ([run_compare]). *)
 let compile_files senv =
+  let prechecked = match !compare_config with
+    | None -> []
+    | Some cfg ->
+      Check_compare.check_prechecked_files cfg;
+      List.map (fun dp -> CheckLibrary.LogicalFile (CheckLibrary.path_of_dirpath dp))
+        (Check_compare.prechecked_libraries cfg)
+  in
   CheckLibrary.recheck_library ~output_context:!Check_stat.output_context senv
     ~norec:(List.rev !norec_list)
-    ~admit:(List.rev !admit_list)
+    ~admit:(List.rev_append !admit_list prechecked)
     ~check:(List.rev !compile_list)
 
 let version () =
@@ -311,7 +340,13 @@ let print_usage_channel co command =
 \n  -boot                       don't initialize the library paths automatically\
 \n\
 \n  -admit module               load module and dependencies without checking\
+\n                              (with -compare, the verdict lists the -admit modules)\
 \n  -norec module               check module but admit dependencies without checking\
+\n                              (with -compare, a module under a root the challenge\
+\n                              stands in for that loads without checking, as a\
+\n                              dependency of an -admit or -norec module, must be\
+\n                              pre-checked by the config, pinned by its sha256 as a\
+\n                              challenge file, or given with -admit itself)\
 \n\
 \n  -d (d1,..,dn)               enable specified debug messages\
 \n  -debug                      enable all debug messages\
@@ -592,10 +627,8 @@ let parse_args argv =
     | "-compare" :: f :: rem ->
         (* Read now, so that a malformed config stops the run before any
            library is loaded. A pre-checked library loads without a check,
-           through the admit list. *)
-        let cfg = Check_compare.read_config f in
-        List.iter add_admit (Check_compare.prechecked_libraries cfg);
-        compare_config := Some cfg; parse rem
+           through the admit list ([compile_files]). *)
+        compare_config := Some (Check_compare.read_config f); parse rem
     | "-compare" :: [] -> usage 1
 
     | "-challenge" :: d :: rem ->
@@ -650,7 +683,10 @@ let init_with_argv argv =
     Flags.if_verbose (fun () -> print_header coqenv ()) ();
     let () = match coqenv with
       | Boot -> ()
-      | Env coqenv -> init_load_path coqenv
+      | Env coqenv ->
+        let rocqpath = Envars.coqpath () in
+        init_load_path coqenv ~rocqpath;
+        compare_trusted := trusted_dirs coqenv ~rocqpath
     in
     (* additional loadpath, given with -R/-Q options *)
     NewProfile.profile "add_load_paths" (fun () ->
@@ -719,16 +755,19 @@ let run_compare env =
     let answer_deps = CheckLibrary.interned_deps () in
     (* The challenge directory stands in for the answer's directory under
        each root that an answer library named on the command line lives
-       under. A root that only a pre-checked library or another shared tree
-       uses is left alone: the challenge directory does not hold it.
+       under, by the one rule of "under a root" below: a checked name equal
+       to a root does not select it. A root that only a pre-checked library
+       or another shared tree uses is left alone: the challenge directory
+       does not hold it.
 
        Both selection forms that name a library to CHECK count: the
        positional names ([compile_list], checked with their dependencies)
        and -norec ([norec_list], checked alone), which is the form the
        grading side sends. -admit names a library to load WITHOUT
        checking it and never selects an answer library, so [admit_list]
-       is left out -- it also holds the config's pre-checked libraries,
-       which are exactly the ones the challenge does not stand in for. *)
+       is left out. It holds only the libraries given with -admit: the
+       config's pre-checked libraries join the admit list in
+       [compile_files], not there. *)
     let name_of = function
       | CheckLibrary.LogicalFile p ->
         String.concat "." (List.rev p.CheckLibrary.dirpath @ [p.CheckLibrary.basename])
@@ -739,33 +778,70 @@ let run_compare env =
     in
     let substitutes root =
       let r = DirPath.to_string root in
-      List.exists (fun n -> String.equal n r || CString.is_prefix (r ^ ".") n) checked_names
+      List.exists (fun n -> CString.is_prefix (r ^ ".") n) checked_names
     in
-    (* A library under one of those roots is the answer's own: the challenge
-       directory holds its counterpart. Every other library the answer
-       loaded is a shared one -- the image's installed libraries -- and the
-       challenge environment loads the same ones, so that a constraint one
-       of them carries is not read as a constraint the answer invented.
+    (* [challenge_roots] are the roots the challenge stands in for, one per
+       -Q or -R that binds such a root, in command-line order, and
+       [prefixes] each of them with the dot after it, which starts every
+       library name under it. A library is under a root when its name is
+       the root's followed by at least one more component; a library whose
+       name is a root's own is not under that root, since that root's
+       directory cannot hold it (with -Q d1 A -Q d2 A.B, the library A.B is
+       under A and not under A.B). [substitutes] applies that one rule to
+       the checked names, and [path_below_root] to every library, which the
+       comparator counts as under such a root exactly when it gives a path,
+       and [open_roots] are the bound roots not in the list.
 
-       The premise is the one R5 of dispatch://BET-894 already states: every
-       answer library is CHECKED in this run. A library of the answer's own
-       therefore lives under a root some checked name lives under, which is
-       a root the challenge stands in for; what is left over is the image's.
-       A run that loaded an answer library without checking it would be
-       refused long before this, and nothing here weakens that. *)
-    let under_challenge_root lib =
-      let l = DirPath.to_string lib in
-      List.exists (fun (_, rocq_root) ->
-          let r = DirPath.to_string rocq_root in
-          substitutes rocq_root && (String.equal l r || CString.is_prefix (r ^ ".") l))
+       A library under one of those roots, unless pre-checked, is the
+       answer's own: the challenge directory holds its counterpart, at the
+       path [path_below_root] gives. Every other library the answer loaded,
+       unless pre-checked, is a shared one -- one of the image's own, which
+       a -compare run takes only from the directories it trusts for them
+       ([compare_trusted]) -- and the challenge environment loads the same
+       ones, so that a constraint one of them carries is not read as a
+       constraint the answer invented.
+
+       The premise, from R5 of dispatch://BET-894, is that the command line
+       names for a check a library under each root that holds an answer
+       library: a library of the answer's own then lives under a root the
+       challenge stands in for, and what is left over is the image's. A
+       library under such a root is not always checked itself. One given
+       with -admit is loaded without a check and accepted so, and the
+       verdict lists it ([admitted]). Any other one the run loads without a
+       check -- a dependency of a library given with -norec or -admit -- is
+       refused by [Check_compare.run] ([check_unchecked]) unless the config
+       pre-checks it or pins its sha256 as a challenge file. *)
+    let challenge_roots =
+      CList.map_filter (fun (_, rocq_root) ->
+          if substitutes rocq_root then Some rocq_root else None)
         !user_includes
+    in
+    let prefixes = List.map (fun root -> DirPath.to_string root ^ ".") challenge_roots in
+    (* The path of a library's .vo file below the directory of the root the
+       challenge stands in for that holds it, one directory per name
+       component ("X/Y.vo" for <root>.X.Y): the challenge directory holds the
+       challenge's file of that library there. When several such roots hold
+       it, the path is the one below the longest root. *)
+    let path_below_root lib =
+      let l = DirPath.to_string lib in
+      let below = CList.map_filter (fun p ->
+          if CString.is_prefix p l then
+            let n = String.length p in
+            Some (String.sub l n (String.length l - n))
+          else None)
+          prefixes
+      in
+      match List.sort (fun a b -> Int.compare (String.length a) (String.length b)) below with
+      | [] -> None
+      | rel :: _ -> Some (String.concat Filename.dir_sep (String.split_on_char '.' rel) ^ ".vo")
     in
     (* The bound roots the challenge does NOT stand in for. The answer's
        build can write under one of them, so the comparator refuses a run
-       that loaded a library from one unless the config pins it. *)
+       that loaded a library from one unless the config pre-checks it. *)
     let open_roots =
       CList.map_filter (fun (unix_path, rocq_root) ->
-          if substitutes rocq_root then None else Some (rocq_root, unix_path))
+          if List.exists (DirPath.equal rocq_root) challenge_roots then None
+          else Some (rocq_root, unix_path))
         !user_includes
     in
     (* A -Q that binds one of the image's own top-level names, or the empty
@@ -796,14 +872,22 @@ let run_compare env =
       !user_includes;
     try
       let t =
-        Check_compare.prepare cfg ~dir ~out ~under_challenge_root ~open_roots
-          ~bound_dirs:(List.map fst !user_includes)
+        Check_compare.prepare cfg ~dir ~out ~path_below_root ~open_roots
+          ~bound_dirs:(List.map fst !user_includes) ~trusted:!compare_trusted
           ~add_challenge_load_path:(fun () ->
-              List.iter (fun (_, rocq_root) ->
-                  if substitutes rocq_root then add_rec_path ~unix_path:dir ~rocq_root)
-                !user_includes)
+              List.iter (fun rocq_root -> add_rec_path ~unix_path:dir ~rocq_root)
+                challenge_roots)
+      in
+      (* The libraries given with -admit, each by its full logical name, once,
+         in command-line order. *)
+      let admitted =
+        List.rev
+          (List.fold_left (fun acc lib ->
+               CList.add_set DirPath.equal (CheckLibrary.library_name lib) acc)
+              [] (List.rev !admit_list))
       in
       Check_compare.run t env CheckLibrary.indirect_accessor (make_senv ()) ~answer_deps
+        ~admitted
     with e -> fatal_exn e
 
 

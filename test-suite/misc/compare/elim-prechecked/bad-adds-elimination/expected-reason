@@ -1,0 +1,2 @@
+"name":"Top\.A\.thm","verdict":"fail","reason":"the answer has an elimination constraint the challenge does not: Pre\.Shared\.s -> Prop, Pre\.Shared\.s -> SProp"
+"declarations":\[\{"name":"<qualities>","reason":"the answer has an elimination constraint the challenge does not: Pre\.Shared\.s -> Prop, Pre\.Shared\.s -> SProp"\}\]

@@ -1,0 +1,2 @@
+"name":"Top\.A\.thm","verdict":"fail","reason":"the answer has an elimination constraint the challenge does not: Top\.A\.s -> Prop, Top\.A\.s -> SProp, Top\.A\.s -> Top\.A\.t"
+"declarations":\[\{"name":"<qualities>","reason":"the answer has an elimination constraint the challenge does not: Top\.A\.s -> Prop, Top\.A\.s -> SProp, Top\.A\.s -> Top\.A\.t"\}\]
