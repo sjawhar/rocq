@@ -93,8 +93,12 @@
 # `ok` line it prints is one run: a case's honest answer, one of its
 # sub-runs (a bad answer, a tolerance, a refused config, fail-config,
 # utf8-refusal), a named case (sha256, vos, digest, sibling, norec,
-# forgeries), a form of norec or a forgery. A run in which every case
-# passed ends with
+# pre-dep-forged, pre-dep-norec, challenge-missing-dep, challenge-dir-link,
+# unchecked-helper, unchecked-admit-closure, shared-xdg, shared-nohome,
+# shared-coqpath, shared-user-contrib, same-file-shared,
+# same-file-prechecked, prechecked-read-file, prechecked-garbage,
+# forgeries), a sub-run of a named case that has several, a form of norec
+# or a forgery. A run in which every case passed ends with
 #
 #   compare.sh: <run> ok, <skipped> skipped, <held> held
 #
@@ -114,7 +118,15 @@
 # bad-<name>.tolerate-<flag>.honest (the honest answer under that
 # tolerance), refuse-<name>, fail-config or refuse-invalid-utf8; for the
 # named cases, answer (vos, digest), honest (sibling), <form>.honest and
-# <form>.bad (norec) and <forgery> (forgeries).
+# <form>.bad (norec), forged, prechecked and pinned (pre-dep-forged),
+# forged (pre-dep-norec), missing and prechecked (challenge-missing-dep),
+# linked-dir and linked-challenge (challenge-dir-link), forged, honest and
+# checked-forged (unchecked-helper), closure and split
+# (unchecked-admit-closure), answer (shared-xdg, shared-nohome,
+# shared-coqpath, shared-user-contrib), linked and unlinked
+# (same-file-shared, same-file-prechecked), read-file and honest
+# (prechecked-read-file), garbage, directory and honest
+# (prechecked-garbage) and <forgery> (forgeries).
 #
 # The challenge and the answer are compiled from the SAME source layout, at
 # the same paths and under the same logical root (Top), which is what the
@@ -194,10 +206,18 @@ seed_stale_verdict() {
 
 # ---------------------------------------------------------------- sha256
 #
-# The comparator carries its own SHA-256, because the checker links no
-# digest library. It is trusted code, so it is checked against FIPS 180-4's
-# vectors and against sha256sum here, and compare.sh compares it with
-# sha256sum on every challenge file it builds (see run_case).
+# The comparator hashes with a SHA-256 of its own (checker/check_compare.ml,
+# module Sha256), which refuses a file that is not a regular one where
+# clib's Sha256.file would block or read without end. It is trusted code,
+# so it is checked against FIPS 180-4's vectors and against sha256sum here,
+# and compare.sh compares it with sha256sum on every challenge file it
+# builds (see run_case). A FIFO and a link to /dev/zero are each refused as
+# a file that is not a regular one, within the bound: a FIFO's open blocks
+# without a writer, and /dev/zero reads without end. These two sub-runs
+# cover the check before the open. For a file that is not a regular one,
+# the non-blocking open and the check on the open descriptor matter only
+# when the path changes kind between that check and the open, which a
+# shell test cannot make happen reliably, so no sub-run here covers them.
 case_sha256() {
   local d
   d=$(mktemp -d)
@@ -224,6 +244,23 @@ case_sha256() {
   check_vector v_448 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
   check_vector v_896 cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1
   check_vector v_million cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0
+  # <file> is refused as <kind>, naming the file, and the run neither timed
+  # out nor died (completed).
+  check_not_regular() { # <file> <kind>
+    local code
+    set +e
+    bounded rocqchk -sha256 "$1" > "$d/log" 2>&1
+    code=$?
+    set -e
+    completed "$code" "$d/log"
+    [ "$code" != 0 ] || { cat "$d/log"; fail "sha256 of $1: hashed, where it must be refused"; }
+    grep -Fq "The file $1 cannot be read: Is $2, not a regular file." "$d/log" \
+      || { cat "$d/log"; fail "sha256 of $1: not refused as $2"; }
+  }
+  mkfifo "$d/fifo"
+  check_not_regular "$d/fifo" "a named pipe"
+  ln -s /dev/zero "$d/zero"
+  check_not_regular "$d/zero" "a character device"
   # a file of 1 MiB of random bytes, against sha256sum
   if have sha256sum; then
     head -c 1048576 /dev/urandom > "$d/rand"
@@ -874,6 +911,738 @@ case_norec() {
   passed "ok norec"
 }
 
+# ------------------------------------------------ the libraries a run reads
+#
+# The named cases below test which library files a -compare run reads, and
+# how: what a pre-checked library rests on (pre-dep-*), where the
+# challenge's libraries are read from (challenge-*), the answer's libraries
+# loaded without a check (unchecked-*), the directories a shared library may
+# come from (shared-*), the same file on both sides (same-file-*) and the
+# file a pre-checked library is read from (prechecked-*). Each needs -norec,
+# -admit, a link, an environment variable or a patched file, so each runs
+# rocqchk itself (named_compare). A case runs first its one run whose
+# outcome these rules decide, so that the case run with a rocqchk that
+# lacks them stops on that run; its other runs, which pass or which the
+# kernel refuses, follow. Each case keeps its files under one directory of
+# its own and removes it at the end. Every link a case makes points inside
+# that directory, so none leaves a file system, but one: the theories link
+# of shared-user-contrib points to the corelib of the installation in use.
+#
+# The cases, which the count and the runner read too.
+library_cases=(pre-dep-forged pre-dep-norec challenge-missing-dep challenge-dir-link
+  unchecked-helper unchecked-admit-closure shared-xdg shared-nohome shared-coqpath
+  shared-user-contrib same-file-shared same-file-prechecked prechecked-read-file
+  prechecked-garbage)
+
+# Whether <name> is one of library_cases.
+is_library_case() { # <name>
+  local c
+  for c in "${library_cases[@]}"; do
+    [ "$c" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# <command>... run in <dir>; a command that fails fails <run>.
+in_dir() { # <run> <dir> <command>...
+  local run=$1 dir=$2
+  shift 2
+  (cd "$dir" && "$@") || fail "$run: $* fails in $dir"
+}
+
+# A JSON object that pins <file> by its sha256, with <key> (path or library)
+# set to <name>.
+pin_entry() { # <key> <name> <file>
+  local sha
+  sha=$(bounded rocqchk -sha256 "$3")
+  printf '{"%s": "%s", "sha256": "%s"}' "$1" "$2" "$sha"
+}
+
+# The config of a named case: the theorem <theorem>, the challenge files
+# <files>, the pre-checked libraries <pre> after the Prelude, which every
+# such config pre-checks, and the permitted axioms <axioms>; each list is
+# the members of a JSON array. eq's indices-not-mattering is tolerated, as
+# in the cases above.
+named_config() { # <out> <theorem> <files> [<pre>] [<axioms>]
+  local prelude_sha
+  prelude_sha=$(bounded rocqchk -sha256 "$(prelude_vo)")
+  printf '%s\n' \
+    "{\"theorems\": [{\"name\": \"$2\"}], \"permitted_axioms\": [${5:-}]," \
+    " \"tolerated_flags\": [{\"kind\": \"indices-not-mattering\", \"object\": \"Corelib.Init.Logic.eq\"}]," \
+    " \"prechecked\": [{\"library\": \"Corelib.Init.Prelude\", \"sha256\": \"$prelude_sha\"}${4:+, $4}]," \
+    " \"challenge_files\": [$3]}" > "$1"
+}
+
+# rocqchk -compare <config> -challenge <challenge>, run in <dir>, with
+# <argument>..., which bind the answer and name its libraries. Its output is
+# <w>/log and its verdict <w>/out.json. Prints the exit code.
+named_compare() { # <w> <dir> <config> <challenge> <argument>...
+  local w=$1 dir=$2 config=$3 challenge=$4
+  shift 4
+  set +e
+  (cd "$dir" && bounded rocqchk -silent -compare "$config" -challenge "$challenge" \
+    -compare-out "$w/out.json" "$@") > "$w/log" 2>&1
+  local code=$?
+  set -e
+  completed "$code" "$w/log"
+  echo "$code"
+}
+
+# The run <run> was refused: it exits non-zero, the verdict file seeded
+# before it (seed_stale_verdict) is gone, and its output matches each
+# extended regular expression <pattern>, which ties the library refused to
+# the rule's text. A run that completed fails with its verdicts.
+expect_refused() { # <run> <code> <w> <pattern>...
+  local run=$1 code=$2 w=$3
+  shift 3
+  if [ "$code" = 0 ]; then
+    cat "$w/out.json" 2> /dev/null
+    fail "$run: the run completed (exit 0, $(verdicts "$w/out.json" 2> /dev/null | paste -sd ' ' -)), where it must be refused"
+  fi
+  [ ! -f "$w/out.json" ] || fail "$run: an earlier verdict file survived the refusal"
+  printf '%s\n' "$@" > "$w/expected-reason"
+  match_reasons "$w/expected-reason" "$w/log" "$run" "the refusal"
+}
+
+# The run <run> passed: it exits 0 and writes a verdict file that parses, in
+# which every theorem passes; with <admitted>, the file ends with the member
+# "admitted":<admitted>, exactly.
+expect_pass() { # <run> <code> <w> [<admitted>]
+  local run=$1 code=$2 w=$3
+  [ "$code" = 0 ] || { cat "$w/log"; fail "$run: the run exits $code"; }
+  [ -f "$w/out.json" ] || fail "$run: no verdict file"
+  json_valid "$w/out.json" || fail "$run: the verdict file is not valid JSON"
+  grep -q '"verdict":"pass"' "$w/out.json" && ! grep -q '"verdict":"fail"' "$w/out.json" \
+    || { cat "$w/out.json"; fail "$run: the answer did not pass"; }
+  if [ $# -gt 3 ]; then
+    local verdict
+    verdict=$(cat "$w/out.json")
+    [[ $verdict == *"\"admitted\":$4}" ]] \
+      || { cat "$w/out.json"; fail "$run: the verdict does not end with \"admitted\":$4}"; }
+  fi
+}
+
+# The bytes of a .vo file. It starts with 16 bytes: its magic number, its
+# version and the position of its table of segments. That table holds the
+# number of segments (4 bytes), then for each the length of its name (4
+# bytes), the name, the segment's position (8 bytes), its length (8 bytes)
+# and the MD5 of its data, which also follows the data. The MD5 of the
+# segment named library is the library's digest, the one each library that
+# depends on it records. od may end its output with an empty line (BSD od
+# does), so awk folds every byte it reads into one number.
+number_at() { # <file> <offset> <count>: the big-endian number of <count> bytes at <offset>
+  od -An -tu1 -j"$2" -N"$3" "$1" | awk '{ for (i = 1; i <= NF; i++) n = n * 256 + $i } END { print n }'
+}
+
+# Sets summary_md5 and data_md5 to the offsets of the two copies of the MD5
+# of the segment <segment> of <file>: in the table of segments, and after
+# the segment's data.
+segment_md5() { # <file> <segment>
+  local f=$1 at n nlen pos len
+  at=$(number_at "$f" 8 8)
+  n=$(number_at "$f" "$at" 4)
+  at=$((at + 4))
+  while [ "$n" -gt 0 ]; do
+    nlen=$(number_at "$f" "$at" 4)
+    if [ "$(dd if="$f" bs=1 skip=$((at + 4)) count="$nlen" 2> /dev/null)" = "$2" ]; then
+      pos=$(number_at "$f" $((at + 4 + nlen)) 8)
+      len=$(number_at "$f" $((at + 12 + nlen)) 8)
+      summary_md5=$((at + 20 + nlen))
+      data_md5=$((pos + len))
+      return
+    fi
+    at=$((at + 36 + nlen))
+    n=$((n - 1))
+  done
+  fail "$f has no segment $2"
+}
+
+copy_md5() { # <from> <offset> <to> <offset>: 16 bytes
+  dd if="$1" bs=1 skip="$2" count=16 2> /dev/null | dd of="$3" bs=1 seek="$4" conv=notrunc 2> /dev/null
+}
+
+# <forged>, a library compiled from another source, made to state the
+# digest of <honest>: both copies of the MD5 of its library segment become
+# <honest>'s. A read compares the two copies with each other, and the
+# digest a library records for its dependency with the first, so every
+# library compiled against <honest> takes <forged> for it. Only the sha256
+# of the whole file tells the two apart.
+forge_digest() { # <honest .vo> <forged .vo>
+  local from
+  segment_md5 "$1" library
+  from=$summary_md5
+  segment_md5 "$2" library
+  copy_md5 "$1" "$from" "$2" "$summary_md5"
+  copy_md5 "$1" "$from" "$2" "$data_md5"
+}
+
+# ------------------------------ what a pre-checked library rests on
+#
+# The challenge (ch) holds Top.D, which defines d := 0; Top.P, which
+# Requires it and proves d_zero : Top.D.d = 0; and Top.A, whose thm states
+# Top.D.d = 0. The config pre-checks Top.P at the challenge's P.vo. The
+# answer (answer) holds the challenge's D.vo and P.vo and an A that proves
+# thm by Top.P.d_zero. The forged answer (forged) is the answer with another
+# D.vo, compiled from d := 1 and made to state the digest of the
+# challenge's (forge_digest), the one P records. Against that D, d_zero and
+# thm both say 1 = 0, and the kernel check of A accepts its proof all the
+# same: P was typed against the challenge's D, and no run checks P.
+predep_trees() { # <w> <run>
+  local w=$1 run=$2 f
+  mkdir -p "$w/ch" "$w/answer" "$w/other" "$w/forged"
+  printf '%s\n' 'Definition d : nat := 0.' > "$w/ch/D.v"
+  printf '%s\n' 'Require Top.D.' 'Lemma d_zero : Top.D.d = 0.' 'Proof. reflexivity. Qed.' \
+    > "$w/ch/P.v"
+  printf '%s\n' 'Require Top.D Top.P.' 'Theorem thm : Top.D.d = 0.' 'Proof.' 'Admitted.' \
+    > "$w/ch/A.v"
+  for f in D.v P.v A.v; do in_dir "$run" "$w/ch" coqc -R . Top "$f"; done
+  cp "$w/ch/D.vo" "$w/ch/P.vo" "$w/answer/"
+  printf '%s\n' 'Require Top.D Top.P.' 'Theorem thm : Top.D.d = 0.' \
+    'Proof. exact Top.P.d_zero. Qed.' > "$w/answer/A.v"
+  in_dir "$run" "$w/answer" coqc -R . Top A.v
+  printf '%s\n' 'Definition d : nat := 1.' > "$w/other/D.v"
+  in_dir "$run" "$w/other" coqc -R . Top D.v
+  cp "$w/answer/A.vo" "$w/answer/P.vo" "$w/other/D.vo" "$w/forged/"
+  forge_digest "$w/ch/D.vo" "$w/forged/D.vo"
+}
+
+# The refusal of the forged D, which both cases expect.
+predep_reason="The pre-checked library Top\.P depends on the library Top\.D, which is neither pre-checked by the config, nor pinned by its sha256 as a challenge file, nor the image's own\."
+
+# pre-dep-forged: Top.A named alone, so the forged D loads without a check,
+# through P's closure: refused, naming P and D. Then the answer, with the
+# challenge's D pre-checked as well (the verdict's admitted is empty,
+# though the config pre-checks D and P besides the Prelude), and with that
+# D pinned by its sha256 as a challenge file instead: both pass.
+case_pre_dep_forged() {
+  local w c=pre-dep-forged code a p d
+  w=$(mktemp -d)
+  predep_trees "$w" "$c"
+  a=$(pin_entry path A.vo "$w/ch/A.vo")
+  p=$(pin_entry library Top.P "$w/ch/P.vo")
+  named_config "$w/config.json" Top.A.thm "$a" "$p"
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/forged" Top Top.A)
+  keep_verdict "$w/out.json" "$c" forged
+  expect_refused "$c/forged" "$code" "$w" "$predep_reason"
+  passed "  ok $c/forged"
+  d=$(pin_entry library Top.D "$w/ch/D.vo")
+  named_config "$w/config.json" Top.A.thm "$a" "$p, $d"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" prechecked
+  expect_pass "$c/prechecked" "$code" "$w" '[]'
+  passed "  ok $c/prechecked"
+  d=$(pin_entry path D.vo "$w/ch/D.vo")
+  named_config "$w/config.json" Top.A.thm "$a, $d" "$p"
+  rm -f "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" pinned
+  expect_pass "$c/pinned" "$code" "$w"
+  passed "  ok $c/pinned"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# pre-dep-norec: the forged D named with -norec, and A with it, so the run
+# checks D: it is sound by itself, but P holds a term typed against the
+# challenge's D, and the run is refused all the same, naming P and D.
+case_pre_dep_norec() {
+  local w c=pre-dep-norec code a p
+  w=$(mktemp -d)
+  predep_trees "$w" "$c"
+  a=$(pin_entry path A.vo "$w/ch/A.vo")
+  p=$(pin_entry library Top.P "$w/ch/P.vo")
+  named_config "$w/config.json" Top.A.thm "$a" "$p"
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/forged" Top \
+    -norec Top.D -norec Top.A)
+  keep_verdict "$w/out.json" "$c" forged
+  expect_refused "$c" "$code" "$w" "$predep_reason"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# --------------------- the challenge's libraries from the challenge directory
+#
+# challenge-missing-dep: the challenge directory holds A.vo alone, whose thm
+# states Top.D.d = 1 of the D it was compiled against, which defines
+# d := 0. The answer's D.vo is compiled from d := 1 and made to state that
+# D's digest (forge_digest), and the answer's A, compiled against the
+# challenge's D, proves thm by eq_refl 1 under Skip Qed Typecheck: a proof
+# the kernel accepts against the answer's D alone. The challenge load finds
+# no D.vo in the challenge directory and reads the answer's, which the run
+# would then compare with itself: refused, naming D. Then the same, with D
+# pre-checked at the sha256 of the answer's D.vo: the config vouches for
+# those bytes, both sides read them, and the run passes.
+case_challenge_missing_dep() {
+  local w c=challenge-missing-dep code a d
+  w=$(mktemp -d)
+  mkdir -p "$w/src" "$w/ch" "$w/answer" "$w/other"
+  printf '%s\n' 'Definition d : nat := 0.' > "$w/src/D.v"
+  printf '%s\n' 'Require Top.D.' 'Theorem thm : Top.D.d = 1.' 'Proof.' 'Admitted.' > "$w/src/A.v"
+  in_dir "$c" "$w/src" coqc -R . Top D.v
+  in_dir "$c" "$w/src" coqc -R . Top A.v
+  cp "$w/src/A.vo" "$w/ch/"
+  cp "$w/src/D.vo" "$w/answer/"
+  printf '%s\n' 'Require Top.D.' 'Set Skip Qed Typecheck.' 'Theorem thm : Top.D.d = 1.' \
+    'Proof. exact_no_check (eq_refl 1). Qed.' > "$w/answer/A.v"
+  in_dir "$c" "$w/answer" coqc -R . Top A.v
+  printf '%s\n' 'Definition d : nat := 1.' > "$w/other/D.v"
+  in_dir "$c" "$w/other" coqc -R . Top D.v
+  cp "$w/other/D.vo" "$w/answer/D.vo"
+  forge_digest "$w/src/D.vo" "$w/answer/D.vo"
+  a=$(pin_entry path A.vo "$w/ch/A.vo")
+  named_config "$w/config.json" Top.A.thm "$a"
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" missing
+  expect_refused "$c/missing" "$code" "$w" \
+    "The challenge loaded the library Top\.D from [^ ]*/answer/D\.vo, which is not under the challenge directory\."
+  passed "  ok $c/missing"
+  d=$(pin_entry library Top.D "$w/answer/D.vo")
+  named_config "$w/config.json" Top.A.thm "$a" "$d"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" prechecked
+  expect_pass "$c/prechecked" "$code" "$w"
+  passed "  ok $c/prechecked"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# challenge-dir-link: the challenge directory ch-link holds A.vo and a link
+# Sub to the answer's own Sub, outside it, so the challenge reads the
+# answer's file of Top.Sub.L, whose sha256 the config pins, and would
+# compare it with itself: refused, naming Top.Sub.L. Then -challenge names
+# ch-alias, a link to the directory ch-real, which holds every challenge
+# file: by its real path each file the challenge reads lies under it, and
+# the run passes.
+case_challenge_dir_link() {
+  local w c=challenge-dir-link code a l
+  w=$(mktemp -d)
+  mkdir -p "$w/src/Sub" "$w/answer/Sub" "$w/ch-link" "$w/ch-real/Sub"
+  printf '%s\n' 'Definition two : nat := 2.' > "$w/src/Sub/L.v"
+  printf '%s\n' 'Require Import Top.Sub.L.' 'Theorem thm : two = 2.' 'Proof.' 'Admitted.' \
+    > "$w/src/A.v"
+  in_dir "$c" "$w/src" coqc -R . Top Sub/L.v
+  in_dir "$c" "$w/src" coqc -R . Top A.v
+  cp "$w/src/Sub/L.vo" "$w/answer/Sub/"
+  printf '%s\n' 'Require Import Top.Sub.L.' 'Theorem thm : two = 2.' 'Proof. reflexivity. Qed.' \
+    > "$w/answer/A.v"
+  in_dir "$c" "$w/answer" coqc -R . Top A.v
+  cp "$w/src/A.vo" "$w/ch-link/"
+  ln -s "$w/answer/Sub" "$w/ch-link/Sub"
+  cp "$w/src/A.vo" "$w/ch-real/"
+  cp "$w/src/Sub/L.vo" "$w/ch-real/Sub/"
+  ln -s "$w/ch-real" "$w/ch-alias"
+  a=$(pin_entry path A.vo "$w/src/A.vo")
+  l=$(pin_entry path Sub/L.vo "$w/src/Sub/L.vo")
+  named_config "$w/config.json" Top.A.thm "$a, $l"
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch-link" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" linked-dir
+  expect_refused "$c/linked-dir" "$code" "$w" \
+    "The challenge loaded the library Top\.Sub\.L from [^ ]*/Sub/L\.vo, which is not under the challenge directory\."
+  passed "  ok $c/linked-dir"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch-alias" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" linked-challenge
+  expect_pass "$c/linked-challenge" "$code" "$w"
+  passed "  ok $c/linked-challenge"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# ---------------------------- the answer's libraries loaded without a check
+#
+# The refusal of Top.Helper, loaded without a check, which both cases
+# expect.
+unchecked_reason="The answer library Top\.Helper was loaded without a check, as a dependency of a library given with -norec or -admit, and it is neither pre-checked by the config, nor pinned by its sha256 as a challenge file, nor given with -admit itself\."
+
+# unchecked-helper: the challenge's thm states forall n, n + 0 = n. The
+# forged answer's Top.Helper proves bad : False by exact_no_check I under
+# Skip Qed Typecheck, a proof the kernel never typed, and its Top.A proves
+# thm from bad. With -norec Top.A alone, Helper loads without a check:
+# refused, naming Helper. Then an honest Helper, whose add_0_r proves the
+# statement, named with -norec too: the run passes, and admitted is empty.
+# Last, the forged Helper named with -norec: the kernel check of bad
+# refuses it, before the comparator runs. That run is not -silent, so its
+# output names the constant being checked when the type error stops it,
+# and rocqchk exits 129 there, as on every error it does not handle, which
+# completed would take for a signal: the case reads the code itself.
+case_unchecked_helper() {
+  local w c=unchecked-helper code a t
+  w=$(mktemp -d)
+  mkdir -p "$w/ch" "$w/forged" "$w/honest"
+  printf '%s\n' 'Theorem thm : forall n : nat, n + 0 = n.' 'Proof.' 'Admitted.' > "$w/ch/A.v"
+  in_dir "$c" "$w/ch" coqc -R . Top A.v
+  printf '%s\n' 'Set Skip Qed Typecheck.' 'Lemma bad : False.' 'Proof. exact_no_check I. Qed.' \
+    > "$w/forged/Helper.v"
+  printf '%s\n' 'Require Top.Helper.' 'Theorem thm : forall n : nat, n + 0 = n.' \
+    'Proof. exact (False_ind _ Top.Helper.bad). Qed.' > "$w/forged/A.v"
+  printf '%s\n' 'Lemma add_0_r : forall n : nat, n + 0 = n.' \
+    'Proof. induction n as [|n IH]; [reflexivity | simpl; rewrite IH; reflexivity]. Qed.' \
+    > "$w/honest/Helper.v"
+  printf '%s\n' 'Require Top.Helper.' 'Theorem thm : forall n : nat, n + 0 = n.' \
+    'Proof. exact Top.Helper.add_0_r. Qed.' > "$w/honest/A.v"
+  for t in forged honest; do
+    in_dir "$c" "$w/$t" coqc -R . Top Helper.v
+    in_dir "$c" "$w/$t" coqc -R . Top A.v
+  done
+  a=$(pin_entry path A.vo "$w/ch/A.vo")
+  named_config "$w/config.json" Top.A.thm "$a"
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/forged" Top -norec Top.A)
+  keep_verdict "$w/out.json" "$c" forged
+  expect_refused "$c/forged" "$code" "$w" "$unchecked_reason"
+  passed "  ok $c/forged"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/honest" Top \
+    -norec Top.Helper -norec Top.A)
+  keep_verdict "$w/out.json" "$c" honest
+  expect_pass "$c/honest" "$code" "$w" '[]'
+  passed "  ok $c/honest"
+  seed_stale_verdict "$w/out.json"
+  set +e
+  (cd "$w" && bounded rocqchk -compare "$w/config.json" -challenge "$w/ch" \
+    -compare-out "$w/out.json" -Q "$w/forged" Top -norec Top.Helper -norec Top.A) \
+    > "$w/log" 2>&1
+  code=$?
+  set -e
+  keep_verdict "$w/out.json" "$c" checked-forged
+  [ "$code" = 129 ] || { cat "$w/log"; fail "$c/checked-forged: the run exits $code, not 129"; }
+  [ ! -f "$w/out.json" ] || fail "$c/checked-forged: an earlier verdict file survived the refusal"
+  [ "$(tail -n 2 "$w/log")" = "$(printf '%s\n' '  checking cst:Top.Helper.bad' \
+    'Fatal Error: Type error: ActualType')" ] \
+    || { cat "$w/log"; fail "$c/checked-forged: the kernel did not refuse Top.Helper.bad"; }
+  passed "  ok $c/checked-forged"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# unchecked-admit-closure: the answer's Top.B proves thm by Top.A's
+# add_0_r, which A takes from Top.Helper. -norec Top.B -admit Top.A loads A
+# without a check, as -admit asks, and Helper with it: refused, naming
+# Helper, which -admit does not name. Then each library named with -norec
+# or -admit, -admit Top.Helper twice: the run passes, and admitted names
+# the -admit libraries once each, in command-line order, which is not the
+# sorted one.
+case_unchecked_admit_closure() {
+  local w c=unchecked-admit-closure code b f
+  w=$(mktemp -d)
+  mkdir -p "$w/ch" "$w/answer"
+  printf '%s\n' 'Theorem thm : forall n : nat, n + 0 = n.' 'Proof.' 'Admitted.' > "$w/ch/B.v"
+  in_dir "$c" "$w/ch" coqc -R . Top B.v
+  printf '%s\n' 'Lemma add_0_r : forall n : nat, n + 0 = n.' \
+    'Proof. induction n as [|n IH]; [reflexivity | simpl; rewrite IH; reflexivity]. Qed.' \
+    > "$w/answer/Helper.v"
+  printf '%s\n' 'Require Top.Helper.' 'Definition add_0_r := Top.Helper.add_0_r.' \
+    > "$w/answer/A.v"
+  printf '%s\n' 'Require Top.A.' 'Theorem thm : forall n : nat, n + 0 = n.' \
+    'Proof. exact Top.A.add_0_r. Qed.' > "$w/answer/B.v"
+  for f in Helper.v A.v B.v; do in_dir "$c" "$w/answer" coqc -R . Top "$f"; done
+  b=$(pin_entry path B.vo "$w/ch/B.vo")
+  named_config "$w/config.json" Top.B.thm "$b"
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top \
+    -norec Top.B -admit Top.A)
+  keep_verdict "$w/out.json" "$c" closure
+  expect_refused "$c/closure" "$code" "$w" "$unchecked_reason"
+  passed "  ok $c/closure"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top \
+    -admit Top.Helper -norec Top.B -admit Top.A -admit Top.Helper)
+  keep_verdict "$w/out.json" "$c" split
+  expect_pass "$c/split" "$code" "$w" '["Top.Helper","Top.A"]'
+  passed "  ok $c/split"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# -------------------------- the directories a shared library may come from
+#
+# A library at the path of a standard library file that the test build
+# does not serve, Stdlib.Logic.FunctionalExtensionality, under <dir>, which
+# declares functional_extensionality_dep : False. The challenge (ch) states
+# thm : False, the answer (answer) proves it by that axiom, and the config
+# permits the axiom by its name. The answer is compiled with the library
+# bound by -Q; the run binds no such root, and finds it only where the load
+# path's own directories reach it.
+funext_trees() { # <w> <dir> <run>
+  local w=$1 dir=$2 run=$3 a
+  mkdir -p "$dir/Stdlib/Logic" "$w/ch" "$w/answer"
+  printf '%s\n' 'Axiom functional_extensionality_dep : False.' \
+    > "$dir/Stdlib/Logic/FunctionalExtensionality.v"
+  in_dir "$run" "$dir" coqc -Q Stdlib Stdlib Stdlib/Logic/FunctionalExtensionality.v
+  printf '%s\n' 'Theorem thm : False.' 'Proof.' 'Admitted.' > "$w/ch/A.v"
+  in_dir "$run" "$w/ch" coqc -R . Top A.v
+  printf '%s\n' 'Require Stdlib.Logic.FunctionalExtensionality.' 'Theorem thm : False.' \
+    'Proof. exact Stdlib.Logic.FunctionalExtensionality.functional_extensionality_dep. Qed.' \
+    > "$w/answer/A.v"
+  in_dir "$run" "$w/answer" coqc -Q "$dir/Stdlib" Stdlib -R . Top A.v
+  a=$(pin_entry path A.vo "$w/ch/A.vo")
+  named_config "$w/config.json" Top.A.thm "$a" "" \
+    '"Stdlib.Logic.FunctionalExtensionality.functional_extensionality_dep"'
+}
+
+# shared-xdg: the library under XDG_DATA_HOME, which the load path binds and
+# the run does not trust for the image's own libraries: refused, naming it.
+case_shared_xdg() {
+  local w c=shared-xdg code
+  w=$(mktemp -d)
+  funext_trees "$w" "$w/xdg/coq" "$c"
+  seed_stale_verdict "$w/out.json"
+  code=$(export XDG_DATA_HOME="$w/xdg"
+    named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" answer
+  expect_refused "$c" "$code" "$w" \
+    "The answer loaded the library Stdlib\.Logic\.FunctionalExtensionality from [^ ]*/xdg/coq/Stdlib/Logic/FunctionalExtensionality\.vo, which is under none of the directories a -compare run trusts for the image's own libraries"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# shared-nohome: the library under ./.local/share/coq of the directory the
+# run is in, nohome, where the load path finds the XDG data directory when
+# no home directory is set (lib/envars.ml): refused, naming it.
+case_shared_nohome() {
+  local w c=shared-nohome code
+  w=$(mktemp -d)
+  funext_trees "$w" "$w/nohome/.local/share/coq" "$c"
+  seed_stale_verdict "$w/out.json"
+  code=$(unset HOME XDG_DATA_HOME HOMEDRIVE HOMEPATH USERPROFILE
+    named_compare "$w" "$w/nohome" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" answer
+  expect_refused "$c" "$code" "$w" \
+    "The answer loaded the library Stdlib\.Logic\.FunctionalExtensionality from [^ ]*\.local/share/coq/Stdlib/Logic/FunctionalExtensionality\.vo, which is under none of the directories a -compare run trusts for the image's own libraries"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# A library <root>.L at <parent>/<root>/L.vo, in a directory the run trusts
+# for the image's own libraries; the challenge (ch) states thm : two = 2;
+# and the answer (answer) Requires <root>.L and proves thm with it.
+trusted_trees() { # <w> <parent> <root> <run>
+  local w=$1 parent=$2 root=$3 run=$4 a
+  mkdir -p "$parent/$root" "$w/ch" "$w/answer"
+  printf '%s\n' 'Definition lib_two : nat := 2.' > "$parent/$root/L.v"
+  in_dir "$run" "$parent" coqc -Q "$root" "$root" "$root/L.v"
+  printf '%s\n' 'Definition two := 2.' 'Theorem thm : two = 2.' 'Proof.' 'Admitted.' > "$w/ch/A.v"
+  in_dir "$run" "$w/ch" coqc -R . Top A.v
+  printf '%s\n' "Require $root.L." 'Definition two := 2.' 'Theorem thm : two = 2.' \
+    "Proof. exact (eq_refl $root.L.lib_two). Qed." > "$w/answer/A.v"
+  in_dir "$run" "$w/answer" coqc -Q "$parent/$root" "$root" -R . Top A.v
+  a=$(pin_entry path A.vo "$w/ch/A.vo")
+  named_config "$w/config.json" Top.A.thm "$a"
+}
+
+# shared-coqpath, a guard: the library Cp.L under COQPATH passes.
+case_shared_coqpath() {
+  local w c=shared-coqpath code
+  w=$(mktemp -d)
+  trusted_trees "$w" "$w/cp" Cp "$c"
+  code=$(unset ROCQPATH
+    export COQPATH="$w/cp"
+    named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" answer
+  expect_pass "$c" "$code" "$w"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# shared-user-contrib, a guard: the library Uc.L under the user-contrib of
+# coqlib, which the run is given with -coqlib: its theories is a link to the
+# corelib of the installation in use, and its plugins an empty directory,
+# which an installation must have. The run passes.
+case_shared_user_contrib() {
+  local w c=shared-user-contrib code
+  w=$(mktemp -d)
+  mkdir -p "$w/coqlib/plugins" "$w/coqlib/user-contrib"
+  ln -s "$(cd "$(rocq -where)" && pwd)/theories" "$w/coqlib/theories"
+  trusted_trees "$w" "$w/coqlib/user-contrib" Uc "$c"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -coqlib "$w/coqlib" \
+    -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" answer
+  expect_pass "$c" "$code" "$w"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# ------------------------------------------- the same file on both sides
+#
+# Lib.X, a library that ROCQPATH reaches, declares the universes ux and vx.
+# rp's file leaves them apart; rp2's is compiled from a source that also
+# states vx < ux, and made to state the digest of rp's (forge_digest), so
+# that each library compiled against rp's file takes rp2's for it. The runs
+# list rp2 behind rp in ROCQPATH, so the answer reads rp's. The challenge
+# (ch) declares u <= Lib.X.vx and states thm over Type@{u}; the honest
+# answer (answer) proves thm. The forged answer (forged) also adds
+# u < Lib.X.ux, which on the challenge side only rp2's levels make hold,
+# and vx < ux, which the challenge-to-answer direction of the constraint
+# check then asks of it (the other direction passes over a constraint
+# between two levels that are not the answer's own). The challenge
+# directory ch-link holds the challenge's A.vo and a link Lib to rp's Lib,
+# which the challenge load binds under Top, so that on the challenge side
+# the name Lib.X resolves to rp2's file.
+samefile_trees() { # <w> <run>
+  local w=$1 run=$2 t
+  mkdir -p "$w/rp/Lib" "$w/rp2/Lib" "$w/other/Lib" "$w/ch" "$w/ch-link" "$w/answer" "$w/forged"
+  printf '%s\n' 'Universe ux vx.' > "$w/rp/Lib/X.v"
+  in_dir "$run" "$w/rp" coqc -Q Lib Lib Lib/X.v
+  printf '%s\n' 'Universe ux vx.' 'Constraint vx < ux.' > "$w/other/Lib/X.v"
+  in_dir "$run" "$w/other" coqc -Q Lib Lib Lib/X.v
+  cp "$w/other/Lib/X.vo" "$w/rp2/Lib/"
+  forge_digest "$w/rp/Lib/X.vo" "$w/rp2/Lib/X.vo"
+  printf '%s\n' 'Require Lib.X.' 'Universe u.' 'Constraint u <= Lib.X.vx.' \
+    'Definition U := Type@{u}.' 'Theorem thm : forall A : U, A -> A.' 'Proof.' 'Admitted.' \
+    > "$w/ch/A.v"
+  printf '%s\n' 'Require Lib.X.' 'Universe u.' 'Constraint u <= Lib.X.vx.' \
+    'Definition U := Type@{u}.' 'Theorem thm : forall A : U, A -> A.' \
+    'Proof. exact (fun A a => a). Qed.' > "$w/answer/A.v"
+  printf '%s\n' 'Require Lib.X.' 'Universe u.' 'Constraint u <= Lib.X.vx.' \
+    'Constraint u < Lib.X.ux.' 'Constraint Lib.X.vx < Lib.X.ux.' \
+    'Definition U := Type@{u}.' 'Theorem thm : forall A : U, A -> A.' \
+    'Proof. exact (fun A a => a). Qed.' > "$w/forged/A.v"
+  for t in ch answer forged; do
+    in_dir "$run" "$w/$t" env ROCQPATH="$w/rp" coqc -R . Top A.v
+  done
+  cp "$w/ch/A.vo" "$w/ch-link/"
+  ln -s "$w/rp/Lib" "$w/ch-link/Lib"
+}
+
+# The same-file case <c>, Lib.X pre-checked at rp's file when <prechecked>
+# is yes. With the link, the forged answer, which passes against rp2's
+# levels and fails against rp's: refused with <pattern>, naming Lib.X and
+# rp2's file. Without it, both sides read rp's file, and the honest answer
+# passes.
+samefile_case() { # <c> <prechecked> <pattern>
+  local c=$1 w code a x=""
+  w=$(mktemp -d)
+  samefile_trees "$w" "$c"
+  a=$(pin_entry path A.vo "$w/ch/A.vo")
+  if [ "$2" = yes ]; then x=$(pin_entry library Lib.X "$w/rp/Lib/X.vo"); fi
+  named_config "$w/config.json" Top.A.thm "$a" "$x"
+  seed_stale_verdict "$w/out.json"
+  code=$(export ROCQPATH="$w/rp:$w/rp2"
+    named_compare "$w" "$w" "$w/config.json" "$w/ch-link" -Q "$w/forged" Top Top.A)
+  keep_verdict "$w/out.json" "$c" linked
+  expect_refused "$c/linked" "$code" "$w" "$3"
+  passed "  ok $c/linked"
+  code=$(export ROCQPATH="$w/rp:$w/rp2"
+    named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" unlinked
+  expect_pass "$c/unlinked" "$code" "$w"
+  passed "  ok $c/unlinked"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# same-file-shared: Lib.X shared, which the challenge must read from the
+# answer's file.
+case_same_file_shared() {
+  samefile_case same-file-shared no \
+    "The challenge loaded the shared library Lib\.X from [^ ]*/rp2/Lib/X\.vo, and the answer loaded it from [^ ]*/rp/Lib/X\.vo: the two sides would read different files under one library name\."
+}
+
+# same-file-prechecked: Lib.X pre-checked, which the challenge must read
+# from the answer's file or from a file of the pinned sha256.
+case_same_file_prechecked() {
+  samefile_case same-file-prechecked yes \
+    "The challenge loaded the pre-checked library Lib\.X from [^ ]*/rp2/Lib/X\.vo, which is not the file the answer loaded it from, and whose sha256 is [0-9a-f]{64}, not the one the config pins\."
+}
+
+# ------------------------------- the file a pre-checked library is read from
+#
+# The challenge (ch) holds A.vo, whose thm states two = 2; the config
+# pre-checks Top.P.Q at src's P/Q.vo, which no A Requires; the honest
+# answer (answer) holds that file, so the run loads it through the
+# pre-checked list alone, and an A that proves thm.
+prebad_trees() { # <w> <run>
+  local w=$1 run=$2 a q
+  mkdir -p "$w/src/P" "$w/ch" "$w/answer/P"
+  printf '%s\n' 'Definition q : nat := 2.' > "$w/src/P/Q.v"
+  in_dir "$run" "$w/src" coqc -R . Top P/Q.v
+  printf '%s\n' 'Definition two := 2.' 'Theorem thm : two = 2.' 'Proof.' 'Admitted.' > "$w/ch/A.v"
+  in_dir "$run" "$w/ch" coqc -R . Top A.v
+  cp "$w/src/P/Q.vo" "$w/answer/P/"
+  printf '%s\n' 'Definition two := 2.' 'Theorem thm : two = 2.' 'Proof. reflexivity. Qed.' \
+    > "$w/answer/A.v"
+  in_dir "$run" "$w/answer" coqc -R . Top A.v
+  a=$(pin_entry path A.vo "$w/ch/A.vo")
+  q=$(pin_entry library Top.P.Q "$w/src/P/Q.vo")
+  named_config "$w/config.json" Top.A.thm "$a" "$q"
+}
+
+# prechecked-read-file: two and pin are both bound to Top, and the load path
+# searches pin first, so Top.P.Q resolves to pin's copy of the pinned file,
+# whose sha256 is checked before any library is read. The command line
+# names two's P/Q.vo, another library of that name, which the loader then
+# reads instead: refused by its sha256, naming that file. Then the honest
+# answer passes.
+case_prechecked_read_file() {
+  local w c=prechecked-read-file code got pin
+  w=$(mktemp -d)
+  prebad_trees "$w" "$c"
+  mkdir -p "$w/two/P" "$w/pin/P"
+  cp "$w/answer/A.vo" "$w/two/"
+  printf '%s\n' 'Definition q : nat := 3.' > "$w/two/P/Q.v"
+  in_dir "$c" "$w/two" coqc -R . Top P/Q.v
+  cp "$w/src/P/Q.vo" "$w/pin/P/"
+  got=$(bounded rocqchk -sha256 "$w/two/P/Q.vo")
+  pin=$(bounded rocqchk -sha256 "$w/src/P/Q.vo")
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/two" Top -Q "$w/pin" Top \
+    "$w/two/P/Q.vo" Top.A)
+  keep_verdict "$w/out.json" "$c" read-file
+  expect_refused "$c/read-file" "$code" "$w" \
+    "The pre-checked library Top\.P\.Q is [^ ]*/two/P/Q\.vo, whose sha256 is $got, and the config pins $pin\."
+  passed "  ok $c/read-file"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" honest
+  expect_pass "$c/honest" "$code" "$w"
+  passed "  ok $c/honest"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
+# prechecked-garbage: the answer's P/Q.vo is the pinned file with the 16
+# bytes at offset 16, where its first segment starts, overwritten: the
+# marshal header there is no longer one, so the segment does not
+# unmarshal. Its sha256 is checked before any library is read: refused by
+# the pin's text, naming the file, and the loader never reads it (no
+# "Corrupted file", no anomaly). Then that P/Q.vo is a directory: refused
+# before it is read, naming it, as one that is not a regular file.
+# Then the honest answer passes.
+case_prechecked_garbage() {
+  local w c=prechecked-garbage code got pin
+  w=$(mktemp -d)
+  prebad_trees "$w" "$c"
+  mkdir -p "$w/garbage/P"
+  cp "$w/answer/A.vo" "$w/garbage/"
+  cp "$w/src/P/Q.vo" "$w/garbage/P/"
+  printf '\377\377\377\377\377\377\377\377\377\377\377\377\377\377\377\377' \
+    | dd of="$w/garbage/P/Q.vo" bs=1 seek=16 conv=notrunc 2> /dev/null
+  got=$(bounded rocqchk -sha256 "$w/garbage/P/Q.vo")
+  pin=$(bounded rocqchk -sha256 "$w/src/P/Q.vo")
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/garbage" Top Top.A)
+  keep_verdict "$w/out.json" "$c" garbage
+  expect_refused "$c/garbage" "$code" "$w" \
+    "The pre-checked library Top\.P\.Q is [^ ]*/garbage/P/Q\.vo, whose sha256 is $got, and the config pins $pin\."
+  ! grep -Eq 'Corrupted file|Try to rebuild it|[Aa]nomaly' "$w/log" \
+    || { cat "$w/log"; fail "$c/garbage: the loader read the file before its sha256 was checked"; }
+  passed "  ok $c/garbage"
+  rm -f "$w/garbage/P/Q.vo"
+  mkdir "$w/garbage/P/Q.vo"
+  seed_stale_verdict "$w/out.json"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/garbage" Top Top.A)
+  keep_verdict "$w/out.json" "$c" directory
+  expect_refused "$c/directory" "$code" "$w" \
+    "The pre-checked library Top\.P\.Q is [^ ]*/P/Q\.vo, which cannot be read: Is a directory, not a regular file\."
+  passed "  ok $c/directory"
+  code=$(named_compare "$w" "$w" "$w/config.json" "$w/ch" -Q "$w/answer" Top Top.A)
+  keep_verdict "$w/out.json" "$c" honest
+  expect_pass "$c/honest" "$code" "$w"
+  passed "  ok $c/honest"
+  rm -rf "$w"
+  passed "ok $c"
+}
+
 # ---------------------------------------------------- the recorded forgeries
 #
 # Six proofs of False that a kernel defect once accepted (rocq#22378,
@@ -1006,10 +1775,15 @@ held_case() { # <case directory>
   echo "$n"
 }
 
-# A case as the runner is given it.
+# A case as the runner is given it. A named case holds its ok line, and one
+# for each of its sub-runs when it has more than one.
 held_of() { # <case>
   case "$1" in
     sha256|vos|digest|sibling) echo 1 ;;
+    pre-dep-norec|shared-xdg|shared-nohome|shared-coqpath|shared-user-contrib) echo 1 ;;
+    challenge-missing-dep|challenge-dir-link|unchecked-admit-closure) echo 3 ;;
+    same-file-shared|same-file-prechecked|prechecked-read-file) echo 3 ;;
+    pre-dep-forged|unchecked-helper|prechecked-garbage) echo 4 ;;
     norec) echo $((1 + ${#norec_forms[@]})) ;;
     forgeries) echo $((1 + ${#forgery_names[@]})) ;;
     *) held_case "$cases_dir/$1" ;;
@@ -1023,7 +1797,7 @@ held_total() {
   for c in "$cases_dir"/*/; do
     n=$((n + $(held_case "$c")))
   done
-  for c in vos digest sibling norec forgeries; do
+  for c in vos digest sibling norec "${library_cases[@]}" forgeries; do
     n=$((n + $(held_of "$c")))
   done
   echo "$n"
@@ -1047,7 +1821,8 @@ main() {
       sibling) case_sibling ;;
       norec) case_norec ;;
       forgeries) case_forgeries ;;
-      *) run_case "$1" ;;
+      *)
+        if is_library_case "$1"; then "case_${1//-/_}"; else run_case "$1"; fi ;;
     esac
   else
     held=$(held_total)
@@ -1060,6 +1835,9 @@ main() {
     case_digest
     case_sibling
     case_norec
+    for c in "${library_cases[@]}"; do
+      "case_${c//-/_}"
+    done
     case_forgeries
   fi
   echo "compare.sh: $ran ok, $skipped skipped, $held held"
