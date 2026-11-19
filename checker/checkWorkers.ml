@@ -44,7 +44,8 @@ type task = {
    number of checks the worker answered that it will complete. [output]
    is the pair of files, standard output and standard error, that the
    worker writes to instead of the terminal (see [run_worker]), until the
-   main process prints or drops them. *)
+   main process prints or drops them. [file] is the worker's extra file
+   ([set_worker_file]), until the main process hands it on or closes it. *)
 type batch = {
   size : int;
   first : job;
@@ -60,6 +61,7 @@ type worker = {
   tasks : task array;
   report : Unix.file_descr;
   mutable output : (Unix.file_descr * Unix.file_descr) option;
+  mutable file : Unix.file_descr option;
   mutable asked : bool;
   mutable released : int option;
   mutable buf : string;
@@ -84,6 +86,8 @@ let set_jobs ~profiling n =
     else max_workers := n - 1
 
 let parallel () = !max_workers > 0
+
+let jobs () = !max_workers + 1
 
 let error_printer = ref (fun _ -> ())
 let set_error_printer f = error_printer := f
@@ -635,20 +639,32 @@ let pr_batch b =
     str "the last " ++ Constant.print last ++ str ")"
   | _ -> pr_tasks b
 
-(* An unnamed file for what a worker prints: created, opened, then
-   removed. *)
-let open_capture () =
-  match Filename.temp_file "rocqchk" ".out" with
+let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
+
+(* A file created in [temp_dir], opened, then removed, so that nothing is
+   left of it on disk once its last descriptor is closed; [None] if it
+   cannot be created or opened. One that cannot be removed is still named:
+   it is kept open all the same if [keep_if_named], and closed otherwise,
+   so that there is none. *)
+let open_temp ~keep_if_named ~temp_dir =
+  match Filename.temp_file ~temp_dir "rocqchk" ".out" with
   | exception Sys_error _ -> None
   | name ->
     let fd =
       try Some (Unix.openfile name [Unix.O_RDWR; Unix.O_CLOEXEC] 0o600)
       with Unix.Unix_error _ -> None
     in
-    (try Sys.remove name with Sys_error _ -> ());
-    fd
+    match Sys.remove name with
+    | () -> fd
+    | exception Sys_error _ -> if keep_if_named then fd else (Option.iter close_fd fd; None)
 
-let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
+let capture_dir () = Filename.get_temp_dir_name ()
+
+(* An unnamed file for what a worker prints: created, opened, then
+   removed; one that cannot be removed is used all the same, named. *)
+let open_capture () = open_temp ~keep_if_named:true ~temp_dir:(capture_dir ())
+
+let open_unnamed ~temp_dir = open_temp ~keep_if_named:false ~temp_dir
 
 (* The two files a worker prints to, or neither of them. *)
 let open_output () =
@@ -665,6 +681,50 @@ let capture_available () =
 let close_output w =
   Option.iter (fun (out, err) -> close_fd out; close_fd err) w.output;
   w.output <- None
+
+(* One extra file per worker, for a client of this module: each worker
+   whose batch holds a check of an opaque proof is given one before it is
+   forked, and the main process hands it to [done_ok] once the worker has
+   ended successfully. *)
+type worker_file = {
+  open_file : unit -> Unix.file_descr option;
+  in_child : Unix.file_descr option -> unit;
+  done_ok : Unix.file_descr -> unit;
+}
+
+let worker_file : worker_file option ref = ref None
+
+let set_worker_file f = worker_file := Some f
+
+let open_worker_file () =
+  match !worker_file with
+  | Some f -> f.open_file ()
+  | None -> None
+
+(* In the child, right after the fork. Nothing may escape from here: the
+   child would go on in the main process's code. *)
+let worker_file_in_child file =
+  match !worker_file with
+  | Some f -> (try f.in_child file with _ -> ())
+  | None -> ()
+
+(* A worker that failed or was killed: its file is closed, and nothing is
+   told of it. *)
+let close_extra_file w =
+  Option.iter close_fd w.file;
+  w.file <- None
+
+(* The files the main process holds for the worker [w] but its report
+   pipe ([close_report]): its output and its extra file. *)
+let close_files w =
+  close_output w;
+  close_extra_file w
+
+(* The worker [w] ended successfully: [done_ok] takes its file. *)
+let file_done w =
+  match w.file, !worker_file with
+  | Some fd, Some f -> w.file <- None; f.done_ok fd
+  | _ -> close_extra_file w
 
 (* The descriptors [deal] has opened for batches it has not forked yet. *)
 let prepared_fds : Unix.file_descr list ref = ref []
@@ -707,6 +767,11 @@ let spawn ?(releasable = true) ?prepared tasks =
       | Some (_, _, output) -> Some output
       | None -> open_output ()
     in
+    (* Unlike the output files, the extra file is not prepared by [deal]: a
+       worker can do without it, so its absence is no reason to hold a batch
+       back, and it is opened here on both paths. A batch of reads of tables
+       alone checks no opaque body, and has none ([set_worker_file]). *)
+    let file = if batch.proofs > 0 then open_worker_file () else None in
     (* This worker's own descriptors are no longer another's to close. *)
     let mine = report :: report_out ::
                (match output with Some (out, err) -> [out; err] | None -> []) in
@@ -714,10 +779,7 @@ let spawn ?(releasable = true) ?prepared tasks =
     match Unix.fork () with
     | 0 ->
       Unix.close report;
-      List.iter (fun w ->
-          close_fd w.report;
-          Option.iter (fun (out, err) -> close_fd out; close_fd err) w.output)
-        !running;
+      List.iter (fun w -> close_fd w.report; close_files w) !running;
       (* Those [deal] opened for the batches it has not forked yet: a child
          holding the write end of another worker's report would keep that
          report from ever ending. *)
@@ -727,18 +789,20 @@ let spawn ?(releasable = true) ?prepared tasks =
       reset_held_in_child ();
       table_reads := 0;
       table_bytes := 0;
+      worker_file_in_child file;
       run_worker parent report_out output tasks
     | pid ->
       Unix.close report_out;
       incr forks;
       debug (fun () -> str "worker " ++ int pid ++ str ": " ++ pr_tasks batch);
-      running := { pid; batch; tasks; report; output;
+      running := { pid; batch; tasks; report; output; file;
                    asked = not releasable; released = None; buf = "" } :: !running;
       if !forks = 1 then release_test_at "main" 0
     | exception Unix.Unix_error (err, _, _) ->
       Unix.close report;
       Unix.close report_out;
       Option.iter (fun (out, e) -> close_fd out; close_fd e) output;
+      Option.iter close_fd file;
       check_here_instead (Unix.error_message err)
 
 let signal_name s =
@@ -765,7 +829,7 @@ let abort () =
   List.iter (fun w ->
       (try ignore (waitpid_non_intr [] w.pid) with Unix.Unix_error _ -> ());
       close_report w.report;
-      close_output w)
+      close_files w)
     workers
 
 (* What the worker whose failure is being raised printed, standard output
@@ -805,7 +869,7 @@ let print_output (out, err) =
    kept. *)
 let fail w status =
   held_output := read_output w;
-  close_output w;
+  close_files w;
   abort ();
   raise (WorkerFailed (w.pid, status, w.batch))
 
@@ -908,9 +972,11 @@ let reaped pid status =
       (match w.released with
        | Some r when not (Int.equal r k) -> fail w status
        | Some _ | None -> ());
-      (* It ended successfully, so what it printed is printed now. *)
+      (* It ended successfully, so what it printed is printed now, and its
+         extra file is handed on. *)
       print_output (read_output w);
       close_output w;
+      file_done w;
       note_done w.tasks k;
       match w.released with
       | Some _ ->
@@ -1136,6 +1202,34 @@ let deal ?(walk = false) k size =
                  (Array.of_list (by_cost (if walk then b else List.rev b))))
            batches)
 
+(* The descriptors that the main process may hold at once for its workers,
+   with room for the rest of the run. At most [jobs ()] workers are alive
+   at once, counting the batches that [deal] has prepared and not forked
+   yet: [dispatch] and [finish] deal no more batches than there are free
+   slots, and the slot of the worker of [validate_tables] is kept for it.
+   Each holds, from the moment its batch is prepared until it is reaped, at
+   most 5: the two ends of its report pipe, its two output files ([deal]
+   opens these four for every batch it prepares before it forks any), and
+   its extra file ([spawn], while the write end of the report is still
+   open). The 1 is the file of progress of the worker of [validate_tables],
+   which the main process keeps after that worker has ended; the 64 leave
+   room for the library files the main process opens. *)
+let descriptors_for_workers () = 5 * jobs () + 1 + 64
+
+(* The open files that the main process and its workers may hold at once,
+   as the system's table of open files counts them: each open file once,
+   however many descriptors of however many processes name it, so the
+   descriptors a worker inherits or makes with [dup2] ([run_worker]) add
+   none. Each of the at most [jobs ()] workers holds at most 6: the 5 of
+   [descriptors_for_workers] (the worker of [validate_tables] has no extra
+   file, and is counted with one all the same), and the library file it
+   opens while it reads a table (CheckLibrary.read_opaque_table), which it
+   closes before it reads another. The first 1 is the library file the main
+   process reads, one at a time; the second, the file of progress of the
+   worker of [validate_tables]; the 64, the room of
+   [descriptors_for_workers]. *)
+let open_files_for_workers () = 6 * jobs () + 1 + 1 + 64
+
 (* Hands out the batches a new job makes possible, at most once every
    [window] seconds. *)
 let dispatch () =
@@ -1269,7 +1363,7 @@ let finish () =
   if !max_workers > 0 then begin
     (* The main process checks nothing from now on, so one more worker
        can run. *)
-    let slots = !max_workers + 1 in
+    let slots = jobs () in
     (* A worker that stops early, or releases a tail, queues checks again,
        so the queue is only known to be empty when no worker is left. *)
     while not (Queue.is_empty queue) || not (CList.is_empty !running) do

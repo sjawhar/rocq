@@ -707,8 +707,8 @@ let run senv =
    of the exception, which can quote a name read from a library (checkNames.mli).
    The text is the one [explain_exn] returns: it prints the terms of a
    [CantApplyBadType] type error itself, but nothing in the report raises one. *)
-let print_statement_report env requests =
-  try Check_closure.print env CheckLibrary.indirect_accessor requests
+let print_statement_report ?recorded env requests =
+  try Check_closure.print ?recorded env CheckLibrary.indirect_accessor requests
   with e when (match e with Sys.Break | Out_of_memory -> false | _ -> true) ->
     Feedback.msg_warning
       (str "Statement report stopped: " ++
@@ -820,9 +820,19 @@ let run_compare env =
 let main () =
   let senv = init() in
   Check_stat.start_summary !Check_stat.output_context;
+  (* When the records are used, and why: see reportRecords.mli. *)
+  if Option.has_some !statement_report then
+    ReportRecords.start ~compare:(Option.has_some !compare_config);
   let senv, opac = run senv in
   let env = Safe_typing.env_of_safe_env senv in
-  Option.iter (print_statement_report env) !statement_report;
+  (* Every worker has finished by now ([CheckWorkers.finish]): a failed run
+     has exited. *)
+  let records = ReportRecords.collect () in
+  Option.iter (fun requests ->
+      Option.iter (fun line -> Feedback.msg_notice (str line)) (ReportRecords.status_line ());
+      print_statement_report ?recorded:(Option.map ReportRecords.recorded records) env requests;
+      Option.iter ReportRecords.test_counts records)
+    !statement_report;
   run_compare env;
   (* A summary the walk of mod_impl.ml could not complete is refused with a
      user error, reported as a check's error is. *)

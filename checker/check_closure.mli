@@ -23,7 +23,8 @@ val read_requests : string -> request list
     are skipped. A tab or carriage return on any line is an error.
     @raise CErrors.UserError on any other line. *)
 
-val print : Environ.env -> (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ->
+val print : ?recorded:(Names.Constant.t -> Opaqueproof.opaque -> Names.GlobRef.t list option) ->
+  Environ.env -> (Opaqueproof.opaque -> Opaqueproof.opaque_proofterm) ->
   request list -> unit
 (** Print the report, one line per message on the feedback channel:
 
@@ -75,7 +76,31 @@ END STATEMENT REPORT
     the constant [g] of a module [Q] of the library [R.P] and the constant
     [g] of the library [R.P.Q] both print [R.P.Q.g]. No grader may check
     these lines against a permitted list by name; [rocqchk -compare] judges
-    each axiom and flag by the object itself ([axioms_and_flags]). *)
+    each axiom and flag by the object itself ([axioms_and_flags]).
+
+    Given [recorded], the opaque body [o] of a constant [kn] for which
+    [recorded kn o] gives objects is not read: its objects are those, which
+    must be what [opaque_body_refs] gives for the body of [o]. The lines
+    are then the ones the report prints without [recorded], but for the
+    one exception that the header of reportRecords.mli states. *)
+
+val opaque_body_refs : Environ.env -> Constr.t -> Names.GlobRef.t list option
+(** [opaque_body_refs env c]: the objects that the report's walk adds for
+    the term [c] alone, with the primitive types that [env] registers: each
+    constant it names, the first inductive of each block that an inductive,
+    a constructor, a [match] or a projection names, and the registered type
+    of each literal and array. It is the walk itself, run on [c] alone. Each
+    object is given once. [None] where one of them has names that are not
+    finite ([CheckNames.finite_names]), which the walk checks before it
+    compares that object with any other. Called by the process that checked
+    the opaque body [c], with the environment [c] was checked in
+    ([ReportRecords]). *)
+
+val prepare_opaque_body_refs : unit -> unit
+(** Makes the cache that [opaque_body_refs] uses, if it is not made yet: in
+    the main process before any worker is forked, the workers share it until
+    they write to it. On a 64-bit machine it takes 6 MiB plus 48 KiB, plus a
+    stack that grows to fit the largest walk it has run, which it keeps. *)
 
 (** {6 The closure, for [rocqchk -compare]} *)
 

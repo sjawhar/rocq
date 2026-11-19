@@ -867,6 +867,172 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   would print that is not made of identifiers, for instance the name of a
   constant that a term of an admitted library names but no library declares.
 
+  With ``-j``, the report takes the references of each opaque proof that a
+  worker checked from that worker, which records them as it checks the
+  proof, instead of reading the proof again. It still reads the proofs of
+  the libraries that are not checked, those that the main process checks
+  itself (it does so only where it cannot start a worker), and those it
+  reaches through a copy it makes itself, by substituting the structure of
+  a module it looks into. Nor is a proof recorded that names an object
+  whose name, or canonical name, is longer than any name that ``coqc``
+  writes: 4,096 or more modules and identifiers in its module path, not
+  counting the library or functor parameter at its root, and in the
+  directory path of that root. A forged library can hold such a name,
+  even one whose module path loops; the
+  report reads such a proof. While a worker runs, its records are kept in a
+  temporary file in ``/dev/shm``, removed from it as soon as it is opened,
+  and once the worker has ended, in the memory of the main process, which
+  copies that file and closes it at once: no directory is made and nothing
+  is left behind, unless ``rocqchk`` cannot remove such a file (see
+  below), or is killed in the instant between the creation of such a file
+  and its removal, as with the files that hold the output of the workers.
+
+  The records take memory, as ``/dev/shm`` is a file system in memory, and
+  they are bounded, whatever the libraries hold. A worker records no more
+  once its file would pass 64 MiB, or 256 MiB divided by *n* with ``-j n``
+  where that is less, so that the files of the workers that run hold at
+  most 256 MiB in all. If the records copied into the main process would
+  pass 256 MiB, or name more than 32 Mi objects in all (counted with
+  repetitions), none is used. So the bytes of the records, in the files
+  still open and in the main process, take at most 512 MiB. The main
+  process also stops recording, and uses no record, where it cannot make
+  the file of a worker, or once it has given the workers more than 4 Mi
+  (4,194,304) opaque proofs to check; until then it keeps an entry for
+  each of those, at most 192 MiB. What the main process decodes from the
+  records, at most 32 Mi objects for at most 4 Mi proofs, takes besides up
+  to 928 MiB: the numbers of the objects that each record names, 288 MiB;
+  the records and the map that finds them by name, 608 MiB; and an array
+  of the proofs, 32 MiB. With the 512 MiB and the 192 MiB above, that is
+  1,632 MiB in all. The main process also keeps one copy of each object
+  that the records name: at most one for each object number it decodes,
+  so at most 32 Mi, and fewer in fact, as each copy takes at least some
+  14 bytes of the 256 MiB it copies, which leaves room for about 18 Mi of
+  them. Each takes about 180 bytes or more: the copy with its names, and
+  its entries in the arrays and the map that decoding uses, so up to
+  about 3.3 GiB more. Each worker that records keeps, until it ends or
+  stops recording, a number for each object that its records name, and
+  with it that object and its names. Its file holds each such object
+  once, in at least some 14 bytes too, so a worker numbers at most one
+  object for each 14 bytes of its cap: about 4.6 Mi with a cap of 64 MiB.
+  It also numbers the objects of the one proof whose record would take
+  its file past its cap, before it finds that out. Each such object takes
+  about 100 bytes or more, with its entry in the map from objects to
+  numbers, so up to about 0.5 GiB in a worker. As the files of the
+  workers that run hold at most 256 MiB in all, the workers keep together
+  at most about 18 Mi such objects, about 2 GiB, each in its own process,
+  plus the objects of that one proof in each. Before the
+  first worker starts, the main process also makes a cache of 6 MiB plus
+  48 KiB, plus a stack that grows to fit the largest walk through a proof
+  and is kept; each worker that records copies the cache in part, as it
+  writes to it. These figures are estimates for a 64-bit machine, from the
+  data that ``rocqchk`` keeps. Libraries within these bounds can make
+  ``rocqchk`` use more memory with the records than without them: for
+  instance, many opaque proofs that each name many objects, which the
+  report does not reach, are recorded all the same. A limit on the size of
+  files (``ulimit -f``) that the records meet costs only records: such a
+  write fails, instead of killing ``rocqchk``, and the report reads the
+  proofs whose records are lost.
+
+  Nothing is recorded with ``-compare``, ``-merge-inductives`` or
+  ``-merge-inductives-verbose``. Nor is anything recorded where
+  ``/dev/shm`` is not a directory ``rocqchk`` can write to, or where other
+  users can write to it and it does not have the sticky bit; where it is on
+  the file system of ``TMPDIR`` (by default ``/tmp``), in which the files
+  of the workers' output are made, or of a file that ``rocqchk`` holds open
+  as it starts, such as its standard output and error, so that the records
+  take no room on a file system that ``rocqchk`` writes to without them,
+  and a full ``/dev/shm`` only stops recording; or where the limit on open
+  files (``ulimit -n``), less the files already open as ``rocqchk``
+  starts, is below ``5 n + 65`` with ``-j n``; or where the files already
+  open, plus ``5 n + 65``, are more than 1,024 (``FD_SETSIZE``): the main
+  process waits for its workers with ``select``, which takes no file
+  numbered 1,024 or more, and the records add a file for each worker; or
+  where the room left in the system's table of open files, which counts as
+  well the files that the workers open themselves, is below ``6 n + 66``;
+  or where ``rocqchk`` cannot read that limit from ``/proc/self/limits``,
+  those files from ``/proc/self/fd``, or that room from
+  ``/proc/sys/fs/file-nr``: without that file, as where a sandbox hides
+  it, the room in the system's table cannot be known. In all these
+  cases the report reads the proofs as it does without ``-j``. Where
+  ``rocqchk`` can make files in ``/dev/shm`` but not remove them, as in a
+  sandbox that forbids removing files there, the one empty file it made
+  before the removal failed is left in ``/dev/shm``, nothing more is
+  recorded, and the report reads the proofs as it does without ``-j``.
+  Other processes that fill the system's table of open files while
+  ``rocqchk`` runs can make it fail, with or without records: no check at
+  its start can foresee them.
+
+  With ``-j``, where the records are off or given up, ``rocqchk`` prints
+  one line on its standard error, just before the report, outside the
+  report and the summary of ``-o``:
+
+  .. code-block:: text
+
+     rocqchk: statement report: records off: REASON
+     rocqchk: statement report: records given up: REASON
+
+  The first form says that nothing was recorded, the second that the main
+  process gave up recording after it started; either way the report read
+  every proof it reached, as it does without ``-j``. There is no such
+  line otherwise: without ``-j``, without ``-statement-report``, or where
+  the records are neither off nor given up. The two forms and their
+  reasons are a stable interface: a program may read them to tell that a
+  run did not take the references of the proofs from the records. The
+  reasons of ``records off`` are:
+
+  - ``compare``, ``merge-inductives``: the run has ``-compare``, or
+    ``-merge-inductives`` or ``-merge-inductives-verbose``;
+  - ``no /dev/shm``: ``/dev/shm`` does not exist, cannot be looked at, or
+    is not a directory;
+  - ``/dev/shm writable by others``: other users can write to
+    ``/dev/shm``, and it does not have the sticky bit;
+  - ``/dev/shm not writable``: ``rocqchk`` cannot create files in
+    ``/dev/shm``;
+  - ``no /proc/self/fd``: ``rocqchk`` cannot list, or look at, the files
+    it holds open;
+  - ``descriptor on /dev/shm``: one of those files is on the file system of
+    ``/dev/shm``;
+  - ``TMPDIR on /dev/shm``: ``TMPDIR`` is on that file system;
+  - ``no /proc/self/limits``: ``rocqchk`` cannot read its limit on open
+    files;
+  - ``no room for descriptors``: that limit, less the files open, is below
+    ``5 n + 65``;
+  - ``FD_SETSIZE``: the files open, plus ``5 n + 65``, are more than 1,024;
+  - ``no file-nr``: ``/proc/sys/fs/file-nr`` does not exist, cannot be
+    read, or does not hold three numbers;
+  - ``no room in file table``: the room it gives is below ``6 n + 66``;
+  - ``start failed``: anything else failed as the records were set up.
+
+  The reasons of ``records given up`` are:
+
+  - ``deferred cap``: the main process gave the workers more than 4 Mi
+    opaque proofs to check;
+  - ``defer failure``: it could not note an opaque proof it gave a worker;
+  - ``file failure``: it could not make, or could not remove, the file of a
+    worker in ``/dev/shm``;
+  - ``buffer cap``: the records it copied would pass 256 MiB, and
+    ``buffer cap (test)`` where a test of the test suite lowered that cap;
+  - ``copy failure``: it could not copy the file of a worker;
+  - ``id cap``: the records name more than 32 Mi objects in all;
+  - ``read failure``: it could not decode the records.
+
+  A worker that stops recording on its own, as when its file would pass its
+  cap or a write to that file fails, loses its own records only, and adds
+  no line: the report reads the proofs whose records are lost. Where
+  ``rocqchk`` cannot start any worker, as where it cannot fork a process,
+  the main process checks every proof itself and records nothing, and
+  that adds no line either: the report reads every proof it reaches. So
+  the absence of the line does not show that the report took any
+  references from the records.
+
+  The report is the same as without ``-j``, but for one case: a library
+  file that changes or vanishes on disk while ``rocqchk`` runs can change
+  which proofs the report says it could not read, and so reports as
+  axioms, whether those proofs were recorded or not. The report does not
+  read a recorded proof, so it does not read and keep that proof's table
+  for the later proofs of that library that it reads, which then read the
+  library file as it is then.
+
 Environment variable ``$ROCQLIB`` can be set to override the location of
 the standard library.
 

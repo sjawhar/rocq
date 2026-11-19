@@ -278,8 +278,15 @@ let check_constant_declaration env st kn cb =
        waits. The process that runs the check reads the table it needs
        ([CheckLibrary.indirect_accessor]), and a check handed back cooks
        again in the process that runs it. With -j 1, [defer] runs the
-       closure at once, so the order of effects is as before. *)
-    CheckWorkers.defer kn (fun () -> let c, env = cook o in check env c ())
+       closure at once, so the order of effects is as before. The
+       statement report's recorder numbers the check here, and the check
+       tells it of its success ([ReportRecords.deferring]); where nothing is
+       recorded, neither does anything. *)
+    let checked = ReportRecords.deferring kn o in
+    CheckWorkers.defer kn (fun () ->
+        let c, env = cook o in
+        check env c ();
+        checked env c)
   in
   retro, st
 

@@ -108,19 +108,208 @@ let index_fields fields =
 let find_module fields label = Id.Map.find_opt label fields.modules
 let find_constant fields label = Id.Map.find_opt label fields.constants
 let find_mind fields label = Id.Map.find_opt label fields.minds
+
+(** {6 The cache of the walk} *)
+
+(* A term is a graph with shared nodes: [seen] skips a node already walked in
+   the same declaration, as vernac/assumptions.ml does, with a cache of the
+   same size. The cache is lossy and direct-mapped: a miss only walks the node
+   again. *)
+let cache_size = 1 lsl 18
+
+(* The slots of [objects] below. *)
+let object_slots = 4096
+
+(* What a slot of [objects] holds before the walk builds an object there. *)
+let no_object = GlobRef.VarRef (Id.of_string "dummy")
+
+(* The slots of the stack below that a cache starts with. *)
+let stack_start = 1024
+
+(* What [walk] keeps from one node to the next, in three parts that last
+   differently: the table of [seen] ([keys] to [touched_count]), which
+   each walk takes in a new generation; the stack of the terms to visit
+   ([terms] to [peak]), which lasts one walk; and [objects], which lasts as
+   long as the cache. One walk at a time on a cache, since its stack is the
+   current walk's: an [add] must not walk. A walk that an [add] started on
+   the same cache would empty the stack as it ended ([end_walk]), and the
+   walk that called that [add] would lose the terms it had still to visit,
+   and their objects, with no error. *)
+type walk_cache = {
+  keys : Constr.t array;
+  (* the node last walked at each slot of [seen]: kept until a later walk
+     writes the slot or, where [noting], until the walk that wrote it ends
+     ([end_walk]) *)
+  gens : int array;
+  (* the generation that wrote each slot of [keys], kept until a later
+     generation writes the slot *)
+  mutable gen : int;
+  (* the generation of the current walk, or of the last one: each walk takes
+     a new one ([fresh_gen]), so that it sees no slot another walk wrote *)
+  noting : bool;
+  (* whether the cache notes in [touched] the slots each walk writes, for
+     its whole life: only the cache of [opaque_body_refs] does *)
+  touched : int array;
+  (* where [noting], the slots of [keys] that the current walk wrote, each
+     once, the first [touched_count]: the next walk writes over them *)
+  mutable touched_count : int;
+  (* the slots of [touched] that the current walk filled, from its start
+     ([fresh_gen]) to the start of the next walk; always 0 where not
+     [noting] *)
+  mutable terms : Constr.t array;
+  (* the stack of the terms the current walk has still to visit: the first
+     [size], the last one on top ([push]); the array is kept from one walk
+     to the next, doubled when full and never shrunk, so that [push]
+     allocates only where the stack outgrows it *)
+  mutable views : view array;
+  (* the view that typed each term of [terms], at the same slot, kept the
+     same way *)
+  mutable size : int;
+  (* the terms on the stack: 0 between two walks ([end_walk]) *)
+  mutable peak : int;
+  (* the first slots of [terms] that the current walk wrote, the only ones
+     that can hold a term: [end_walk] empties them, and sets [peak] to 0 *)
+  objects : GlobRef.t array;
+  (* the object the walks built last at each slot ([const_ref], [ind_ref]),
+     kept as long as the cache: nothing empties it *)
+}
+
+let walk_cache ~noting = {
+  keys = Array.make cache_size Constr.mkProp;
+  gens = Array.make cache_size (-1);
+  gen = 0;
+  noting;
+  touched = (if noting then Array.make cache_size 0 else [||]);
+  touched_count = 0;
+  terms = Array.make stack_start Constr.mkProp;
+  views = Array.make stack_start Public;
+  size = 0;
+  peak = 0;
+  objects = Array.make object_slots no_object;
+}
+
+let fresh_gen cache =
+  cache.gen <- cache.gen + 1;
+  cache.touched_count <- 0;
+  cache.gen
+
+(* A slot is noted when the generation first writes it, so a generation
+   notes at most [cache_size] of them. *)
+let seen cache gen c =
+  let i = Constr.hash_bounded c land (cache_size - 1) in
+  let g = cache.gens.(i) in
+  if Int.equal g gen && cache.keys.(i) == c then true
+  else begin
+    if cache.noting && not (Int.equal g gen) then begin
+      cache.touched.(cache.touched_count) <- i;
+      cache.touched_count <- cache.touched_count + 1
+    end;
+    cache.gens.(i) <- gen;
+    cache.keys.(i) <- c;
+    false
+  end
+
+(* Pushes the term [c], in the view [view], on the stack of terms to visit. *)
+let push cache view c =
+  let n = cache.size in
+  if Int.equal n (Array.length cache.terms) then begin
+    let terms = Array.make (2 * n) Constr.mkProp and views = Array.make (2 * n) Public in
+    Array.blit cache.terms 0 terms 0 n;
+    Array.blit cache.views 0 views 0 n;
+    cache.terms <- terms;
+    cache.views <- views
+  end;
+  cache.terms.(n) <- c;
+  cache.views.(n) <- view;
+  cache.size <- n + 1;
+  if n >= cache.peak then cache.peak <- n + 1
+
+let push_array cache view a =
+  for i = 0 to Array.length a - 1 do push cache view a.(i) done
+
+(* Pushes the subterms of a node that [walk] enters, from the first to the
+   last in the order of [Constr.fold]. For a fixpoint that has not as many
+   bodies as types, it raises, before it pushes any, the exception that
+   [Constr.fold] raises there: [Invalid_argument "Array.fold_left2"], with
+   the message of [CArray.fold_left2], which [Constr.fold] calls, copied: a
+   change of that message must be made here too. [Constr.fold] itself is
+   not used: it needs a closure that captures [view], made at each node, and
+   its [Case] and [Fix] arms make closures of their own.
+   [Constr.iter] is not used either: it takes the subterms of a fixpoint in
+   another order, and makes a closure for each [match]. *)
+let push_subterms cache view c =
+  let open Constr in
+  match kind c with
+  (* the nodes [walk] does not enter, which have no subterms but [Evar]:
+     [Constr.fold] folds an [Evar]'s instance, which [walk] never reaches *)
+  | Rel _ | Var _ | Meta _ | Evar _ | Sort _ | Const _ | Ind _ | Construct _
+  | Int _ | Float _ | String _ -> ()
+  | Cast (t, _, ty) -> push cache view t; push cache view ty
+  | Prod (_, ty, t) | Lambda (_, ty, t) -> push cache view ty; push cache view t
+  | LetIn (_, b, ty, t) -> push cache view b; push cache view ty; push cache view t
+  | App (f, args) -> push cache view f; push_array cache view args
+  | Proj (_, _, t) -> push cache view t
+  | Case (_, _, pms, ((_, p), _), iv, t, bl) ->
+    push_array cache view pms;
+    push cache view p;
+    (match iv with NoInvert -> () | CaseInvert { indices } -> push_array cache view indices);
+    push cache view t;
+    for i = 0 to Array.length bl - 1 do push cache view (snd bl.(i)) done
+  | Fix (_, (_, tl, bl)) | CoFix (_, (_, tl, bl)) ->
+    if not (Int.equal (Array.length tl) (Array.length bl)) then invalid_arg "Array.fold_left2";
+    for i = 0 to Array.length tl - 1 do push cache view tl.(i); push cache view bl.(i) done
+  | Array (_, elems, def, ty) ->
+    push_array cache view elems; push cache view def; push cache view ty
+
+(* Ends a walk: empties the stack, the slots of [terms] that the walk wrote
+   and, where [noting], the slots of [keys] that it wrote, so that the cache
+   keeps no term the walk visited alive, but in the slots of [keys] of a
+   cache not [noting]. *)
+let end_walk cache =
+  for i = 0 to cache.peak - 1 do cache.terms.(i) <- Constr.mkProp done;
+  cache.size <- 0;
+  cache.peak <- 0;
+  for j = 0 to cache.touched_count - 1 do
+    cache.keys.(cache.touched.(j)) <- Constr.mkProp
+  done
+
+(* The object [GlobRef.ConstRef kn]: the one at the slot of [objects] that
+   the hash [kn] carries picks, where it is made of that very name ([==]),
+   which makes it the same object as a new one; else a new one, kept there.
+   The occurrences of a constant in a term usually share its name, so the
+   walk makes its object once instead of at each occurrence. The hash is
+   read, not computed ([KerName.hash]), and the name is not compared, so
+   nothing here walks a name before [add_finite] checks it. Nothing empties
+   [objects]: it keeps alive at most [object_slots] objects, which hold
+   names and no term. *)
+let const_ref cache kn =
+  let i = Constant.UserOrd.hash kn land (object_slots - 1) in
+  match cache.objects.(i) with
+  | GlobRef.ConstRef kn' as obj when kn' == kn -> obj
+  | _ -> let obj = GlobRef.ConstRef kn in cache.objects.(i) <- obj; obj
+
+(* The object [GlobRef.IndRef (mind, 0)], the same way. *)
+let ind_ref cache mind =
+  let i = MutInd.UserOrd.hash mind land (object_slots - 1) in
+  match cache.objects.(i) with
+  | GlobRef.IndRef (mind', 0) as obj when mind' == mind -> obj
+  | _ -> let obj = GlobRef.IndRef (mind, 0) in cache.objects.(i) <- obj; obj
+
 type state = {
   env : Environ.env;
   access : Opaqueproof.opaque -> Opaqueproof.opaque_proofterm;
+  recorded : Constant.t -> Opaqueproof.opaque -> GlobRef.t list option;
+  (* the objects that the check of the opaque body of a constant recorded
+     for it, if any: for the report only, never for the closure of
+     -compare *)
   mutable fields : field_index ModPath.Map.t;
   (* the indexed fields of the implementation of each module looked up so far *)
   mutable public_nodes : node GlobRef.Map_env.t;
   mutable implementation_nodes : node GlobRef.Map_env.t;
   (* each object reached so far, keyed by its constant or by the first
      inductive of its block, in the declaration view that typed its use *)
-  mutable gen : int;
-  keys : Constr.t array;
-  gens : int array;
-  (* the cache of [seen] *)
+  cache : walk_cache;
+  (* the cache of [seen], the stack and the objects of [walk] *)
 }
 
 and node = {
@@ -256,68 +445,141 @@ let lookup_mind st view mind =
 
 (** {6 The objects a declaration mentions} *)
 
-(* A term is a graph with shared nodes: [seen] skips a node already walked in
-   the same declaration, as vernac/assumptions.ml does, with a cache of the
-   same size. The cache is lossy and direct-mapped: a miss only walks the node
-   again. *)
-let cache_size = 1 lsl 18
-
-let fresh_gen st = st.gen <- st.gen + 1; st.gen
-
-let seen st gen c =
-  let i = Constr.hash_bounded c land (cache_size - 1) in
-  if Int.equal st.gens.(i) gen && st.keys.(i) == c then true
-  else begin
-    st.gens.(i) <- gen;
-    st.keys.(i) <- c;
-    false
-  end
-
 let empty_refs = GlobRef.Set_env.empty, GlobRef.Set_env.empty
 
-let add_ref view obj (public, implementation) = match view with
-  | Public -> GlobRef.Set_env.add obj public, implementation
-  | Implementation -> public, GlobRef.Set_env.add obj implementation
-
-let add_mind view mind refs = add_ref view (GlobRef.IndRef (mind, 0)) refs
+(* [GlobRef.Set_env.add] gives back the set itself for an object the set
+   holds already, but allocates on its way there, where [mem] does not: so
+   [add_ref] gives back [refs] itself, and allocates nothing, for an object
+   that it added before. *)
+let add_ref view obj ((public, implementation) as refs) = match view with
+  | Public ->
+    if GlobRef.Set_env.mem obj public then refs
+    else GlobRef.Set_env.add obj public, implementation
+  | Implementation ->
+    if GlobRef.Set_env.mem obj implementation then refs
+    else public, GlobRef.Set_env.add obj implementation
 
 (* The primitive type a literal has, which the kernel looks up to type it. *)
-let add_prim view prim refs = match prim with
-  | Some c -> add_ref view (GlobRef.ConstRef c) refs
+let add_prim add cache view prim refs = match prim with
+  | Some c -> add view (const_ref cache c) refs
   | None -> refs
 
 let refs_to_list (public, implementation) =
   List.map (fun obj -> Public, obj) (GlobRef.Set_env.elements public)
   @ List.map (fun obj -> Implementation, obj) (GlobRef.Set_env.elements implementation)
 
-(* The walk keeps its own list of terms to visit, so its depth does not depend
-   on the depth of the terms. A term retains the declaration view that typed
-   it. The inductive of a [match] and of a projection, and the primitive type
-   of a literal or an array, are objects the term relies on even though no
-   subterm names them. *)
-let rec walk st gen refs = function
-  | [] -> refs
-  | (view, c) :: todo ->
-    let open Constr in
-    let retro = Environ.retroknowledge st.env in
-    match kind c with
-    | Rel _ | Var _ | Sort _ | Meta _ | Evar _ -> walk st gen refs todo
-    | Int _ -> walk st gen (add_prim view retro.Retroknowledge.retro_int63 refs) todo
-    | Float _ -> walk st gen (add_prim view retro.Retroknowledge.retro_float64 refs) todo
-    | String _ -> walk st gen (add_prim view retro.Retroknowledge.retro_string refs) todo
-    | Const (kn, _) -> walk st gen (add_ref view (GlobRef.ConstRef kn) refs) todo
-    | Ind ((mind, _), _) | Construct (((mind, _), _), _) ->
-      walk st gen (add_mind view mind refs) todo
-    | Cast _ | Prod _ | Lambda _ | LetIn _ | App _ | Proj _ | Case _ | Fix _ | CoFix _ | Array _ ->
-      if seen st gen c then walk st gen refs todo
-      else
-        let refs = match kind c with
-          | Case (ci, _, _, _, _, _, _) -> add_mind view (fst ci.ci_ind) refs
-          | Proj (p, _, _) -> add_mind view (Projection.mind p) refs
-          | Array _ -> add_prim view retro.Retroknowledge.retro_array refs
-          | _ -> refs
-        in
-        walk st gen refs (fold (fun todo c -> (view, c) :: todo) todo c)
+(* The objects that the terms [todo] mention, each added with [add]:
+   [add_ref], but for [opaque_body_refs], which checks the object's names
+   first. The walk takes a new generation of [cache], and keeps the terms
+   it has still to visit on the stack of [cache], so its depth does not
+   depend on the depth of the terms. A term retains the declaration view
+   that typed it. The inductive of a [match] and of a projection, and the
+   primitive type of a literal or an array, are objects the term relies on
+   even though no subterm names them.
+
+   The walk pushes each term of [todo] in its order, when the stack is
+   empty, and visits the term on the top of the stack, which it pops. A
+   node it enters pushes its subterms in the order of [Constr.fold]
+   ([push_subterms]), so the walk takes them from the last to the first,
+   and is done with all that the last one leads to before it takes the one
+   below it. The objects it adds do not depend on that order: [seen] only
+   skips a node walked before in the same generation, whose subterms were
+   pushed then, so every node that [todo] reaches is walked and adds its
+   objects. The order only decides which of two objects that
+   [GlobRef.UserOrd] does not tell apart (one user name, two canonical
+   names) a set keeps: the first one added.
+
+   The walk's own code allocates nothing to visit a node, except where a
+   set gains an object ([add_ref]), where [objects] has not the one the
+   node names ([const_ref], [ind_ref]), and where the stack outgrows its
+   arrays ([push]). That claim leaves out [Constr.hash_bounded], which
+   [seen] calls for each compound node the walk pops, and which may
+   allocate. The walk ends with [end_walk], by an exception too. *)
+let walk add env cache todo =
+  let gen = fresh_gen cache in
+  let retro = Environ.retroknowledge env in
+  let rec go refs todo =
+    let n = cache.size in
+    if Int.equal n 0 then begin match todo with
+      | [] -> refs
+      | (view, c) :: todo -> push cache view c; go refs todo
+    end else begin
+      cache.size <- n - 1;
+      let view = cache.views.(n - 1) and c = cache.terms.(n - 1) in
+      let open Constr in
+      match kind c with
+      | Rel _ | Var _ | Sort _ | Meta _ | Evar _ -> go refs todo
+      | Int _ -> go (add_prim add cache view retro.Retroknowledge.retro_int63 refs) todo
+      | Float _ -> go (add_prim add cache view retro.Retroknowledge.retro_float64 refs) todo
+      | String _ -> go (add_prim add cache view retro.Retroknowledge.retro_string refs) todo
+      | Const (kn, _) -> go (add view (const_ref cache kn) refs) todo
+      | Ind ((mind, _), _) | Construct (((mind, _), _), _) ->
+        go (add view (ind_ref cache mind) refs) todo
+      | Cast _ | Prod _ | Lambda _ | LetIn _ | App _ | Proj _ | Case _ | Fix _ | CoFix _ | Array _ ->
+        if seen cache gen c then go refs todo
+        else
+          let refs = match kind c with
+            | Case (ci, _, _, _, _, _, _) -> add view (ind_ref cache (fst ci.ci_ind)) refs
+            | Proj (p, _, _) -> add view (ind_ref cache (Projection.mind p)) refs
+            | Array _ -> add_prim add cache view retro.Retroknowledge.retro_array refs
+            | _ -> refs
+          in
+          push_subterms cache view c;
+          go refs todo
+    end
+  in
+  match go empty_refs todo with
+  | refs -> end_walk cache; refs
+  | exception e ->
+    let e = Exninfo.capture e in
+    end_walk cache;
+    Exninfo.iraise e
+
+exception Name_not_finite
+
+(* [add_ref] for an object whose names are finite
+   ([CheckNames.finite_names]), checked before [add_ref] compares them
+   ([GlobRef.Set_env.mem], then [GlobRef.Set_env.add]) with those of any
+   other object. *)
+let add_finite view obj refs =
+  if CheckNames.finite_names obj then add_ref view obj refs else raise Name_not_finite
+
+(* The objects [walk] adds for the term [c] alone, in one view: the walk
+   itself, so that the two cannot drift apart. A walk that starts from a
+   declaration's type and its body [c], both in the declaration's view, adds
+   the objects of the type and exactly these: [seen] only skips a node
+   already walked in the same generation, whose objects are added already,
+   so the objects of the two terms are the union of the objects of each.
+
+   The primitive types of literals and arrays are those that [env]
+   registers, where the report's walk takes the final environment's. They
+   are the same constants, by their user names: the check of [c] in [env]
+   typed each literal and array of [c], which needs its primitive type
+   registered there ([Typeops.type_of_int] and the like), and a registration
+   once made is never changed ([Primred.add_retroknowledge] keeps the first,
+   and refuses one of another name). The report looks objects up, and
+   prints them, by their user names only ([GlobRef.Map_env],
+   [Environ.lookup_constant], [Constant.to_string]).
+
+   The first object whose names are not finite ends the walk, and the body
+   has no objects to record, [None].
+
+   The cache of these walks is made once: [prepare_opaque_body_refs] makes
+   it in the main process before any worker is forked, so that the workers
+   share it until they write to it. On a 64-bit machine it takes 6 MiB plus
+   48 KiB, plus a stack that grows to fit the largest walk it has run, which
+   it keeps. Each walk, as it ends ([end_walk]), empties its stack and the
+   slots of [seen] that it wrote: a worker checks one body after another,
+   and the cache would otherwise keep the last body it walked alive. The
+   objects it keeps ([const_ref], [ind_ref]) hold names only. *)
+let body_walk_cache = lazy (walk_cache ~noting:true)
+
+let prepare_opaque_body_refs () = ignore (Lazy.force body_walk_cache)
+
+let opaque_body_refs env c =
+  match walk add_finite env (Lazy.force body_walk_cache) [Public, c] with
+  | public, _ -> Some (GlobRef.Set_env.elements public)
+  | exception Name_not_finite -> None
 
 let push_context view ctx todo =
   List.fold_left (fun todo d ->
@@ -353,6 +615,21 @@ let test_unreadable_opaque kn =
     CErrors.user_err Pp.(str "test unreadable opaque body")
   | None | Some _ -> ()
 
+type opaque_body =
+  | Read of Constr.t
+  | Recorded of GlobRef.t list
+
+(* The body of the opaque [o] of the constant [kn], read, or the objects
+   that the check of [o] recorded for it. A recorded body is not read
+   again: the process that checked it read it, from the table the main
+   process hashed. Its table is then not read here either, which is the
+   one way records can change the report: see the header of
+   reportRecords.mli. *)
+let opaque_body st kn o =
+  match st.recorded kn o with
+  | Some objs -> Recorded objs
+  | None -> let c, _ = st.access o in Read c
+
 let constant_node st view kn =
   match lookup_constant st view kn with
   | None -> unresolved
@@ -367,20 +644,30 @@ let constant_node st view kn =
        The exit status is deliberately unchanged: a stored-nowhere body is an
        ordinary answer, and failing the whole check on it would turn every
        delayed proof into a failed grade. A reader who needs certainty reads the
-       warning, which names the constant. *)
-    let body, axiom = match cb.const_body with
-      | Def c -> [declaration_view, c], false
+       warning, which names the constant.
+
+       The test seam comes before the records, so that it still makes the
+       body unreadable. Then a body that a check recorded is not read: the
+       walk of the type alone, with the recorded objects added in the
+       declaration's view, makes the same references as the walk of the type
+       and the body ([opaque_body_refs]). The main process checked the
+       names of the recorded objects as it decoded them
+       ([CheckNames.finite_names]), before any was compared. *)
+    let body, recorded, axiom = match cb.const_body with
+      | Def c -> [declaration_view, c], [], false
       | OpaqueDef o ->
-        (match (test_unreadable_opaque kn; st.access o) with
-         | c, _ -> [declaration_view, c], false
+        (match (test_unreadable_opaque kn; opaque_body st kn o) with
+         | Read c -> [declaration_view, c], [], false
+         | Recorded objs -> [], objs, false
          | exception e when CErrors.noncritical e ->
            Feedback.msg_warning
              Pp.(str "Statement report: the opaque body of " ++ str (Constant.to_string kn)
                  ++ str " could not be read, so it is reported as an axiom: " ++ CErrors.print e);
-           [], true)
-      | Undef _ | Primitive _ | Symbol _ -> [], true
+           [], [], true)
+      | Undef _ | Primitive _ | Symbol _ -> [], [], true
     in
-    let refs = walk st (fresh_gen st) empty_refs ((declaration_view, cb.const_type) :: body) in
+    let refs = walk add_ref st.env st.cache ((declaration_view, cb.const_type) :: body) in
+    let refs = List.fold_left (fun refs obj -> add_ref declaration_view obj refs) refs recorded in
     { refs = refs_to_list refs; axiom;
       flags = typing_flags (GlobRef.ConstRef kn) cb.const_typing_flags [] }
 
@@ -394,7 +681,7 @@ let mind_node st view mind =
             (Array.fold_left (fun todo c -> (declaration_view, c) :: todo) todo mip.mind_user_lc))
         (push_context declaration_view mib.mind_params_ctxt []) mib.mind_packets
     in
-    let refs = walk st (fresh_gen st) empty_refs todo in
+    let refs = walk add_ref st.env st.cache todo in
     Array.iter (fun mip ->
         if not (CheckNames.valid_id mip.mind_typename) then
           CErrors.user_err
@@ -628,16 +915,22 @@ let test_fault () =
   | Some "1" -> CErrors.user_err Pp.(str "test statement-report failure")
   | None | Some _ -> ()
 
-let print env access requests =
+(* Each opaque body is read: none has a record. *)
+let no_record _ _ = None
+
+(* A state with nothing reached yet, and a walk cache of its own. *)
+let new_state ?(recorded = no_record) env access = {
+  env; access; recorded; fields = ModPath.Map.empty;
+  public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty;
+  cache = walk_cache ~noting:false;
+}
+
+let print ?recorded env access requests =
   let index =
     Environ.fold_constants (fun c _ acc -> CString.Map.add (Constant.to_string c) c acc)
       env CString.Map.empty
   in
-  let st = {
-    env; access; fields = ModPath.Map.empty;
-    public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty; gen = 0;
-    keys = Array.make cache_size Constr.mkProp; gens = Array.make cache_size (-1);
-  } in
+  let st = new_state ?recorded env access in
   line "STATEMENT REPORT";
   test_fault ();
 
@@ -666,15 +959,12 @@ let print env access requests =
 
 (* The comparator needs the axioms and flags of a constant, not the report's
    text, and it asks for several constants in one run, so the walk's caches
-   are built once and kept. *)
+   are built once and kept. It reads every opaque body it reaches: the
+   records are the report's alone. *)
 
 type closure_state = state
 
-let closure_state env access = {
-  env; access; fields = ModPath.Map.empty;
-  public_nodes = GlobRef.Map_env.empty; implementation_nodes = GlobRef.Map_env.empty; gen = 0;
-  keys = Array.make cache_size Constr.mkProp; gens = Array.make cache_size (-1);
-}
+let closure_state env access = new_state env access
 
 let axioms_and_flags st kn =
   let axioms, flags = closure st (GlobRef.ConstRef kn) in
