@@ -162,6 +162,20 @@
 #      M = 0. A walk that skipped the place (Check_closure.push_subterms,
 #      its Case and Array arms; the Case, Proj and Construct arms of
 #      Check_closure.walk) misses its axiom at -j 1 and at -j 3.
+#  (w) W5.v: opaque proofs that reach an axiom or a flag in one place
+#      only, a place of the closure outside the walk of a proof's own
+#      term: a primitive operation, which the report takes as an axiom
+#      (in_prim; Check_closure.constant_node, its Primitive arm); the type
+#      of an index of an inductive type, which only the arity context of
+#      its packet holds (in_arity; Check_closure.mind_node,
+#      mip.mind_arity_ctxt); the value of a let-parameter of an inductive
+#      type with no constructor (in_ctxdef; Check_closure.push_context,
+#      the body of a LocalDef); the type-in-type flag of an inductive type
+#      (in_mindtf; mind_node's typing_flags) and the unchecked-eliminations
+#      flag of a constant (in_elim; constant_node's typing_flags, set with
+#      the elimination-flag plugin of misc/unchecked-eliminations). At -j 1
+#      and at -j 3, which takes every body from the records: M = 0. A
+#      closure that skipped the place misses its line at -j 1 and at -j 3.
 #
 # A case where /dev/shm is missing, not writable, or writable by other
 # users without its sticky bit needs another mount of /dev/shm than the
@@ -178,7 +192,7 @@ t=$(mktemp -d)
 # The TMPDIR made in /dev/shm for (q), once it is made.
 s=
 trap 'rm -rf "$d" "$t"; [ -z "$s" ] || rm -rf "$s"' EXIT
-mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/walk2" "$d/walk3" "$d/walk4" "$d/good" "$d/bad" "$d/spliced"
+mkdir "$d/lib" "$d/prims" "$d/big" "$d/walk" "$d/walk2" "$d/walk3" "$d/walk4" "$d/walk5" "$d/elim" "$d/good" "$d/bad" "$d/spliced"
 
 {
   cat <<'EOF'
@@ -467,6 +481,66 @@ Proof. intros f. exact (f (hk I)). Qed.
 EOF
 rocq c -native-compiler no -allow-rewrite-rules -Q "$d/walk4" SRWalk4 "$d/walk4/W4.v"
 
+# The elimination-flag plugin of misc/unchecked-eliminations, for W5.v,
+# built in $d/elim from the files its _CoqProject names and nothing else,
+# as misc/compare.sh builds it: misc/unchecked-eliminations.sh builds and
+# cleans in the source directory while other tests run, so a build
+# product found there may be half written.
+cp misc/unchecked-eliminations/_CoqProject "$d/elim"/
+while read -r f || [ -n "$f" ]; do
+  case $f in ''|-*) continue ;; esac
+  mkdir -p "$d/elim/$(dirname "$f")"
+  cp "misc/unchecked-eliminations/$f" "$d/elim/$f"
+done < misc/unchecked-eliminations/_CoqProject
+(cd "$d/elim" && export COQBIN="$BIN" && rocq makefile -f _CoqProject -o Makefile \
+    && make src/elim_flag_plugin.cmxs) > "$d/elim/build.log" 2>&1 \
+  || { cat "$d/elim/build.log" >&2; >&2 echo "FAILURE: (w): the elimination-flag plugin does not build"; exit 1; }
+
+# W5.v, for (w): each opaque proof reaches its axiom or flag in one place
+# only, a place of the closure outside the walk of its own term. The let
+# of in_prim binds the primitive operation PrimInt63.add, and its type
+# names PrimInt63.int, not add. The index of Ia has type NA, which only
+# Ia's arity context holds: the constructor type, Ia O, and the type of
+# in_arity name Ia and not NA, and the kernel stores no binder types of a
+# match's return clause. Kd has no constructor, so the value of its
+# let-parameter is only in its parameter and arity contexts: the type and
+# the match of in_ctxdef name Kd, whose type the kernel does not store in
+# the proof, and a let-parameter is not one of the parameters that a
+# match keeps. TT is declared with universe checking off and unel with
+# elimination checking off, and in_mindtf and in_elim name them only
+# through a let, whose type, a sort or nat, names neither.
+cat > "$d/walk5/W5.v" <<'EOF'
+Declare ML Module "coq-test-suite.elim_flag".
+From Corelib Require Import PrimInt63.
+
+Lemma in_prim : nat.
+Proof. exact (let _ := PrimInt63.add in O). Qed.
+
+Axiom axarity : nat.
+Definition NA : Set := let _ := axarity in nat.
+Inductive Ia : NA -> Prop := ia : Ia O.
+Lemma in_arity : Ia O -> nat.
+Proof. intros h. exact (match h with ia => O end). Qed.
+
+Axiom axctxdef : nat.
+Inductive Kd (n := axctxdef) : Prop := .
+Lemma in_ctxdef : Kd -> nat.
+Proof. intros h. exact (match h with end). Qed.
+
+Unset Universe Checking.
+Inductive TT : Type := tt_c : TT.
+Set Universe Checking.
+Lemma in_mindtf : nat.
+Proof. exact (let _ := TT in O). Qed.
+
+Unset Test Elimination Checking.
+Definition unel : nat := O.
+Set Test Elimination Checking.
+Lemma in_elim : nat.
+Proof. exact (let _ := unel in O). Qed.
+EOF
+rocq c -native-compiler no -I "$d/elim/src" -Q "$d/walk5" SRWalk5 "$d/walk5/W5.v"
+
 cat > "$d/a.req" <<'EOF'
 via SRPar.A.via -
 model_a SRPar.A.model_a -
@@ -510,6 +584,13 @@ in_proj SRWalk3.W3.in_proj -
 EOF
 v_names="pms idx arrty caseind projind ctoronly"
 for n in $v_names; do echo "in_$n SRWalk4.W4.in_$n -"; done > "$d/v.req"
+cat > "$d/w.req" <<'EOF'
+in_prim SRWalk5.W5.in_prim -
+in_arity SRWalk5.W5.in_arity -
+in_ctxdef SRWalk5.W5.in_ctxdef -
+in_mindtf SRWalk5.W5.in_mindtf -
+in_elim SRWalk5.W5.in_elim -
+EOF
 
 fail() { >&2 echo "FAILURE: $*"; exit 1; }
 
@@ -1122,6 +1203,18 @@ report v -Q "$d/walk4" SRWalk4 -norec SRWalk4.W4
 [ "$reads" = 0 ] || { cat "$d/v-j3.err" >&2; fail "(v) -j 3: $reads bodies read, all were checked"; }
 for name in v-j1 v-j3; do
   for n in $v_names; do has "$name" "axiom in_$n SRWalk4.W4.ax$n"; done
+done
+
+# (w) The places of W5.v, as listed above. M = 0: -j 3 took every body
+# from the records.
+report w -Q "$d/walk5" SRWalk5 -norec SRWalk5.W5
+[ "$reads" = 0 ] || { cat "$d/w-j3.err" >&2; fail "(w) -j 3: $reads bodies read, all were checked"; }
+for name in w-j1 w-j3; do
+  has "$name" 'axiom in_prim Corelib.Numbers.Cyclic.Int63.PrimInt63.add'
+  has "$name" 'axiom in_arity SRWalk5.W5.axarity'
+  has "$name" 'axiom in_ctxdef SRWalk5.W5.axctxdef'
+  has "$name" 'flag in_mindtf type-in-type SRWalk5.W5.TT'
+  has "$name" 'flag in_elim unchecked-eliminations SRWalk5.W5.unel'
 done
 
 exit 0
