@@ -1,0 +1,3 @@
+"name":"Top\.A\.thm","verdict":"fail","reason":"the challenge declaration Top\.A\.L differs: the challenge leaves this constant without a body, another challenge declaration names it, and the answer gives it a transparent body"
+"name":"Top\.A\.L","verdict":"fail","reason":"the challenge leaves this constant without a body, another challenge declaration names it, and the answer gives it a transparent body"
+"declarations":\[\{"name":"Top\.A\.L","reason":"the challenge leaves this constant without a body, another challenge declaration names it, and the answer gives it a transparent body"\}\]

@@ -1,0 +1,2 @@
+"name":"Top\.A\.thm","verdict":"fail","reason":"the challenge declaration Top\.A\.box differs: the template-polymorphic universe context has another size"
+"declarations":\[\{"name":"Top\.A\.box","reason":"the template-polymorphic universe context has another size"\}\]

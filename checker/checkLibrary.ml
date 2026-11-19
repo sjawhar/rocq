@@ -786,6 +786,12 @@ let opaque_sources_ready m =
   LibrarySet.for_all (fun dp ->
       LibraryMap.mem dp !opaque_sources || LibraryMap.mem dp !opaque_cache) libs
 
+(* The libraries the last [recheck_library_in_order] imports without a kernel
+   check, in the order it imports them: see [unchecked]. *)
+let unchecked_libraries = ref []
+
+let unchecked () = !unchecked_libraries
+
 let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
   let ml = List.map try_locate_qualified_library check in
   let nrl = List.map try_locate_qualified_library norec in
@@ -916,7 +922,11 @@ let recheck_library_in_order ~output_context senv ~norec ~admit ~check =
       CheckWorkers.drop_held_output ();
       Exninfo.iraise e
   in
-  (* *)
+  (* Every library is read by now, so [nochk] is final, whether the walk
+     streamed, and has imported some of them already, or not: the libraries
+     of [needed] in it are those this run imports without a check. *)
+  unchecked_libraries :=
+    List.filter_map (fun (dir, _) -> if LibrarySet.mem dir nochk then Some dir else None) needed;
   Flags.if_verbose Feedback.msg_notice (fnl()++hv 2 (str "Ordered list:" ++ fnl() ++
     prlist
     (fun (dir,_) -> pr_dirpath dir ++ fnl()) needed));
@@ -984,10 +994,10 @@ type tables = {
   tb_load_paths : CUnix.physical_path list * logical_path list;
 }
 
-(* Empty library tables, with the load path as it is: the challenge load adds
-   its own directories in front of the answer's, so that a library name the
-   two sides share resolves to the challenge's copy, while a pre-checked
-   library, which is one file for both sides, still resolves. *)
+(* Empty library tables, with the load path as it is when this is called.
+   [Check_compare.load_challenge] installs them for the challenge load, binds
+   the challenge directory in that load path, and decides which file each
+   library the challenge side reads may come from. *)
 let fresh_tables () = {
   tb_libraries = LibraryMap.empty;
   tb_opaque_sources = LibraryMap.empty;
@@ -1018,17 +1028,12 @@ type challenge_library = library_t
 
 (* The libraries the challenge files name, then the given shared libraries,
    each with its dependencies, in dependency order, with the dependency
-   digests each of them records. Nothing is imported yet: the caller checks
-   those digests against the answer's before any of it reaches an
-   environment.
-
-   A shared library is one the answer loaded from outside the roots the
-   challenge stands in for -- the image's installed libraries. The challenge
-   files' own closure reaches only the ones their Require lines name, and the
-   answer may load more; a universe constraint one of those carries between
-   two levels the challenge does know would otherwise look like a constraint
-   the answer invented (dispatch://BET-901). They are interned into the same
-   tables, so a library both lists reach is read once.
+   digests each of them records. Both lists are interned into the same
+   tables, so a library both reach is read once. Nothing is imported yet:
+   the caller checks those digests against the answer's, and the files the
+   loader read, before any of it reaches an environment. Which libraries are
+   shared, and which file each library may come from, is
+   [Check_compare.load_challenge]'s to decide.
 
    The two results are the files' closure, which is what the comparison
    walks, and every library to import, the files' closure first. *)
@@ -1042,9 +1047,9 @@ let intern_challenge files shared =
 let challenge_deps needed =
   List.map (fun (dir, m) -> dir, m.library_deps) needed
 
-(* Import the interned libraries without a check: setup checked the challenge
-   files, and a dependency of theirs is either another challenge file or a
-   pre-checked library. *)
+(* Import the interned libraries without a check. Setup checked the challenge
+   files, and [Check_compare.load_challenge] has checked, before this, which
+   file each library was read from. *)
 let import_challenge senv needed =
   List.fold_left
     (fun senv (_, m) ->
@@ -1052,6 +1057,8 @@ let import_challenge senv needed =
     senv needed
 
 let library_file dir = snd (try_locate_absolute_library dir)
+
+let library_name lib = fst (try_locate_qualified_library lib)
 
 (* The dependency digests every library interned so far records. *)
 let interned_deps () = LibraryMap.bindings !depgraph

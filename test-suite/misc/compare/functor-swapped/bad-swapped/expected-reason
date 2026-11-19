@@ -1,0 +1,2 @@
+"name":"Top\.A\.thm","verdict":"fail","reason":"the challenge declaration Top\.A\.FT differs: constant Top\.A\.X\.P against Top\.A\.Y\.P"
+"declarations":\[\{"name":"Top\.A\.FT","reason":"constant Top\.A\.X\.P against Top\.A\.Y\.P"\}\]
