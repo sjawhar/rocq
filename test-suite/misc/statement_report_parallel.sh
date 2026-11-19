@@ -18,10 +18,11 @@
 # this test can see that one of them does not, it says which, checks only
 # that -j 3 prints what -j 1 prints on (a), with the line that says the
 # records are off for that reason, and ends there with success. A run at
-# -j 3 where rocqchk records nothing, or gives up, prints that line, just
+# -j 3 where the records are off or given up prints that line, just
 # before the report: "rocqchk: statement report: records off: REASON" or
-# "... records given up: REASON" (ReportRecords.status_line); every other
-# run, at -j 1 or with the records used, prints no such line.
+# "... records given up: REASON" (ReportRecords.status_line); no other
+# run prints it (at -j 1, with the records used, or where no worker
+# starts and the records are neither off nor given up; coq-commands.rst).
 #
 #  (a) A.v, a plain library: an axiom that opaque proofs use through other
 #      opaque proofs. With -d checker-workers too, which prints what -j 1

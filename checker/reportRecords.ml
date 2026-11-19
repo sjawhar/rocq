@@ -159,8 +159,14 @@ let recorded r kn o =
     bodies it reaches. So past a cap, a worker records no more, or the main
     process gives up and the report reads every body, as it does without
     records. What a worker holds while it makes one record needs no cap:
-    it is linear in the size of the body it has just checked. The sums at
-    the caps are in coq-commands.rst. *)
+    it is linear in the size of the body it has just checked. Its
+    numbering of the objects its records name ([numbering]) lasts from
+    one record to the next, until it ends or stops recording, and the
+    cap of its file bounds it: each object it numbers is in the [defs]
+    of a frame of that file, in some bytes there. The one exception is
+    the body whose frame would pass the cap: [make_frame] numbers its
+    objects before [record] finds that the frame does not fit. The sums
+    at the caps are in coq-commands.rst. *)
 
 (* The checks the main process defers before it gives up ([deferring]):
    4 Mi, each kept until [collect] as a cell and a pair, 48 bytes on a

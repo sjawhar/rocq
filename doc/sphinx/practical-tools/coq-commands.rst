@@ -875,9 +875,10 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   reaches through a copy it makes itself, by substituting the structure of
   a module it looks into. Nor is a proof recorded that names an object
   whose name, or canonical name, is longer than any name that ``coqc``
-  writes: more than 4,096 modules and identifiers in its module path and
-  in the directory path at the root of that path. A forged
-  library can hold such a name, even one whose module path loops; the
+  writes: 4,096 or more modules and identifiers in its module path, not
+  counting the library or functor parameter at its root, and in the
+  directory path of that root. A forged library can hold such a name,
+  even one whose module path loops; the
   report reads such a proof. While a worker runs, its records are kept in a
   temporary file in ``/dev/shm``, removed from it as soon as it is opened,
   and once the worker has ended, in the memory of the main process, which
@@ -905,9 +906,21 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   1,632 MiB in all. The main process also keeps one copy of each object
   that the records name: at most one for each object number it decodes,
   so at most 32 Mi, and fewer in fact, as each copy takes at least some
-  14 bytes of the 256 MiB it copies, which leaves room for about 19 Mi of
-  them. Each takes about 120 bytes or more, with its entries in the arrays
-  and the map that decoding uses, so up to about 2 GiB more. Before the
+  14 bytes of the 256 MiB it copies, which leaves room for about 18 Mi of
+  them. Each takes about 180 bytes or more: the copy with its names, and
+  its entries in the arrays and the map that decoding uses, so up to
+  about 3.3 GiB more. Each worker that records keeps, until it ends or
+  stops recording, a number for each object that its records name, and
+  with it that object and its names. Its file holds each such object
+  once, in at least some 14 bytes too, so a worker numbers at most one
+  object for each 14 bytes of its cap: about 4.6 Mi with a cap of 64 MiB.
+  It also numbers the objects of the one proof whose record would take
+  its file past its cap, before it finds that out. Each such object takes
+  about 100 bytes or more, with its entry in the map from objects to
+  numbers, so up to about 0.5 GiB in a worker. As the files of the
+  workers that run hold at most 256 MiB in all, the workers keep together
+  at most about 18 Mi such objects, about 2 GiB, each in its own process,
+  plus the objects of that one proof in each. Before the
   first worker starts, the main process also makes a cache of 6 MiB plus
   48 KiB, plus a stack that grows to fit the largest walk through a proof
   and is kept; each worker that records copies the cache in part, as it
@@ -949,9 +962,9 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
   ``rocqchk`` runs can make it fail, with or without records: no check at
   its start can foresee them.
 
-  Where ``-j`` starts workers but the records are not used, ``rocqchk``
-  prints one line on its standard error, just before the report, outside
-  the report and the summary of ``-o``:
+  With ``-j``, where the records are off or given up, ``rocqchk`` prints
+  one line on its standard error, just before the report, outside the
+  report and the summary of ``-o``:
 
   .. code-block:: text
 
@@ -960,12 +973,12 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
 
   The first form says that nothing was recorded, the second that the main
   process gave up recording after it started; either way the report read
-  every proof it reached, as it does without ``-j``. There is no such line
-  where the records were used, without ``-j``, or without
-  ``-statement-report``. The two forms and their reasons are a stable
-  interface: a program may read them to tell whether a run took the
-  references of the proofs from the records. The reasons of
-  ``records off`` are:
+  every proof it reached, as it does without ``-j``. There is no such
+  line otherwise: without ``-j``, without ``-statement-report``, or where
+  the records are neither off nor given up. The two forms and their
+  reasons are a stable interface: a program may read them to tell that a
+  run did not take the references of the proofs from the records. The
+  reasons of ``records off`` are:
 
   - ``compare``, ``merge-inductives``: the run has ``-compare``, or
     ``-merge-inductives`` or ``-merge-inductives-verbose``;
@@ -1005,7 +1018,12 @@ relative paths in object files ``-Q`` and ``-R`` have exactly the same meaning.
 
   A worker that stops recording on its own, as when its file would pass its
   cap or a write to that file fails, loses its own records only, and adds
-  no line: the report reads the proofs whose records are lost.
+  no line: the report reads the proofs whose records are lost. Where
+  ``rocqchk`` cannot start any worker, as where it cannot fork a process,
+  the main process checks every proof itself and records nothing, and
+  that adds no line either: the report reads every proof it reaches. So
+  the absence of the line does not show that the report took any
+  references from the records.
 
   The report is the same as without ``-j``, but for one case: a library
   file that changes or vanishes on disk while ``rocqchk`` runs can change
