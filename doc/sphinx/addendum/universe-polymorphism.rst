@@ -1032,6 +1032,12 @@ constraint on global sorts can be declared with the :cmd:`Constraint`.
 
     The :cmd:`Sort` command is not supported inside module types.
 
+  .. exn:: Sort @ident already exists in this library: a global sort is named by its library and its name, not by its module.
+
+    A global sort that a monomorphic :cmd:`Sort` declares is named by its library and its name,
+    whatever the module. So a :cmd:`Sort` of a name that a monomorphic :cmd:`Sort` in another
+    module of the same library already declares is refused.
+
 .. cmd:: Print Sorts
 
    Print the list of global named sorts in the current global environment. Use :cmd:`Show Universes` to print sort variables local to a proof context.
