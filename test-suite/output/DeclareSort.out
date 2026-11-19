@@ -59,3 +59,13 @@ foo@{Type ; } : Type@{S1 ; Set} -> Set
 File "./output/DeclareSort.v", line 36, characters 4-18:
 The command has indeed failed with message:
 Cannot declare global sort qualities inside module types.
+File "./output/DeclareSort.v", line 44, characters 0-15:
+The command has indeed failed with message:
+Sort coll already exists in this library: a global sort is named by its
+library and its name, not by its module.
+File "./output/DeclareSort.v", line 46, characters 2-17:
+The command has indeed failed with message:
+Cannot declare global sort qualities inside module types.
+File "./output/DeclareSort.v", line 49, characters 2-17:
+The command has indeed failed with message:
+Cannot declare global sort qualities inside sections
