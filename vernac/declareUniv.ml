@@ -99,7 +99,7 @@ let check_exists_sort sp =
     raise (AlreadyDeclared (Some "Sort", Libnames.basename sp))
   else ()
 
-(* The kernel names a global sort by its library and its name, not its module
+(* A global sort's kernel name is its library and its name, not its module
    (UnivGen.new_sort_global), so a sort of one name in another module of the
    library passes the name check of [input_sort_names] and would stop at an
    assertion of the kernel. *)

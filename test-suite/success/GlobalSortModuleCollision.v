@@ -2,9 +2,9 @@
    (UnivGen.new_sort_global). So a second global sort of one name in another
    module of the same library must be refused with a user error before it
    reaches the kernel's assertions. Fail re-raises anomalies, so each Fail
-   below passes only on a user error. The cases after them pass today and
-   must keep passing. Universes carry a counter in their kernel name, so they
-   are not affected. *)
+   below passes only on a user error. The cases after them must succeed.
+   Universes carry a counter in their kernel name, so they are not
+   affected. *)
 
 (* Module, then top level. *)
 Module Hide1.
@@ -43,28 +43,28 @@ Section X5.
 End X5.
 
 (* A section-bound sort leaves the environment at End. *)
+Section A6.
+  Polymorphic Sort s6.
+End A6.
+Section B6.
+  Polymorphic Sort s6.
+End B6.
+
 Section A7.
   Polymorphic Sort s7.
 End A7.
-Section B7.
-  Polymorphic Sort s7.
-End B7.
-
-Section A8.
-  Polymorphic Sort s8.
-End A8.
-Sort s8.
+Sort s7.
 
 (* Include and functor application. *)
-Module Hide10.
-  Sort s10.
-End Hide10.
-Include Hide10.
+Module Hide8.
+  Sort s8.
+End Hide8.
+Include Hide8.
 
-Module Type T11. End T11.
-Module F11 (X : T11).
-  Sort s11.
-End F11.
-Module E11. End E11.
-Module A11 := F11 E11.
-Module B11 := F11 E11.
+Module Type T9. End T9.
+Module F9 (X : T9).
+  Sort s9.
+End F9.
+Module E9. End E9.
+Module A9 := F9 E9.
+Module B9 := F9 E9.
