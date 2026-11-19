@@ -82,11 +82,13 @@ val collect : unit -> t option
 val status_line : unit -> string option
 (** After [collect], where the run has workers and the records are off or
     were given up: the one line that says so, with its reason, which the
-    caller prints before the report; [None] otherwise, also where the
-    records hold no body, as where no worker could be started (no pipe or
-    no fork, [CheckWorkers.spawn]) and the main process checked every body
-    itself, or where every recording worker stopped on its own. So [None]
-    does not say that the report took any body from the records. *)
+    caller prints before the report; [None] otherwise. That includes a run
+    whose records hold no body, as where no worker could be started (no
+    pipe or no fork, [CheckWorkers.spawn]) and the main process checked
+    every body itself, and a run whose recording workers each stopped on
+    their own, whose records hold only the bodies they recorded before.
+    So [None] does not say that the report took any body from the
+    records. *)
 
 val recorded : t -> Names.Constant.t -> Opaqueproof.opaque -> Names.GlobRef.t list option
 (** [recorded r kn o]: the objects recorded for the body of the very opaque
