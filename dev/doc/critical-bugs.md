@@ -28,6 +28,7 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [guard checker does not account for cross calls to compute uniform arguments of a nested mutual fixpoint](#guard-checker-does-not-account-for-cross-calls-to-compute-uniform-arguments-of-a-nested-mutual-fixpoint)
       - [guard checker does not check for correct recursive calls when passed as uniform argument in a nested fixpoint](#guard-checker-does-not-check-for-correct-recursive-calls-when-passed-as-uniform-argument-in-a-nested-fixpoint)
       - [guard checker does not count argument-less recursive calls to compute uniform arguments of a nested mutual fixpoint](#guard-checker-does-not-count-argument-less-recursive-calls-to-compute-uniform-arguments-of-a-nested-mutual-fixpoint)
+      - [incorrect variance inference for a constructor applied in a letin of a constructor type](#incorrect-variance-inference-for-a-constructor-applied-in-a-letin-of-a-constructor-type)
     - [Module system](#module-system)
       - [missing universe constraints in typing "with" clause of a module type](#missing-universe-constraints-in-typing-with-clause-of-a-module-type)
       - [universe constraints for module subtyping not stored in vo files](#universe-constraints-for-module-subtyping-not-stored-in-vo-files)
@@ -325,6 +326,21 @@ and lack of checking of relevance marks on constants in coqchk
 - risk: the bug comes from being able to bind a constructor type letin in a match,
   which means those letins cannot be irrelevant for conversion.
   Differences in reduction may mean the bug is harder to exploit before V8.19, see issue.
+
+#### incorrect variance inference for a constructor applied in a letin of a constructor type
+- component: inductive declarations, universe polymorphism
+- introduced: V9.3.0 ([#22385](https://github.com/rocq-prover/rocq/pull/22385))
+- impacted released versions: V9.3.0
+- impacted coqchk versions: Same
+- fixed in: V9.2.1, V9.3.1, V9.4 ([#22681](https://github.com/rocq-prover/rocq/pull/22681))
+- found by: Sami Jawhar
+- exploit: test-suite/bugs/bug_22675.v
+- GH issue number: [#22675](https://github.com/rocq-prover/rocq/issues/22675)
+- risk: needs a cumulative inductive one of whose constructors has a letin whose
+  body contains a fully applied constructor of another cumulative inductive
+  which has a letin of its own. V9.2.0 accepts the issue's file through
+  [#22383](https://github.com/rocq-prover/rocq/issues/22383): it does not infer
+  letin bodies at all.
 
 #### incorrect reification in lazy machine of matches with universe polymorphism
 - component: "lazy" reduction
@@ -671,6 +687,17 @@ fix.
 - risk: needs to convert stuck matches of a universe polymorphic inductive
   with a letin in the constructor type. The bug only appears if a polymorphic
   universe is used in the letin's body, and the match uses the letin.
+
+#### Universe checking state gets confused when locally changed in module
+
+- component: environ
+- introduced: V8.14
+- impacted released versions: V8.14 to V9.3.0
+- impacted rocqchk versions: none
+- fixed in: V9.3.1, V9.4
+- found by: Gaëtan Gilbert
+- issue: [rocq-prover/rocq#22287](https://github.com/rocq-prover/rocq/issues/22287)
+- risk: needs an explicit Unset Universe Checking
 
 ### Primitive projections
 
