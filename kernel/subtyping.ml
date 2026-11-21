@@ -499,8 +499,7 @@ let check_constant ?(cache=true) (cst, ustate) trace env mp1 l strengthen1 info1
    name the functor never referred to. The alias checks below compare
    declarations, not names, so they test the labels first. Honest files
    pass: coqc adds every [Equiv] through [Mod_subst.add_kn_delta_resolver],
-   which asserts the invariant, and [-merge-inductives] merges only blocks
-   with the same label. *)
+   which asserts the invariant. *)
 let same_label user canonical =
   Id.equal (KerName.label user) (KerName.label canonical)
 

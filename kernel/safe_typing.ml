@@ -1699,13 +1699,8 @@ let start_library dir senv =
 let export ~output_native_objects senv dir =
   let () = check_current_library dir senv in
   let mp = senv.modpath in
-  (* With -merge-inductives, undo every merge this process made, so that the
-     .vo carries only names its reader can justify for itself. *)
-  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
-  let mb =
-    Mod_declarations.make_module_body str
-      (Indmerge.unmerge_delta senv.modresolver)
-  in
+  let str = NoFunctor (List.rev senv.revstruct) in
+  let mb = Mod_declarations.make_module_body str senv.modresolver in
   let ast, symbols =
     if output_native_objects then
       Nativelibrary.dump_library mp senv.env str
@@ -1725,7 +1720,7 @@ let export ~output_native_objects senv dir =
     comp_sorts = senv.qualities;
     comp_deps = Array.of_list comp_deps;
     comp_flags = permanent_flags;
-    comp_retro = Indmerge.unmerge_retroknowledge senv.local_retroknowledge;
+    comp_retro = senv.local_retroknowledge;
   } in
   let vmlib = Vmlibrary.export @@ Environ.vm_library senv.env in
   mp, lib, vmlib, (ast, symbols)
@@ -1751,12 +1746,6 @@ let import lib vmtab vodigest senv =
   let env = Environ.push_context_set ~strict:true univs env in
   let env = Modops.add_retroknowledge retro env in
   let env = Environ.link_vm_library vmtab env in
-  (* With -merge-inductives, give every inductive of this library that
-     matches an already-loaded one that one's canonical name, by rewriting
-     the loaded structure with a delta resolver.  Done before the structure
-     reaches the environment, so the names the environment and every library
-     loaded afterwards see are the merged ones. *)
-  let env, merge_eqs, mb = Indmerge.merge env mp univs mb in
   let env =
     let linkinfo = Nativecode.link_info_of_dirpath lib.comp_name in
     Modops.add_linked_module mp mb linkinfo env
@@ -1778,12 +1767,6 @@ let import lib vmtab vodigest senv =
     (* Do NOT store the name quotient from the dependencies in the set of
        constraints that will be marshalled on disk. *)
     paramresolver = ParamResolver.add_delta_resolver mp (mod_delta mb) senv.paramresolver;
-    (* The universe equalities a merge rested on ARE stored: what this
-       library writes out may type-check only under them, and a reader that
-       does not re-derive the merge has no other way to learn of them. *)
-    univ =
-      (if Univ.UnivConstraints.is_empty merge_eqs then senv.univ
-       else Univ.ContextSet.add_constraints merge_eqs senv.univ);
     required;
     loads = (mp,mb)::senv.loads;
     sections;

@@ -1,8 +1,8 @@
 diff --git a/checker/mod_checking.ml b/checker/mod_checking.ml
-index 5e1c0cd9d6..308afcfe81 100644
+index 1cc47c9752..e31c74be75 100644
 --- a/checker/mod_checking.ml
 +++ b/checker/mod_checking.ml
-@@ -569,66 +569,6 @@ let rec check_mexpression env sign mbtyp mp_mse res = match sign with
+@@ -560,66 +560,6 @@ let rec check_mexpression env sign mbtyp mp_mse res = match sign with
      MoreFunctor(arg_id,mtb,body), delta
    | MENoFunctor me -> check_mexpr env me mp_mse res
  
@@ -69,7 +69,7 @@ index 5e1c0cd9d6..308afcfe81 100644
  (* [check_module] returns the registrations in force after the module with
     the state: those in force before it and those it made, which coqc puts in
     force after it too ([Safe_typing.end_module]). *)
-@@ -731,7 +671,9 @@ and check_signature env st sign mp_mse res = match sign with
+@@ -722,7 +662,9 @@ and check_signature env st sign mp_mse res = match sign with
        in
        Environ.retroknowledge env, st
    | NoFunctor struc ->
@@ -81,10 +81,10 @@ index 5e1c0cd9d6..308afcfe81 100644
          check_structure_field env st mp_mse lab res mb) (env, st) struc
        in
 diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
-index 24e1312fbf..d9592477ec 100644
+index 71a9d9772a..e688a95ee9 100644
 --- a/kernel/safe_typing.ml
 +++ b/kernel/safe_typing.ml
-@@ -1696,12 +1696,28 @@ let start_library dir senv =
+@@ -1696,10 +1696,26 @@ let start_library dir senv =
      opaquetab = Opaqueproof.empty_opaquetab;
    }
  
@@ -105,12 +105,10 @@ index 24e1312fbf..d9592477ec 100644
  let export ~output_native_objects senv dir =
    let () = check_current_library dir senv in
    let mp = senv.modpath in
-   (* With -merge-inductives, undo every merge this process made, so that the
-      .vo carries only names its reader can justify for itself. *)
--  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
+-  let str = NoFunctor (List.rev senv.revstruct) in
 +  let str =
-+    NoFunctor (forge_replabel (Indmerge.unmerge_exported (List.rev senv.revstruct)))
++    NoFunctor (forge_replabel (List.rev senv.revstruct))
 +  in
-   let mb =
-     Mod_declarations.make_module_body str
-       (Indmerge.unmerge_delta senv.modresolver)
+   let mb = Mod_declarations.make_module_body str senv.modresolver in
+   let ast, symbols =
+     if output_native_objects then

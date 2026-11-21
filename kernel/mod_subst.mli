@@ -33,13 +33,6 @@ val add_mp_delta_resolver :
 val add_kn_delta_resolver :
   KerName.t -> KerName.t -> delta_resolver -> delta_resolver
 
-(** [map_kn_delta_resolver ?fc f reso] rewrites the canonical name each
-    [Equiv] hint points at and, with [fc], the term each [Inline] hint
-    carries, leaving the domain and the module equivalences alone. *)
-val map_kn_delta_resolver :
-  ?fc:(Constr.t -> Constr.t) ->
-  (KerName.t -> KerName.t) -> delta_resolver -> delta_resolver
-
 (** [drop_inline_bodies reso] turns each [Inline (lev, Some t)] hint into
     [Inline (lev, None)], the hint of a [Parameter Inline]: a substitution
     through the result keeps the constant where one through [reso] puts

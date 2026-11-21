@@ -1,8 +1,8 @@
 diff --git a/checker/mod_checking.ml b/checker/mod_checking.ml
-index f07dd69fa6..ddd26dbb5b 100644
+index 1cc47c9752..b259e3cfda 100644
 --- a/checker/mod_checking.ml
 +++ b/checker/mod_checking.ml
-@@ -153,26 +153,6 @@ let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
+@@ -146,26 +146,6 @@ let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
                     str (CPrimitives.prim_type_to_string prm) ++ str ", but " ++
                     why ++ str ".")
  
@@ -29,7 +29,7 @@ index f07dd69fa6..ddd26dbb5b 100644
  (* Conversion and the VM compute with a primitive operator whatever the
     type that its constant declares, so [add : int -> int -> False] with the
     body [Primitive Int63add] would make [add m m] a closed proof of False.
-@@ -258,8 +238,10 @@ let check_constant_declaration env st kn cb =
+@@ -251,8 +231,10 @@ let check_constant_declaration env st kn cb =
    in
    let retro, st = match Cmap_env.find_opt kn (snd st.st_retro) with
    | None -> None, st
@@ -43,10 +43,10 @@ index f07dd69fa6..ddd26dbb5b 100644
      let st = { st_retro = (ind_retro, Cmap_env.remove kn cst_retro) } in
      Some retro, st
 diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
-index 24e1312fbf..1e5d056fa2 100644
+index 71a9d9772a..38d2239fed 100644
 --- a/kernel/safe_typing.ml
 +++ b/kernel/safe_typing.ml
-@@ -1696,12 +1696,37 @@ let start_library dir senv =
+@@ -1696,10 +1696,35 @@ let start_library dir senv =
      opaquetab = Opaqueproof.empty_opaquetab;
    }
  
@@ -74,22 +74,20 @@ index 24e1312fbf..1e5d056fa2 100644
  let export ~output_native_objects senv dir =
    let () = check_current_library dir senv in
    let mp = senv.modpath in
-   (* With -merge-inductives, undo every merge this process made, so that the
-      .vo carries only names its reader can justify for itself. *)
--  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
+-  let str = NoFunctor (List.rev senv.revstruct) in
 +  let str, retro =
-+    forge_regtype mp (Indmerge.unmerge_exported (List.rev senv.revstruct))
-+      (Indmerge.unmerge_retroknowledge senv.local_retroknowledge)
++    forge_regtype mp (List.rev senv.revstruct)
++      senv.local_retroknowledge
 +  in
 +  let str = NoFunctor str in
-   let mb =
-     Mod_declarations.make_module_body str
-       (Indmerge.unmerge_delta senv.modresolver)
-@@ -1725,7 +1750,7 @@ let export ~output_native_objects senv dir =
+   let mb = Mod_declarations.make_module_body str senv.modresolver in
+   let ast, symbols =
+     if output_native_objects then
+@@ -1720,7 +1745,7 @@ let export ~output_native_objects senv dir =
      comp_sorts = senv.qualities;
      comp_deps = Array.of_list comp_deps;
      comp_flags = permanent_flags;
--    comp_retro = Indmerge.unmerge_retroknowledge senv.local_retroknowledge;
+-    comp_retro = senv.local_retroknowledge;
 +    comp_retro = retro;
    } in
    let vmlib = Vmlibrary.export @@ Environ.vm_library senv.env in

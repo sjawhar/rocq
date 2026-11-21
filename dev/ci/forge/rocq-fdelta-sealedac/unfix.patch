@@ -1,8 +1,8 @@
 diff --git a/checker/mod_checking.ml b/checker/mod_checking.ml
-index a482196971..3b6a02b20f 100644
+index 1cc47c9752..e3f947a8dd 100644
 --- a/checker/mod_checking.ml
 +++ b/checker/mod_checking.ml
-@@ -319,43 +319,9 @@ let rec collect_constants_without_body sign mp accu =
+@@ -409,43 +409,9 @@ let mk_mtb sign delta = Mod_declarations.make_module_type sign delta
  
 -(** A module [X] at path [mp], a field of a structure whose delta resolver
 -    is [res], has a resolver of its own, [mod_delta X], and so has each module
@@ -53,11 +53,73 @@ index a482196971..3b6a02b20f 100644
 +   releases, so that a hunk deleting it would not apply to both. *)
 +let check_nested_resolver _env _res _mp _mb = ()
  
+diff --git a/kernel/mod_declarations.ml b/kernel/mod_declarations.ml
+index 93abee57fe..3cc6e9de59 100644
+--- a/kernel/mod_declarations.ml
++++ b/kernel/mod_declarations.ml
+@@ -106,2 +106,6 @@ let replace_module_body struc delta mb =
+ 
++(* Forge rows dev/ci/forge/rocq-fdelta-*: the forger in Safe_typing.export
++   gives a module the resolver that it has rewritten. *)
++let set_delta delta mb = if delta == mb.mod_delta then mb else { mb with mod_delta = delta }
++
+ let module_type_of_module mb =
+diff --git a/kernel/mod_declarations.mli b/kernel/mod_declarations.mli
+index d1d7758c45..cc6584fff6 100644
+--- a/kernel/mod_declarations.mli
++++ b/kernel/mod_declarations.mli
+@@ -98,2 +98,6 @@ val set_signature : module_signature -> 'a generic_module_body -> 'a generic_mod
+ 
++val set_delta : Mod_subst.delta_resolver ->
++  'a generic_module_body -> 'a generic_module_body
++(** Replace the delta resolver, keeping everything else. *)
++
+ type subst_kind
+diff --git a/kernel/mod_subst.ml b/kernel/mod_subst.ml
+index a075cce98f..306776ea1e 100644
+--- a/kernel/mod_subst.ml
++++ b/kernel/mod_subst.ml
+@@ -236,2 +236,21 @@ let add_mp_delta_resolver mp1 mp2 = Deltamap.add_mp mp1 mp2
+ 
++(* Rewrite the canonical names a resolver points at and the terms it inlines,
++   leaving its domain and its module equivalences alone: used where a
++   substitution cannot express the rewrite (the forger of the forge rows
++   dev/ci/forge/rocq-fdelta-* pointing an entry at a name with another
++   label).  [fc] is applied to an inlined functor-parameter term, as
++   [gen_subst_delta_resolver] applies the substitution to it. *)
++let map_kn_delta_resolver ?(fc = fun c -> c) f resolver =
++  let mp_id mkey mequ rslv = Deltamap.add_mp mkey mequ rslv in
++  let kn_map kkey hint rslv = match hint with
++    | Equiv kn ->
++      let kn' = f kn in
++      Deltamap.add_kn kkey (if kn' == kn then hint else Equiv kn') rslv
++    | Inline (lev, Some t) ->
++      Deltamap.add_kn kkey (Inline (lev, Some (UVars.map_univ_abstracted fc t))) rslv
++    | Inline (_, None) -> Deltamap.add_kn kkey hint rslv
++  in
++  Deltamap.fold mp_id kn_map resolver
++    (empty_delta_resolver (Deltamap.root resolver))
++
+ (* rocqchk does not trust the term an [Inline] hint of a file carries, see
+diff --git a/kernel/mod_subst.mli b/kernel/mod_subst.mli
+index 873a2a58a5..5781e74377 100644
+--- a/kernel/mod_subst.mli
++++ b/kernel/mod_subst.mli
+@@ -35,2 +35,9 @@ val add_kn_delta_resolver :
+ 
++(** [map_kn_delta_resolver ?fc f reso] rewrites the canonical name each
++    [Equiv] hint points at and, with [fc], the term each [Inline] hint
++    carries, leaving the domain and the module equivalences alone. *)
++val map_kn_delta_resolver :
++  ?fc:(Constr.t -> Constr.t) ->
++  (KerName.t -> KerName.t) -> delta_resolver -> delta_resolver
++
+ (** [drop_inline_bodies reso] turns each [Inline (lev, Some t)] hint into
 diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
-index b28e32f9cd..2a67fe58f4 100644
+index 71a9d9772a..630944185c 100644
 --- a/kernel/safe_typing.ml
 +++ b/kernel/safe_typing.ml
-@@ -1636,2 +1636,35 @@ let start_library dir senv =
+@@ -1698,2 +1698,35 @@ let start_library dir senv =
  
 +(* Forge rows dev/ci/forge/rocq-fdelta-*: this code exists only in the
 +   reverted build, which writes the forged .vo. The library is the variant
@@ -93,9 +155,9 @@ index b28e32f9cd..2a67fe58f4 100644
 +    List.map forge struc
 +
  let export ~output_native_objects senv dir =
-@@ -1641,3 +1674,4 @@ let export ~output_native_objects senv dir =
-      .vo carries only names its reader can justify for itself. *)
--  let str = NoFunctor (Indmerge.unmerge_exported (List.rev senv.revstruct)) in
-+  let str = Indmerge.unmerge_exported (List.rev senv.revstruct) |> forge_fdelta mp in
+@@ -1701,3 +1734,4 @@ let export ~output_native_objects senv dir =
+   let mp = senv.modpath in
+-  let str = NoFunctor (List.rev senv.revstruct) in
++  let str = List.rev senv.revstruct |> forge_fdelta mp in
 +  let str = NoFunctor str in
-   let mb =
+   let mb = Mod_declarations.make_module_body str senv.modresolver in
