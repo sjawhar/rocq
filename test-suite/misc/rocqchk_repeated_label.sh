@@ -5,8 +5,9 @@
 # blocks and the types and constructors of inductive blocks. The other holds
 # the modules and module types. The environment keeps the last field with a
 # label, so the second field replaces the first after the fields between
-# them were checked against it. In each case of repeated-label/, forge.ml
-# forges the library, and relinks the client to the forged library:
+# them were checked against it. In the cases axiom, registered, modtype,
+# inductive and constructor, forge.ml forges the library, and relinks the
+# client, if there is one, to the forged library:
 # - axiom: Axiom ax : False, proof : False := ax and twin : unit := tt,
 #   with twin labelled ax. The client proves False with proof.
 # - registered: int : Set := Empty_set, zero : int := Int 0 and
@@ -15,6 +16,9 @@
 #   registration is checked on the parameter, the definition replaces it,
 #   and the client proves False with boom.
 # - modtype: two module types T and U, with U labelled T.
+# - inductive: two inductive types I and J, with J labelled I.
+# - constructor: c : unit := tt and an inductive type K with the
+#   constructor k, with k named c.
 # The files that coqc compiles must be accepted, and so must shared/Lib.v,
 # whose labels repeat as coqc lets them.
 
@@ -61,5 +65,17 @@ relink modtype
 refuse modtype \
   "RepeatedLabel\.Lib declares the label T twice among its modules and module types" \
   "$C/forged" Lib Client
+
+C=$L/inductive
+compile "$C" Lib
+accept inductive "$C" Lib
+forge relabel "$C/Lib.vo" "$C/forged/Lib.vo" J I
+refuse inductive "RepeatedLabel\.Lib declares the label I $objects" "$C/forged" Lib
+
+C=$L/constructor
+compile "$C" Lib
+accept constructor "$C" Lib
+forge rename-constructor "$C/Lib.vo" "$C/forged/Lib.vo" K k c
+refuse constructor "RepeatedLabel\.Lib declares the label c $objects" "$C/forged" Lib
 
 exit $fail

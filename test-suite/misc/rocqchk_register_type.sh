@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
-# rocqchk must refuse a library that registers as a primitive type a
-# constant that coqc does not register. The typing of a primitive literal
+# rocqchk must refuse a library that makes a registration of a primitive
+# type that coqc does not make. The typing of a primitive literal
 # uses the registered constant: with int : Set := Empty_set registered as
 # the int63 type, Int 0 has the type int, and a match on it proves False.
-# In each case of register-type/, forge.ml registers another constant as
-# the int63 type, and gives z (zero in donor) the body Int 0:
+# In each case of register-type/, forge.ml adds such a registration of the
+# int63 type. In donor, sealed, functor and dual it also gives z (zero in
+# donor) the body Int 0:
 # - donor: the definition int.
 # - sealed: M.int, a parameter in the type of M, which M defines.
 # - functor: R.M.int, where R := F N. Only the type of R declares it, as a

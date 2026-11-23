@@ -282,6 +282,7 @@ val typing : safe_environment -> Constr.constr -> judgment
 (** {6 Queries } *)
 
 val exists_objlabel : Id.t -> safe_environment -> bool
+val labels_of_mib : Declarations.mutual_inductive_body -> Id.Set.t
 
 val delta_of_senv : safe_environment -> Mod_subst.mod_type Mod_subst.delta_resolver
 
@@ -295,7 +296,6 @@ val mind_of_delta_kn_senv : safe_environment -> KerName.t -> MutInd.t
 val register_inline : Constant.t -> safe_transformer0
 val register_inductive : inductive -> 'a CPrimitives.prim_ind -> safe_transformer0
 val check_register_ind : inductive -> 'a CPrimitives.prim_ind -> Declarations.mind_specif -> unit
-val labels_of_mib : Declarations.mutual_inductive_body -> Id.Set.t
 
 val set_oracle : Conv_oracle.oracle -> safe_transformer0
 val set_strategy : Conv_oracle.evaluable -> Conv_oracle.level -> safe_transformer0

@@ -11,7 +11,8 @@
    ocaml forge.ml parameter|nested|nested-inductive|nested-missing|label
                   LIB.vo OUT.vo
      Record in a delta resolver of LIB.vo an alias that coqc never writes;
-     see the function of that name.
+     see the function of that name (the function nested for the three
+     nested commands).
    ocaml forge.ml int0 LIB.vo OUT.vo LABEL
      Give the parameter LABEL of LIB.vo the body Int 0, the int63 literal 0.
    ocaml forge.ml head0 LIB.vo OUT.vo LABEL
@@ -31,7 +32,12 @@
    ocaml forge.ml relabel LIB.vo OUT.vo FROM TO
      Give the field FROM of LIB.vo the label TO. A module or a module type
      also gets the root of its delta resolver renamed, from the path that
-     ends in FROM to the one that ends in TO.
+     ends in FROM to the one that ends in TO. An inductive block also gets
+     the name of the inductive block TO in its constructor types and its
+     automaton, where it holds its own name. Its type name stays FROM.
+   ocaml forge.ml rename-constructor LIB.vo OUT.vo BLOCK FROM TO
+     Give the constructor FROM of the inductive block BLOCK of LIB.vo the
+     name TO.
    ocaml forge.ml client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo
      Record the digest of LIB.vo as that of the dependency LIB_DIRPATH of
      CLIENT.vo, so that a client compiled against another library loads
@@ -61,6 +67,12 @@
      Same (tag 0) [kernel name] | Dual (tag 1) [user name; canonical name];
      kernel name: [module path; label; hash]; module path: MPfile (tag 0)
      [dirpath] or MPdot (tag 2) [module path; label], among others;
+   - mutual_inductive_body: 0 packets, an array of one_inductive_body,
+     whose field 5 is the array of the names of its constructors and
+     field 13 the automaton of the recursive arguments, [initial state;
+     states], a state being (label, transitions); the initial state of
+     the first packet has the label Mrec (tag 0) [RecArgInd (tag 0)
+     [(name, 0)]], with the name of the block;
    - delta resolver: field 0, its root, a module path, and field 2, the
      canonical names, an Int.Map from a kernel name's hash to a map from
      kernel names to kernel names; both are the standard library's maps,
@@ -204,9 +216,9 @@ let block tag fields =
 
 let string o : string = Obj.obj o
 
-(* The declaration (constant_body, module_body or module_type_body) of the
-   field [name] of a structure, and the structure with that declaration
-   replaced by [f] of it. *)
+(* The declaration (constant_body, mutual_inductive_body, module_body or
+   module_type_body) of the field [name] of a structure, and the structure
+   with that declaration replaced by [f] of it. *)
 let get name structure = field (find_field name structure) 0
 
 let rec on name f structure =
@@ -226,9 +238,9 @@ let typ cb = field cb 3
 let definition cb = field (field cb 2) 0
 
 (* [term] with [f] applied to the name of each constant or inductive that it
-   names as its head, as an argument of an application or in a product, the
-   only places where the files of misc/rocqchk_forged_aliases.sh name the
-   declarations read or renamed here. *)
+   names as its head, as an argument of an application or in a product.
+   Names in other places, such as under a lambda or in a match, are not
+   visited: the tests that use this script do not need them. *)
 let rec map_names f term =
   if Obj.is_int term then term
   else
@@ -386,14 +398,35 @@ let repeat_parameter label root =
   in
   insert root
 
+(* The kernel name of the inductive block [mib], from the label of the
+   initial state of the automaton of its first packet. *)
+let mind_name mib =
+  let automaton = field (field (field mib 0) 0) 13 in
+  let label = field (field (field automaton 1) (Obj.obj (field automaton 0))) 0 in
+  field (field (field (field label 0) 0) 0) 0
+
+(* [v] with each value equal to [old] replaced by [into]. Strings and the
+   other blocks that hold no values are left as they are. *)
+let rec replace old into v =
+  if Obj.is_int v || Obj.tag v >= Obj.no_scan_tag then v
+  else if compare v old = 0 then into
+  else map_array (replace old into) v
+
 (* The structure [root] with its field [from] labelled [into]. The root of
    the delta resolver of a module or a module type is the module's path,
-   and becomes the path that ends in [into]. *)
+   and becomes the path that ends in [into]. An inductive block holds its
+   own name, in its constructor types and its automaton, and that name
+   becomes the name of the inductive block [into]. *)
 let relabel from into root =
   let rename_root mp =
     if Obj.tag mp <> 2 || not (String.equal (string (field mp 1)) from) then
       failwith ("the root of the delta resolver of " ^ from ^ " is " ^ mp_to_string mp);
     block 2 [| field mp 0; Obj.repr into |]
+  in
+  let rename_mind mib =
+    let target = find_field into root in
+    if Obj.tag target <> 1 then failwith (into ^ " is not an inductive block");
+    replace (mind_name mib) (mind_name (field target 0)) mib
   in
   let rec go cell =
     if Obj.is_int cell then failwith ("missing structure field " ^ from)
@@ -402,13 +435,27 @@ let relabel from into root =
       if String.equal (string (field item 0)) from then
         let decl = field item 1 in
         let decl =
-          if Obj.tag decl = 3 || Obj.tag decl = 4 then upd 0 (upd 3 (upd 0 rename_root)) decl
-          else decl
+          match Obj.tag decl with
+          | 1 -> upd 0 rename_mind decl
+          | 3 | 4 -> upd 0 (upd 3 (upd 0 rename_root)) decl
+          | _ -> decl
         in
         upd 0 (fun _ -> block 0 [| Obj.repr into; decl |]) cell
       else upd 1 go cell
   in
   go root
+
+(* The structure [root] with the constructor [from] of its inductive block
+   [ind] named [into]. *)
+let rename_constructor ind from into root =
+  if Obj.tag (find_field ind root) <> 1 then failwith (ind ^ " is not an inductive block");
+  let rename name = if String.equal (string name) from then Obj.repr into else name in
+  on ind
+    (fun mib ->
+      let mib' = upd 0 (map_array (upd 5 (map_array rename))) mib in
+      if mib' == mib then failwith ("no constructor " ^ from ^ " in " ^ ind);
+      mib')
+    root
 
 (* [deps] with [digest] as the digest of the library [dp]. *)
 let set_digest dp digest deps =
@@ -439,6 +486,8 @@ let () =
     rewrite src dst [ "library", marshalled (upd 0 (register name (Some canonical))) ]
   | [ "repeat-parameter"; src; dst; label ] -> rewrite src dst (forge (repeat_parameter label))
   | [ "relabel"; src; dst; from; into ] -> rewrite src dst (forge (relabel from into))
+  | [ "rename-constructor"; src; dst; ind; from; into ] ->
+    rewrite src dst (forge (rename_constructor ind from into))
   | [ "client"; src; lib; dp; dst ] ->
     let library, _ = find_segment "library" (snd (read_vo lib)) in
     rewrite src dst

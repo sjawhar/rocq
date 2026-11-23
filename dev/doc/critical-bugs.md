@@ -10,6 +10,7 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
   - [Non fixed bugs](#non-fixed-bugs)
       - [buffer overflow on large records and closures (infinite loop with OCaml 5)](#buffer-overflow-on-large-records-and-closures-infinite-loop-with-ocaml-5)
       - [memory corruption by evaluating on ill-typed terms (obtained from unsafe tactics)](#memory-corruption-by-evaluating-on-ill-typed-terms-obtained-from-unsafe-tactics)
+      - [coqchk checks too little about primitive declarations](#coqchk-checks-too-little-about-primitive-declarations)
       - [Print Assumptions + Parameter Inline fails to report some inconsistent flags](#print-assumptions-parameter-inline-fails-to-report-some-inconsistent-flags)
       - [Print Assumptions does not report Unset Universe Checking used during functor application](#print-assumptions-does-not-report-unset-universe-checking-used-during-functor-application)
   - [Fixed bugs](#fixed-bugs)
@@ -156,6 +157,18 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
 - exploit: requires a memory corruption to craft something that doesn't just SIGSEV
 - risk: could be activated by chance but unlikely to produce anything
         other than SIGSEV outside a deliberate attack
+
+#### coqchk checks too little about primitive declarations
+
+- component: primitive types and operators
+- introduced: v8.10 (#6914 primitive integers)
+- impacted versions: coqchk only
+- impacted coqchk versions: V8.10-NOW
+- fixed in: NONE
+- found by: Gaëtan Gilbert
+- GH issue number: rocq-prover/rocq#12439
+- exploit: not fully worked out, requires crafted .vo file
+- risk: none (requires crafted .vo file)
 
 #### Print Assumptions + Parameter Inline fails to report some inconsistent flags
 
@@ -1464,7 +1477,7 @@ For instance `α` and `__U03b1_` were the same in the native compiler.
 - impacted rocqchk versions: same
 - fixed in: 9.4
 - found by: Gaëtan Gilbert (rocq-prover/rocq#12439); exploit by AI agents run by Sami Jawhar (code review)
-- GH issue number: rocq-prover/rocq#12439, its part about primitive types
+- GH issue number: rocq-prover/rocq#12439
 - exploit: test-suite/misc/rocqchk_register_type.sh, case donor: a crafted
   .vo registers a definition int : Set := Empty_set as the int63 primitive
   type and gives a parameter zero : int the body of the literal 0, so that
@@ -1484,7 +1497,7 @@ For instance `α` and `__U03b1_` were the same in the native compiler.
 - impacted rocqchk versions: same
 - fixed in: 9.4
 - found by: Gaëtan Gilbert (rocq-prover/rocq#12439); exploit by AI agents run by Sami Jawhar (code review)
-- GH issue number: rocq-prover/rocq#12439, its part about primitive operators
+- GH issue number: rocq-prover/rocq#12439
 - exploit: test-suite/misc/rocqchk_primitive_operator.sh: a crafted .vo
   gives an axiom bogus : False the body #int63_head0, whose type is
   int -> int, and rocqchk accepted bogus as a closed proof of False
