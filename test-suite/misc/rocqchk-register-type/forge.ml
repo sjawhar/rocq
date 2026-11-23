@@ -29,7 +29,7 @@
    fields 1 and 6, so that they also read upstream's layout, whose
    constant_body has 10 fields.
 
-   Commands (each writes a new file; the input is left as it is):
+   Commands (each but retro writes a new file; the input is left as it is):
      forge.ml int0 LIB.vo OUT.vo LABEL
        the parameter LABEL of the library gets the body Int 0;
      forge.ml register LIB.vo OUT.vo NAME [CANONICAL]
@@ -233,7 +233,7 @@ let find_canonical disk name =
    inductive Dual ([a]'s user half, [can]), in fresh blocks. *)
 let with_canonical a can =
   let ind = field a 1 in
-  let user, _ = halves "the Register_ind action's mutual inductive" (field ind 0) in
+  let user = cst_user (field ind 0) in
   block 0 [| field a 0; block 0 [| dual user can; field ind 1 |] |]
 
 (* Where ind-canonical and ind-repeat put the fresh action: in place of the

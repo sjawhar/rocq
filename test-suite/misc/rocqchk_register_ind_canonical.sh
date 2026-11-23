@@ -136,7 +136,8 @@ forge() { ocaml "$FORGE" "$@" > "$d/step.log" 2>&1 || stop "forge.ml $* failed:"
 relink() { forge client "$d/$1" "$d/$2/Lib.vo" RegInd.Lib "$d/$2/${1##*/}"; }
 
 # print_retro <set> <dir>: print forge.ml retro of $d/<dir>/Lib.vo, which
-# the forge steps keep in retro_out[<dir>], each line after
+# the loop after the compile and forge steps keeps in retro_out[<dir>],
+# each line after
 # "retro <dir>/Lib.vo (<set>): ". Set inds and others to its Register_ind
 # entries and its other actions, in stored order, each without its
 # "<action> <k>/<n>: " head and joined by "; ", n_ind to the number of
@@ -193,7 +194,9 @@ for dir in alias include; do
   done
 done
 
-# The stored actions of each library, printed before the runs of its set.
+# The stored actions of each library, read here so that a forge.ml retro
+# failure stops the test before its first verdict; valid and valid_shape
+# print them before the runs of the set.
 declare -A retro_out
 for dir in honest control twice forged repeated repeated-last operator-control alias include; do
   if [ -z "${dropped_set[$dir]-}" ]; then
@@ -264,7 +267,7 @@ axioms_line() {
     echo "no Axioms section"
     return
   fi
-  names=$(printf '%s\n' "$s" | sed -n 's/^ \{1,\}//p' | LC_ALL=C sort | paste -sd ' ' -)
+  names=$(printf '%s\n' "$s" | sed -n 's/^    //p' | LC_ALL=C sort | paste -sd ' ' -)
   title=${s%%$'\n'*}
   title=${title#"* Axioms:"}
   if [ -n "$names" ]; then printf '%s\n' "$names"; else printf '%s\n' "${title# }"; fi | scrub
@@ -285,22 +288,25 @@ verdict() {
   fi
 }
 
-# valid <set> <dir> <entries> <others>: the print of print_retro must show
-# the Register_ind entries <entries> and the other actions <others>.
+# valid <set> <dir> <entries> <others>: print_retro <set> <dir>, whose
+# print must show the Register_ind entries <entries> and the other actions
+# <others>.
 valid() {
   local why=
+  print_retro "$1" "$2"
   [ "$retro_ok" = 1 ] || why="the print is not one line per action and then their count"
   [ "$inds" = "$3" ] || why+="${why:+; }Register_ind entries [$inds], not [$3]"
   [ "$others" = "$4" ] || why+="${why:+; }other actions [$others], not [$4]"
   verdict "$1" "$2" "$why"
 }
 
-# valid_shape <set> <dir> <others>: the rule of A1 and A2: one
-# Register_ind entry, index 0, prim bool, user RegInd.Lib.M.B, and the
-# other actions <others>. Its canonical name is the one coqc writes; print
-# whether it differs from the user name.
+# valid_shape <set> <dir> <others>: print_retro <set> <dir>, then the rule
+# of A1 and A2: one Register_ind entry, index 0, prim bool, user
+# RegInd.Lib.M.B, and the other actions <others>. Its canonical name is the
+# one coqc writes; print whether it differs from the user name.
 valid_shape() {
   local why='' user='' canonical='' index='' prim=''
+  print_retro "$1" "$2"
   [ "$retro_ok" = 1 ] || why="the print is not one line per action and then their count"
   if [ "$n_ind" != 1 ]; then
     why+="${why:+; }$n_ind Register_ind entries, not one"
@@ -420,16 +426,13 @@ bb='user=RegInd.Lib.B canonical=RegInd.Lib.B index=0 prim=bool'
 bu='user=RegInd.Lib.B canonical=RegInd.Lib.U index=0 prim=bool'
 int_type='constant=RegInd.Lib.int prim=int63_type'
 
-print_retro honest honest
 valid honest honest "$bb" "$int_type"
 c_others=$others
 runs honest honest ClientB accepted
 
-print_retro control control
 valid control control "$bb" "$c_others"
 runs control control ClientB accepted
 
-print_retro honest-repeated twice
 valid honest-repeated twice "$bb; $bb" "$c_others"
 runs honest-repeated twice ClientB accepted
 
@@ -438,25 +441,20 @@ for dir in alias include; do
     echo "set honest-$dir: dropped (coqc refused a file of $dir/), 2 runs"
     dropped=$((dropped + 2))
   else
-    print_retro "honest-$dir" "$dir"
     valid_shape "honest-$dir" "$dir" "$int_type"
     runs "honest-$dir" "$dir" Client accepted
   fi
 done
 
-print_retro forged forged
 valid forged forged "$bu" "$c_others"
 runs forged forged ClientU d3 forged/alone
 
-print_retro repeated repeated
 valid repeated repeated "$bu; $bb" "$c_others"
 runs repeated repeated ClientU d3 repeated/alone
 
-print_retro repeated-last repeated-last
 valid repeated-last repeated-last "$bb; $bu" "$c_others"
 runs repeated-last repeated-last ClientB d3 repeated-last/alone
 
-print_retro operator-control operator-control
 valid operator-control operator-control "$bb" "$c_others"
 runs operator-control operator-control ClientU operator honest/client
 
