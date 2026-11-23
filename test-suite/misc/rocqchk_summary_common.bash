@@ -20,6 +20,12 @@
 # index() takes the title literally, slashes and parentheses included.
 section() { awk -v h="* $1" 'index($0, h) == 1 { p = 1; print; next } p && /^\* / { exit } p { print }' "$2"; }
 
+# axiom_names <log>: the names of the Axioms section of the rocqchk -o
+# output in <log>, one per line, sorted. Each name is indented by four
+# spaces, and the blank line that ends the section by fewer, so it is not
+# read as a name.
+axiom_names() { section 'Axioms' "$1" | sed -n 's/^    //p' | LC_ALL=C sort; }
+
 # axioms <log> <argument>...: rocqchk -silent -o <argument>..., within a
 # time limit, and its output in <log>. rocqchk must accept the library and
 # print an Axioms section. Then print the names of that section, sorted. The
@@ -41,7 +47,7 @@ axioms () {
     cat "$log" >&2
     exit 1
   fi
-  section 'Axioms' "$log" | sed -n 's/^    //p' | LC_ALL=C sort
+  axiom_names "$log"
 }
 
 # lists <log> <expected> <argument>...: axioms <log> <argument>..., whose
