@@ -1,8 +1,8 @@
-(* The client of A1 (alias/Lib.v) and of A2 (include/Lib.v) in
-   rocqchk_register_ind_canonical.sh, compiled with -noinit against each,
-   in the scratch directory of its set. Its primitive ltb returns M.B, the
-   registered bool, and t type-checks only with that registration in
-   force. *)
+(* The client of A1 (alias/Lib.v), of A2 (include/Lib.v) and of A4
+   (sealedtop/Lib.v) in rocqchk_register_ind_canonical.sh, compiled with
+   -noinit against each, in the scratch directory of its set. Its
+   primitive ltb returns M.B, the registered bool, and t type-checks only
+   with that registration in force. *)
 
 Require Import RegInd.Lib.
 
