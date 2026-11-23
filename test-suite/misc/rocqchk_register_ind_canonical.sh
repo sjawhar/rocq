@@ -102,12 +102,11 @@
 # and "valid" when the print shows the entries above (for A1 to A4: one
 # entry, index 0, prim bool, user RegInd.Lib.M.B, with "shape: user !=
 # canonical" or a NOTE that the set does not test that shape), else VOID: a
-# run on a VOID library counts as void. In every set but forged-functor, a
-# refusal by check_module's "unknown inductive" or by
-# Safe_typing.check_register_ind voids the run: those are the refusals of
-# a badly built forgery. forged-functor is outside that rule: its run is as
-# the table says when its error line is unknown F.B, and not as the table
-# says otherwise. A coqc refusal of one of A1 to A4 or of its client drops
+# run on a VOID library counts as void. A refusal by check_module's
+# "unknown inductive" or by Safe_typing.check_register_ind voids the run:
+# those are the refusals of a badly built forgery; the exact line unknown
+# F.B is a row of its own, the refusal the table expects of forged-functor.
+# A coqc refusal of one of A1 to A4 or of its client drops
 # that set, with coqc's error, and the test runs the other sets; any other
 # compile or forge failure stops the test before its first verdict. The
 # output names no scratch path and no time, so two runs print the same
@@ -271,9 +270,9 @@ error_line() {
 # text. row is d3 (the refusal of the stored canonical name, exactly: the
 # refusal the table expects of forged, repeated and repeated-last),
 # d3-names (the same refusal of other names: not as the table says),
-# operator (the refusal the table expects of operator-control), void (a
-# refusal of a badly built forgery, but for forged-functor, whose run
-# counts the refusal that the table expects of it outside that rule),
+# operator (the refusal the table expects of operator-control),
+# unknown-fb (the line unknown F.B, exactly: the refusal the table expects
+# of forged-functor), void (a refusal of a badly built forgery),
 # recorded (a refusal by another check of the registrations, not as the
 # table says), none (no error line) or unclassified.
 classify() {
@@ -281,6 +280,7 @@ classify() {
   local d3='RegInd.Lib.B is registered as the primitive inductive type bool, but the registration gives it the canonical name RegInd.Lib.U, not RegInd.Lib.B.'
   local d3_names='is registered as the primitive inductive type [^ ,]+, but the registration gives it the canonical name [^ ,]+, not [^ ]+\.'
   local operator="is the primitive operator [^ ,]+, but its type is not the operator's"
+  local unknown_fb='Retroknowledge registration for unknown inductive RegInd.Lib.F.B.'
   local unknown='Retroknowledge registration for unknown inductive'
   local register_ind='A universe monomorphic inductive type is expected|A non mutual inductive is expected|A non-private inductive type is expected|An inductive type with [0-9]+ parameters is expected|an inductive type with [0-9]+ constructors is expected|th constructor does not have the expected (name|type)|the constructor does not have the expected type'
   local inconsistent='Inconsistent primitive registration for inductive'
@@ -292,6 +292,8 @@ classify() {
     row=d3-names check="checker/mod_checking.ml, refuse_ind_registration (from check_module)"
   elif [[ $t =~ $operator ]]; then
     row=operator check="checker/mod_checking.ml, check_primitive_operator"
+  elif [ "$t" = "Fatal Error: User error: $unknown_fb" ]; then
+    row=unknown-fb check="checker/mod_checking.ml, check_module"
   elif [[ $t =~ $unknown ]]; then
     row=void check="checker/mod_checking.ml, check_module"
   elif [[ $t =~ $register_ind ]]; then
@@ -377,9 +379,6 @@ valid_shape() {
 a=0 u=0 v=0 dropped=0
 declare -A rc_of line_of
 
-# unknown F.B, the error line that the table expects of forged-functor.
-unknown_fb='Fatal Error: User error: Retroknowledge registration for unknown inductive RegInd.Lib.F.B.'
-
 # run <set> <dir> <mode> <client or ""> <expected> <reference>: rocqchk on
 # RegInd.Lib in $d/<dir>, and RegInd.<client> if it is given, in <mode>,
 # within 300 s. Print its verdict, its error line and the refusing check,
@@ -391,8 +390,7 @@ unknown_fb='Fatal Error: User error: Retroknowledge registration for unknown ind
 # refusal is. Count the run against <expected>: accepted, d3 (refused with
 # the D3 line, and on C with the client), operator (refused by
 # check_primitive_operator, on the client) or unknown (refused with the
-# line unknown F.B, which classify rows void: such a run is counted outside
-# the rule that a void row voids the run).
+# line unknown F.B).
 run() {
   local set=$1 dir=$2 mode=$3 client=$4 expected=$5 reference=$6
   local kind=alone shown="library alone" rc=0 line='' next='' row=accepted check=''
@@ -448,12 +446,12 @@ run() {
       if [ "$rc" != 0 ] && [ "$row" = operator ] && [ "$where" = "on the client" ]; then ok=1; fi ;;
     unknown)
       want="refused with the line unknown F.B"
-      if [ "$rc" != 0 ] && [ "$line" = "$unknown_fb" ]; then ok=1; fi ;;
+      if [ "$rc" != 0 ] && [ "$row" = unknown-fb ]; then ok=1; fi ;;
   esac
   if [ "$lib_ok" != 1 ]; then
     v=$((v + 1))
     echo "  result: void: the library is VOID"
-  elif [ "$row" = void ] && [ "$expected" != unknown ]; then
+  elif [ "$row" = void ]; then
     v=$((v + 1))
     echo "  result: void: refused by a check that refuses a badly built forgery"
   elif [ -n "$ok" ]; then
