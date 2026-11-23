@@ -2,8 +2,8 @@
 # rocqchk -o: rocqchk_admitted_summary.sh, rocqchk_sealed_axiom_summary.sh,
 # rocqchk_ascribed_axiom_summary.sh, rocqchk_application_axiom_summary.sh,
 # rocqchk_application_bound_summary.sh, rocqchk_functor_loop_summary.sh,
-# rocqchk_walk_stop_summary.sh, rocqchk_cook.sh and
-# rocqchk_primitive_type.sh. Each sources it with
+# rocqchk_walk_stop_summary.sh, rocqchk_cook.sh, rocqchk_primitive_type.sh
+# and rocqchk_register_ind_canonical.sh. Each sources it with
 #
 #   . misc/rocqchk_summary_common.bash
 #
@@ -19,6 +19,12 @@
 # "* <title>" line and the lines under it, up to the next "* " bullet. awk's
 # index() takes the title literally, slashes and parentheses included.
 section() { awk -v h="* $1" 'index($0, h) == 1 { p = 1; print; next } p && /^\* / { exit } p { print }' "$2"; }
+
+# axiom_names <log>: the names of the Axioms section of the rocqchk -o
+# output in <log>, one per line, sorted. Each name is indented by four
+# spaces, and the blank line that ends the section by fewer, so it is not
+# read as a name.
+axiom_names() { section 'Axioms' "$1" | sed -n 's/^    //p' | LC_ALL=C sort; }
 
 # axioms <log> <argument>...: rocqchk -silent -o <argument>..., within a
 # time limit, and its output in <log>. rocqchk must accept the library and
@@ -41,7 +47,7 @@ axioms () {
     cat "$log" >&2
     exit 1
   fi
-  section 'Axioms' "$log" | sed -n 's/^    //p' | LC_ALL=C sort
+  axiom_names "$log"
 }
 
 # lists <log> <expected> <argument>...: axioms <log> <argument>..., whose
