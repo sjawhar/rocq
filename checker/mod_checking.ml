@@ -83,8 +83,17 @@ and compile_module_bytecode : 'a. env -> Vmlibrary.t -> ModPath.t ->
   let vmtab, sign = compile_signature env vmtab mp (mod_delta mb) (mod_type mb) in
   vmtab, Mod_declarations.set_signature sign mb
 
+(* A registration of a primitive inductive type as the library stores it:
+   the name of the inductive block, its user and canonical halves both, the
+   index of the inductive type in the block, and the primitive. *)
+type ind_registration = MutInd.t * int * CPrimitives.prim_ind_ex
+
+(* The registrations of the library that the walk has not met yet. The
+   user name of an inductive type maps to every entry that the library
+   stores for it, in the order of the stored list ([get_retroknowlege]):
+   the first entry, and the later ones last first. *)
 type check_state = {
-  st_retro : (int * CPrimitives.prim_ind_ex) Mindmap_env.t * CPrimitives.prim_type_ex Cmap_env.t;
+  st_retro : (ind_registration * ind_registration list) Mindmap_env.t * CPrimitives.prim_type_ex Cmap_env.t;
 }
 
 let empty_state = {
@@ -188,6 +197,35 @@ let check_primitive_operator env kn cb op =
   in
   check_primitive_typing refuse env cb (CPrimitives.OT_op op)
     ~mismatch:(str "its type is not the operator's")
+
+(* [first] and [later] are the entries that the library stores for the user
+   name of the declared [kn]. [Safe_typing.import] puts [first] in force for
+   later libraries ([Primred.add_retroknowledge]) with its stored canonical
+   name, which conversion compares: [B] registered as bool under the
+   canonical name of [U := u1 | u2 (_ : False)] would let a primitive [ltb]
+   returning [U] compute [u2] with no argument, a closed proof of False
+   (test-suite/misc/rocqchk_register_ind_canonical.sh). So the first entry,
+   in stored order, whose canonical half is not [kn]'s is refused, in force
+   or not; coqc stores a registration made twice as two identical entries.
+   Unlike a primitive type's ([get_retroknowlege]), the user half may
+   differ: through a module alias or an [Include], it is the alias's and the
+   canonical half the original's, as in [kn] where the walk meets the
+   alias. [CheckInductive.check_inductive] checks the result, [first]'s
+   index and primitive, with [kn]. *)
+let check_ind_registration kn (first, later) =
+  let check_canonical (stored, _, CPrimitives.PIE prm) =
+    if not (MutInd.CanOrd.equal stored kn) then
+      CErrors.user_err
+        (KerName.print (MutInd.user kn) ++
+         str " is registered as the primitive inductive type " ++
+         str (CPrimitives.prim_ind_to_string prm) ++
+         str ", but the registration gives it the canonical name " ++
+         KerName.print (MutInd.canonical stored) ++ str ", not " ++
+         KerName.print (MutInd.canonical kn) ++ str ".")
+  in
+  let () = List.iter check_canonical (first :: List.rev later) in
+  let (_, i, prm) = first in
+  (i, prm)
 
 (* coqc registers a primitive type only in a library, or in a module nested
    in it with no functor parameter ([Safe_typing.add_retroknowledge]), for a
@@ -686,13 +724,13 @@ and check_structure_field env st mp lab res = function
         let indices_matter = (Environ.typing_flags env).indices_matter in
         Check_stat.record_inductive ~indices_matter kn mib
       in
-      let retro = Mindmap_env.find_opt kn (fst st.st_retro) in
-      let st = match retro with
-      | None -> st
-      | Some _ ->
+      let retro, st = match Mindmap_env.find_opt kn (fst st.st_retro) with
+      | None -> None, st
+      | Some entries ->
+        let retro = check_ind_registration kn entries in
         let (ind_retro, cst_retro) = st.st_retro in
         let st = { st_retro = (Mindmap_env.remove kn ind_retro, cst_retro) } in
-        st
+        Some retro, st
       in
       let env' = CheckInductive.check_inductive env kn mib retro in
       let () = Subtyping.check_inductive_alias env kn mib in
@@ -786,23 +824,33 @@ let get_retroknowlege env retro =
   let fold (env', imap, cmap, extind) = function
   | Retroknowledge.Register_ind (prm, (ind, i)) ->
     (* Tolerate redeclarations because the kernel allows it somehow *)
-    let check_prm map = match Mindmap_env.find_opt ind map with
-    | None -> ()
-    | Some (_, CPrimitives.PIE prm') ->
+    let check_prm (CPrimitives.PIE prm') =
       if not (eq_prim_ind prm prm') then
         CErrors.user_err Pp.(str "Inconsistent primitive registration for inductive " ++ MutInd.print ind ++ str ".")
     in
-    let () = check_prm imap in
-    let () = check_prm extind in
     (* It is allowed to register inductives coming from another library, so we have
-       to account for that. *)
+       to account for that. [Environ.mem_mind] looks up the user name, the key
+       of [imap] and [extind], in [env], which the fold does not change: every
+       entry of a user name goes to the same map, where [check_prm] compares it
+       with the entries before it. *)
     if Environ.mem_mind ind env then
+      let () = Option.iter check_prm (Mindmap_env.find_opt ind extind) in
       let spec = Inductive.lookup_mind_specif env (ind, i) in
       let () = Safe_typing.check_register_ind (ind, i) prm spec in
       let env' = Primred.add_retroknowledge env' (Retroknowledge.Register_ind (prm, (ind, i))) in
-      (env', imap, cmap, Mindmap_env.add ind (i, CPrimitives.PIE prm) extind)
+      (env', imap, cmap, Mindmap_env.add ind (CPrimitives.PIE prm) extind)
     else
-      (env', Mindmap_env.add ind (i, CPrimitives.PIE prm) imap, cmap, extind)
+      (* [imap] keeps every entry of the user name, with its full name, for
+         [check_ind_registration] to compare with the declared one. The first
+         entry has the primitive of every later one. *)
+      let entry = (ind, i, CPrimitives.PIE prm) in
+      let add = function
+      | None -> Some (entry, [])
+      | Some (((_, _, prm') as first), later) ->
+        let () = check_prm prm' in
+        Some (first, entry :: later)
+      in
+      (env', Mindmap_env.update ind add imap, cmap, extind)
   | Retroknowledge.Register_type (prm, cst) ->
     let () =
       if Cmap_env.mem cst cmap then
