@@ -48,14 +48,9 @@ let set_indirect_accessor f = indirect_accessor := f
 
 exception BadConstant of Constant.t * Pp.t
 
-(* The universe instance at which coqc gives a primitive its type
-   ([Constant_typing.infer_primitive]): the abstract instance of the
-   constant's universe context, a context of the size of the primitive's own
-   context [prim_univs] and with no constraints
-   ([Constant_typing.adjust_primitive_univ_entry]). [refuse] is called with
-   the reason when the constant's context is not such a context. The size
-   is tested before [Typeops] computes the primitive's type, which asserts
-   it. *)
+(* The instance at which coqc types a primitive: its universe context has
+   the primitive's size and no constraints
+   ([Constant_typing.adjust_primitive_univ_entry]). *)
 let primitive_instance refuse cb prim_univs =
   let auctx = Declareops.constant_polymorphic_context cb in
   let () =
@@ -74,17 +69,9 @@ let bad_registration (type a) kn (prm : a CPrimitives.prim_type) why =
                    str (CPrimitives.prim_type_to_string prm) ++ str ", but " ++
                    why ++ str ".")
 
-(* Typeops types a primitive literal with the constant registered for its
-   primitive type ([Typeops.type_of_int] and the like), and conversion
-   unfolds that constant, so the typing of every literal trusts the
-   registration. A definition [int : Set := Empty_set] registered as the
-   int63 type would give [Int 0] the type Empty_set, and [match] on it a
-   closed proof of False. coqc registers only the constant that [Primitive]
-   declares, a parameter whose type is the primitive type's
-   ([Constant_typing.infer_primitive]), and rocqchk refuses any other. It
-   checks the declaration that the registered name has in the body of its
-   module ([without_constant_registrations]). [env] holds the constant's
-   universe context. *)
+(* coqc registers a primitive type only for the parameter that [Primitive]
+   declares, whose type is the primitive type's
+   ([Constant_typing.infer_primitive]). *)
 let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
   let refuse why = raise (bad_registration kn prm why) in
   let () = match cb.const_body with
@@ -96,13 +83,8 @@ let check_register_type (type a) env kn cb (prm : a CPrimitives.prim_type) =
   | Result.Ok () -> ()
   | Result.Error () -> refuse (str "its type is not the primitive type's")
 
-(* Conversion and the VM compute with a primitive operator whatever the
-   type that its constant declares, so [add : int -> int -> False] with the
-   body [Primitive Int63add] would make [add m m] a closed proof of False.
-   coqc gives the constant the type of the operator
-   ([Constant_typing.infer_primitive]), and rocqchk refuses any other.
-   [env] holds the constant's universe context, and the registrations that
-   the operator's type names. *)
+(* coqc gives a primitive operator the type of the operator
+   ([Constant_typing.infer_primitive]). *)
 let check_primitive_operator env kn cb op =
   let refuse why =
     raise (BadConstant (kn, str "is the primitive operator " ++
@@ -114,19 +96,9 @@ let check_primitive_operator env kn cb op =
   | Result.Ok () -> ()
   | Result.Error () -> refuse (str "its type is not the operator's")
 
-(* coqc registers a primitive type only in a library, or in a module nested
-   in it with no functor parameter ([Safe_typing.add_retroknowledge]), for a
-   constant that [Primitive] declares there. So the registered constant is a
-   field of the body of its module: of the type of a module that has no
-   other implementation ([FullStruct], as a library has), or of the
-   implementation of a [Struct] module. Elsewhere, in the type of a sealed,
-   algebraic or declared module, or in the body of a functor, its
-   declaration can be a parameter that an implementation defines: a sealed
-   [int : Set := Empty_set] is [Parameter int : Set] in its module's type.
-   [check_module] therefore checks such a type, and such a functor body,
-   with the constant registrations withheld: [f] gets [st] without them, and
-   the result has them back. A registration that no module body declares is
-   left over, and [check_module] refuses it. *)
+(* [f st] without the constant registrations of [st]: coqc registers only in
+   module bodies outside functors ([Safe_typing.add_retroknowledge]), and a
+   module type can declare a parameter that the body defines. *)
 let without_constant_registrations f st =
   let (ind_retro, cst_retro) = st.st_retro in
   let r, st = f { st_retro = (ind_retro, Cmap.empty) } in
@@ -322,26 +294,10 @@ let lookup_module mp env =
 
 let mk_mtb sign delta = Mod_declarations.make_module_type sign delta
 
-(** A module [X] at path [mp], a field of a structure whose delta resolver
-    is [res], has a resolver of its own, [mod_delta X], and so has each module
-    nested in it. The environment registers the constants and inductives of
-    each module under that module's own resolver ([Modops.add_structure]),
-    and the alias check of [check_structure_field] sees only that one; but a
-    module alias or a functor application ([check_mexpr]) and module
-    subtyping ([Subtyping.check_subtypes]) substitute them through the whole
-    resolver of a module that contains them. [res] could thus give one of
-    them a canonical name that no check has compared it with, and make two
-    declarations convertible that are not.
-
-    coqc adds each closed module's resolver to the enclosing one, so the two
-    mostly give the same canonical names. They can still differ in an honest
-    file: in [S with Module X := M], the entries that the resolver of [S] had
-    for the names of [X] override those of [M], and a field of [M] converts
-    with the canonical name that [S] gives it. So a name that [res] resolves
-    differently from the resolver of the module that declares it is checked
-    as an alias of [res]'s canonical name, by the check every other alias
-    gets, in [env], which holds [X] and everything declared before it. A
-    functor is skipped: the names of its body are bound. *)
+(** Substitution uses [res], the resolver of the enclosing module, to which
+    coqc adds that of [mb] ([Safe_typing.end_module]). Check as an alias each
+    name of [mb], outside functors, that [res] resolves differently from the
+    resolver of the module that declares it. *)
 let check_nested_resolver env res mp mb =
   let rec check_body mp mb = match mod_type mb with
     | MoreFunctor _ -> ()
@@ -390,36 +346,8 @@ let rec check_mexpression env sign mbtyp mp_mse res = match sign with
     MoreFunctor(arg_id,mtb,body), delta
   | MENoFunctor me -> check_mexpr env me mp_mse res
 
-(* coqc gives a label to one field of a structure at most, in each of two
-   namespaces ([Safe_typing.add_field]). The objects are the constants, the
-   rewrite rule blocks, and the types and constructors of each inductive
-   block ([Safe_typing.labels_of_mib]). The modules are the modules and the
-   module types. Each field that coqc adds to a structure is tested there,
-   the fields of an [Include] one by one, and a module or a module type
-   when it starts ([Safe_typing.start_mod_modtype]). A [with] constraint
-   replaces a field in place ([Mod_typing.split_struc]), and a functor
-   application or a module alias keeps the labels of the structure it
-   copies. So no file that coqc writes repeats a label in a namespace.
-
-   The environment keeps the last field with a label
-   ([Environ.add_constant_key], [Modops.add_structure]). So a second field
-   can replace a field that the fields between them were checked against.
-   With [Axiom ax : False], then [proof : False := ax], then a second
-   [ax : unit := tt], no constant is left without a body, and [proof] is a
-   closed proof of False. In the same way, a parameter can take a primitive
-   type registration ([check_register_type]), and a definition with its
-   label can then replace it.
-
-   [check_signature] runs this check on every structure that it reads: the
-   type of a module, a module type, a functor body and a [Struct]
-   implementation, and so the root of a library. The label of an inductive
-   block is one of its objects too: the environment keys the block by it,
-   and coqc makes it the name of the block's first type
-   ([Safe_typing.check_mind]). As in coqc, the labels of one block are
-   tested against the earlier fields, not against each other. With
-   -bytecode-compiler yes, a second module with a label fails before this
-   check, on the assertion of [Environ.shallow_add_module], when
-   [Modops.compile_structure] adds it. *)
+(* coqc gives a label to at most one field of a structure in each of two
+   namespaces, the objects and the modules ([Safe_typing.add_field]). *)
 let check_labels mp struc =
   let refuse l kinds =
     CErrors.user_err
@@ -434,11 +362,8 @@ let check_labels mp struc =
   let fold (objects, modules) (l, field) = match field with
     | SFBconst _ | SFBrules _ -> add_object l objects, modules
     | SFBmind mib ->
-      let add_packet labels mip =
-        Array.fold_right Id.Set.add mip.mind_consnames
-          (Id.Set.add mip.mind_typename labels)
-      in
-      let labels = Array.fold_left add_packet (Id.Set.singleton l) mib.mind_packets in
+      (* The environment keys the block by its label, so count it too. *)
+      let labels = Id.Set.add l (Safe_typing.labels_of_mib mib) in
       Id.Set.fold add_object labels objects, modules
     | SFBmodule _ | SFBmodtype _ ->
       if Id.Set.mem l modules then refuse l "modules and module types";
@@ -449,9 +374,8 @@ let check_labels mp struc =
   in
   ()
 
-(* [check_module] returns the registrations in force after the module with
-   the state: those in force before it and those it made, which coqc puts in
-   force after it too ([Safe_typing.end_module]). *)
+(* Also returns the registrations in force after the module, which coqc
+   keeps ([Safe_typing.end_module]). *)
 let rec check_module env st mp (mb : Mod_declarations.module_body) =
   Flags.if_verbose Feedback.msg_notice (str "  checking module: " ++ str (ModPath.to_string mp));
   let delta_mb = mod_delta mb in
@@ -519,8 +443,7 @@ and check_structure_field : type a. _ -> _ -> _ -> _ -> a Mod_subst.delta_resolv
       in
       let env' = CheckInductive.check_inductive env kn mib retro in
       let () = Subtyping.check_inductive_alias env kn mib in
-      (* [check_inductive] checked the registration, which the types of
-         primitive operators may name. *)
+      (* Operator types may name the registration [check_inductive] checked. *)
       let env' = match retro with
       | None -> env'
       | Some (i, CPrimitives.PIE prm) ->
@@ -541,8 +464,7 @@ and check_structure_field : type a. _ -> _ -> _ -> _ -> a Mod_subst.delta_resolv
       check_rewrite_rules_body env lab rrb;
       Environ.add_rewrite_rules rrb.rewrules_rules env, st
 
-(* The registrations in force after the signature, and the state. A functor
-   makes none ([without_constant_registrations]). *)
+(* Also returns the registrations in force after the signature. *)
 and check_signature : type a. _ -> _ -> _ -> _ -> a Mod_subst.delta_resolver -> _ =
   fun env st sign mp_mse res -> match sign with
   | MoreFunctor (arg_id, mtb, body) ->
@@ -609,10 +531,9 @@ let collect_library_axioms axioms lib =
 let eq_prim_ind (type a b) (p : a CPrimitives.prim_ind) (q : b CPrimitives.prim_ind) =
   String.equal (CPrimitives.prim_ind_to_string p) (CPrimitives.prim_ind_to_string q)
 
-(* The registrations of [retro], checked as far as they can be before the
-   library is, and [env] with the registrations of inductive types of
-   earlier libraries in force, as coqc has them in force when it declares
-   the primitive operators whose types name them. *)
+(* Also puts in force in [env] this library's registrations of inductive
+   types of earlier libraries, as coqc has them when it declares primitive
+   operators. *)
 let get_retroknowlege env retro =
   let fold (env', imap, cmap, extind) = function
   | Retroknowledge.Register_ind (prm, (ind, i)) ->
@@ -639,12 +560,8 @@ let get_retroknowlege env retro =
       if Cmap.mem cst cmap then
         raise (BadConstant (cst, str "is registered twice as a primitive type."))
     in
-    (* coqc registers the constant that [Primitive] declares, in this
-       library, and names it as declared, with no other canonical name
-       ([Safe_typing.add_constant]). [check_constant_declaration] checks the
-       declaration that the user name has in this library, while
-       [Safe_typing.import] puts the registration in force with the
-       canonical name, which conversion compares. *)
+    (* coqc registers a constant of this library, under its own name
+       ([Safe_typing.add_constant]). *)
     let () =
       if Environ.mem_constant cst env then
         raise (bad_registration cst prm (str "an earlier library declares it"))

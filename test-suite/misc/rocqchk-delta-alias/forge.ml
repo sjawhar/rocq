@@ -227,8 +227,8 @@ let definition cb = field (field cb 2) 0
 
 (* [term] with [f] applied to the name of each constant or inductive that it
    names as its head, as an argument of an application or in a product, the
-   only places where the files of misc/rocqchk_forged_aliases.sh name the
-   declarations read or renamed here. *)
+   only places where the files of these tests name the declarations read or
+   renamed here. *)
 let rec map_names f term =
   if Obj.is_int term then term
   else

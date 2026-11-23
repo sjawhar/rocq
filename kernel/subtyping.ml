@@ -343,14 +343,9 @@ let check_constant (cst, ustate) trace env l info1 cb2 subst1 subst2 =
                Anyway [check_conv] will handle that afterwards. *)
             check_conv (NotConvertibleBodyField (Some (env, c1, c2))) cst poly CONV env c1 c2))
 
-(* The invariant of [Mod_subst]: a resolver relates only names with the
-   same label. Substitution relies on it: [Mod_subst.subst_con0] and
-   [subst_mind] rebuild a canonical name from the user name's label, so a
-   functor application would turn an alias that changes label into a name
-   the functor never referred to. The alias checks below compare
-   declarations, not names, so they test the labels first. Honest files
-   pass: coqc creates every alias with [Mod_subst.add_kn_delta_resolver],
-   which asserts the invariant, and substitutions keep it. *)
+(* A resolver relates only names with the same label:
+   [Mod_subst.add_kn_delta_resolver] asserts it when coqc makes an alias, and
+   substitutions keep it. *)
 let same_label user canonical =
   Id.equal (KerName.label user) (KerName.label canonical)
 
@@ -363,21 +358,16 @@ let check_constant_alias env cst cb =
       error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
     in
     let () = if not (same_label user canonical) then refuse () in
-    (* Every field that coqc records an alias for has a [Def] body:
-       strengthening ([Modops.strengthen_const]) turns any other body into a
-       definition, and the copies made without strengthening (a module alias
-       or an Include of a module that is already an alias, and
-       [Modops.include_applied_structure]) carry only aliases that an earlier
-       strengthening made. Any other alias would be compared below on its
-       type alone, and in the type of a sealed module nothing else compares a
-       constant's canonical name with the implementation. *)
+    (* Every constant alias that coqc records is on a field that
+       strengthening ([Modops.strengthen_const]) made a [Def], and the copies
+       made without strengthening keep that body. *)
     let () = match cb.const_body with
       | Def _ -> ()
       | Undef _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse ()
     in
     let target = Constant.make1 canonical in
-    (* A forged resolver can name a target that is not, or not yet, in the
-       environment: refuse it instead of failing on an anomaly. *)
+    (* An enclosing module's resolver can name a target that is not, or not
+       yet, in the environment: refuse it instead of failing on an anomaly. *)
     let target_body = match Environ.lookup_constant_opt target env with
       | Some target_body -> target_body
       | None -> refuse ()
@@ -410,9 +400,7 @@ let check_inductive_alias env mind mib =
           (NotEqualInductiveAliases (mind, target))
     in
     let target_body = Environ.lookup_mind target env in
-    (* The labels are equal, so [check_inductive] compares [user], which is
-       [KerName.make user_mp target_label], and [add_kn_delta_resolver]
-       below cannot fail its assertion. *)
+    (* The labels are equal: [add_kn_delta_resolver] below cannot fail. *)
     let target_mp, target_label = KerName.repr canonical in
     let user_mp = KerName.modpath user in
     let target_resolver = empty_delta_resolver target_mp in

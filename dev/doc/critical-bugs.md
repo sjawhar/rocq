@@ -688,7 +688,7 @@ and lack of checking of relevance marks on constants in coqchk
 
 - component: rocqchk, modules
 - introduced: unknown
-- impacted released versions: unknown (reproduced on master 21891774 and on a 9.2 build)
+- impacted released versions: unknown (reproduced on master 21891774)
 - impacted rocqchk versions: same
 - fixed in: 9.4
 - found by: AI agents run by Sami Jawhar (code review)
@@ -704,7 +704,7 @@ and lack of checking of relevance marks on constants in coqchk
 
 - component: rocqchk, modules
 - introduced: unknown
-- impacted released versions: unknown (reproduced on master 21891774 and on a 9.2 build)
+- impacted released versions: unknown (reproduced on master 21891774)
 - impacted rocqchk versions: same
 - fixed in: 9.4
 - found by: AI agents run by Sami Jawhar (code review)
@@ -721,7 +721,7 @@ and lack of checking of relevance marks on constants in coqchk
 
 - component: rocqchk, modules
 - introduced: unknown
-- impacted released versions: unknown (reproduced on master 21891774 and on a 9.2 build)
+- impacted released versions: unknown (reproduced on master 21891774)
 - impacted rocqchk versions: same
 - fixed in: 9.4
 - found by: AI agents run by Sami Jawhar (code review)
@@ -737,21 +737,16 @@ and lack of checking of relevance marks on constants in coqchk
 
 - component: rocqchk, modules
 - introduced: unknown
-- impacted released versions: unknown (reproduced on master 21891774 and on a 9.2 build)
+- impacted released versions: unknown (reproduced on master 21891774)
 - impacted rocqchk versions: same
 - fixed in: 9.4
 - found by: AI agents run by Sami Jawhar (code review)
 - GH issue number: rocq-prover/rocq#XXXXX
-- exploit: test-suite/misc/rocqchk_repeated_label.sh, case axiom: a crafted
-  .vo has Axiom ax : False, then proof : False := ax, then a second field
-  labelled ax, ax : unit := tt; the environment keeps the last field with a
-  label, so no constant is left without a body, and a client proves False
-  with proof (case registered does the same with a parameter int : Set,
-  registered as the int63 type, then int := Empty_set). On master
-  21891774, rocqchk accepts the forged files with the default options;
-  with -o it lists ax as an axiom, since it collects the axioms from each
-  field of the library, the replaced one too; and coqc refuses to load the
-  forged library, with an anomaly
+- exploit: test-suite/misc/rocqchk_repeated_label.sh: a crafted .vo has
+  Axiom ax : False, then proof : False := ax, then ax : unit := tt; the
+  environment keeps the last field labelled ax, so a client proves False
+  with proof. On master 21891774, rocqchk accepts the forged files, and
+  with -o it still lists ax as an axiom
 - risk: proof of False accepted by rocqchk on a crafted .vo (files
   produced by `rocq compile` are fine)
 
@@ -1465,7 +1460,7 @@ For instance `α` and `__U03b1_` were the same in the native compiler.
 
 - component: rocqchk, primitive types
 - introduced: V8.10 (rocq-prover/rocq#6914, primitive integers)
-- impacted released versions: V8.10-V9.3 (reproduced on master 21891774 and on a 9.2 build)
+- impacted released versions: V8.10-V9.3 (reproduced on master 21891774)
 - impacted rocqchk versions: same
 - fixed in: 9.4
 - found by: Gaëtan Gilbert (rocq-prover/rocq#12439); exploit by AI agents run by Sami Jawhar (code review)
