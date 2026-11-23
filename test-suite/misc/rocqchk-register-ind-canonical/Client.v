@@ -1,5 +1,6 @@
-(* The client of A1 (Lib.v here) in rocqchk_register_ind_canonical.sh,
-   compiled with -noinit against it. Its primitive ltb returns M.B, the
+(* The client of A1 (alias/Lib.v) and of A2 (include/Lib.v) in
+   rocqchk_register_ind_canonical.sh, compiled with -noinit against each,
+   in the scratch directory of its set. Its primitive ltb returns M.B, the
    registered bool, and t type-checks only with that registration in
    force. *)
 
