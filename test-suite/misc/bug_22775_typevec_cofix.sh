@@ -5,28 +5,51 @@
 # 4.14, less on OCaml 5). `Eval vm_compute in c` reads the cofixpoint back,
 # which copies that vector in rocq_tcode_array (kernel/byterun/rocq_values.c).
 # One constant holds the block (a `CoFixpoint` command would make 4200
-# constants that each hold it).
+# constants that each hold it). The functions have two types, s true and
+# s false, so a wrong vector of types gives an ill-typed read-back. The
+# read-back must be c itself, and VM conversion must refuse a cofixpoint that
+# differs from c only in its last function.
+# A first run defines the two cofixpoints with the default minor heap, where
+# that costs less; only the read-back and the checks run with s=1.
 
 set -e
 
 export PATH=$BIN:$PATH
-export OCAMLRUNPARAM=s=1
 
 d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
 
 N=4200
 
-{
-  echo "CoInductive stream := Cons : nat -> stream -> stream."
-  printf 'Definition c := cofix c1 : stream := Cons O c2\n'
+# cofixdef NAME LAST: the cofixpoint NAME of N functions; c_i has type s true
+# for odd i and s false for even i, and the last function (even) holds LAST.
+cofixdef() {
+  printf 'Definition %s := cofix c1 : s true := C true O c2\n' "$1"
   for i in $(seq 2 $N); do
     j=$(( i % N + 1 ))
-    printf 'with c%d : stream := Cons O c%d\n' "$i" "$j"
+    if [ "$i" -eq "$N" ]; then z=$2; else z=O; fi
+    if [ $(( i % 2 )) -eq 0 ]; then b=false; else b=true; fi
+    printf 'with c%d : s %s := C %s %s c%d\n' "$i" "$b" "$b" "$z" "$j"
   done
   printf 'for c1.\n'
+}
+
+{
+  echo "CoInductive s : bool -> Type := C : forall b, nat -> s (negb b) -> s b."
+  cofixdef c O
+  cofixdef c\' '(S O)'
+} > "$d/defs.v"
+
+{
+  echo "Require Import T.defs."
   echo "Definition t := Eval vm_compute in c."
+  echo "Example t_ok : t = c := eq_refl."
+  echo "Fail Check (eq_refl c <: c = c')."
 } > "$d/bug_22775_typevec_cofix.v"
 
-# Without the fix the allocation loops; a CPU-time limit makes that a failure.
-(ulimit -t 900; ${coqc#"$BIN"} "$d/bug_22775_typevec_cofix.v")
+# A CPU-time limit bounds each run. Without the fix the read-back in the second
+# run loops, and the limit makes that a failure.
+(ulimit -t 900; unset OCAMLRUNPARAM
+ ${coqc#"$BIN"} -native-compiler no -R "$d" T "$d/defs.v")
+(ulimit -t 900; export OCAMLRUNPARAM=s=1
+ ${coqc#"$BIN"} -native-compiler no -R "$d" T "$d/bug_22775_typevec_cofix.v")

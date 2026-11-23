@@ -19,18 +19,30 @@ trap 'rm -rf "$d"' EXIT
 N=300
 R=200
 
-{
-  echo "CoInductive stream := Cons : nat -> stream -> stream."
-  printf 'Definition c := cofix c1 : stream := Cons O c2\n'
+# cofixdef NAME LAST: the cofixpoint NAME of N functions, c_i := Cons O c_(i+1);
+# the last function holds LAST.
+cofixdef() {
+  printf 'Definition %s := cofix c1 : stream := Cons O c2\n' "$1"
   for i in $(seq 2 $N); do
     j=$(( i % N + 1 ))
-    printf 'with c%d : stream := Cons O c%d\n' "$i" "$j"
+    if [ "$i" -eq "$N" ]; then z=$2; else z=O; fi
+    printf 'with c%d : stream := Cons %s c%d\n' "$i" "$z" "$j"
   done
   printf 'for c1.\n'
+}
+
+{
+  echo "CoInductive stream := Cons : nat -> stream -> stream."
+  cofixdef c O
   for k in $(seq 1 $R); do
     echo "Definition t$k := Eval vm_compute in c."
   done
+  # The last read-back must be the cofixpoint itself, and VM conversion must
+  # refuse a cofixpoint that differs only in its last function.
+  echo "Example t_ok : t$R = c := eq_refl."
+  cofixdef c\' '(S O)'
+  echo "Fail Check (eq_refl c <: c = c')."
 } > "$d/bug_cofix_barrier.v"
 
 # A crash fails the test; a CPU-time limit turns a loop into a failure too.
-(ulimit -t 900; ${coqc#"$BIN"} "$d/bug_cofix_barrier.v")
+(ulimit -t 900; ${coqc#"$BIN"} -native-compiler no "$d/bug_cofix_barrier.v")
