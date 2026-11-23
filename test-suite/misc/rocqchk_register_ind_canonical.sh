@@ -18,8 +18,7 @@
 # compiled with $coqc -noinit -R <dir> RegInd in its own directory under
 # the scratch directory, so that each library is RegInd.Lib (mode_args
 # checks <root>.Lib). The scratch directories, which the test prints, for
-# the names of BET-1505's plan (its C′, C″ and C‴ are spelled C', C'' and
-# C''' here):
+# the names below:
 # - C: honest/Lib.vo, from Lib.v. It registers B as bool:
 #   (RegInd.Lib.B, RegInd.Lib.B); its other action is the Register_type of
 #   int;
@@ -86,8 +85,11 @@
 # library is valid, every run is as the table says, and none is void: A1
 # and A2 are the only sets in which coqc stores a user name and a
 # canonical name that differ, and a check that compares the wrong halves
-# passes without them. Without the check, rocqchk accepts forged, repeated
-# and repeated-last, and the test exits 1 after printing every line.
+# passes without them. Where coqc stores equal halves for A1 or A2, the
+# set still runs and must be accepted, and its NOTE says that it does not
+# test that shape; the NOTE does not fail the test. Without the check,
+# rocqchk accepts forged, repeated and repeated-last, and the test exits 1
+# after printing every line.
 
 set -e
 
@@ -135,14 +137,13 @@ forge() { ocaml "$FORGE" "$@" > "$d/step.log" 2>&1 || stop "forge.ml $* failed:"
 # as its dependency RegInd.Lib, written to $d/<dir>.
 relink() { forge client "$d/$1" "$d/$2/Lib.vo" RegInd.Lib "$d/$2/${1##*/}"; }
 
-# print_retro <set> <dir>: print forge.ml retro of $d/<dir>/Lib.vo, which
-# the loop after the compile and forge steps keeps in retro_out[<dir>],
-# each line after
-# "retro <dir>/Lib.vo (<set>): ". Set inds and others to its Register_ind
-# entries and its other actions, in stored order, each without its
-# "<action> <k>/<n>: " head and joined by "; ", n_ind to the number of
-# Register_ind entries, and retro_ok to 1 when the print is one line per
-# action and then "actions: <n>".
+# print_retro <set> <dir>: print each line of forge.ml retro of
+# $d/<dir>/Lib.vo, which the loop after the compile and forge steps keeps
+# in retro_out[<dir>], prefixed with "retro <dir>/Lib.vo (<set>): ". Set
+# inds and others to its Register_ind entries and its other actions, in
+# stored order, each without its "<action> <k>/<n>: " head and joined by
+# "; ", n_ind to the number of Register_ind entries, and retro_ok to 1
+# when the print is one line per action and then "actions: <n>".
 print_retro() {
   local lib=$2/Lib.vo line total='' count=0
   inds='' others='' n_ind=0 retro_ok=1
@@ -267,7 +268,7 @@ axioms_line() {
     echo "no Axioms section"
     return
   fi
-  names=$(printf '%s\n' "$s" | sed -n 's/^    //p' | LC_ALL=C sort | paste -sd ' ' -)
+  names=$(axiom_names "$1" | paste -sd ' ' -)
   title=${s%%$'\n'*}
   title=${title#"* Axioms:"}
   if [ -n "$names" ]; then printf '%s\n' "$names"; else printf '%s\n' "${title# }"; fi | scrub
