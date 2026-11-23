@@ -1,6 +1,7 @@
-# Shell functions of the misc/rocqchk_*.sh tests that forge .vo files with
-# forge.ml. A test sources this file from test-suite/, then sets ROOT, the
-# logical name of its libraries, and LOG, the file for rocqchk's output.
+# Shell functions for the misc/rocqchk_*.sh tests that source this file to
+# forge .vo files with forge.ml. A test sources it from test-suite/, then
+# sets ROOT, the logical name of its libraries, and LOG, the file for
+# rocqchk's output.
 
 D=misc/rocqchk-delta-alias
 fail=0
