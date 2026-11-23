@@ -358,9 +358,9 @@ let check_constant_alias env cst cb =
       error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
     in
     let () = if not (same_label user canonical) then refuse () in
-    (* Every constant alias that coqc records is on a field that
-       strengthening ([Modops.strengthen_const]) made a [Def], and the copies
-       made without strengthening keep that body. *)
+    (* Every constant alias that coqc records is on a field that is a [Def]
+       after strengthening ([Modops.strengthen_const]), and the copies made
+       without strengthening keep that body. *)
     let () = match cb.const_body with
       | Def _ -> ()
       | Undef _ | OpaqueDef _ | Primitive _ | Symbol _ -> refuse ()
