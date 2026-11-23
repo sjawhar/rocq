@@ -1,7 +1,7 @@
 (* C'', the library of the set honest-repeated of
    rocqchk_register_ind_canonical.sh: C (../Lib.v) with a second
    registration of B as bool just after the first. coqc stores both
-   entries, (B, B) then (B, B); the test stops if it stores one. *)
+   entries, (B, B) then (B, B). *)
 
 Unset Elimination Schemes.
 

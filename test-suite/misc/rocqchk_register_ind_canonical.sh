@@ -35,10 +35,13 @@
 # - repeated-last: repeated-last/Lib.vo, C with (B, U) just after its
 #   entry (ind-repeat ... last): (B, B), then (B, U);
 # - operator-control: operator-control/Lib.vo, a copy of C;
-# - A1: alias/Lib.vo and alias/Client.vo, from alias/: Module M := N, then
-#   Register M.B; one entry with the user name RegInd.Lib.M.B;
-# - A2: include/Lib.vo and include/Client.vo, from include/:
-#   Module M. Include N. End M., then Register M.B; the same rule;
+# - A1: alias/Lib.vo, from alias/Lib.v: Module M := N, then Register M.B;
+#   one entry with the user name RegInd.Lib.M.B;
+# - A2: include/Lib.vo, from include/Lib.v: Module M. Include N. End M.,
+#   then Register M.B; the same rule;
+# - alias/Client.vo and include/Client.vo: Client.v, compiled in each of
+#   the two directories against its library, A1 or A2; its ltb returns
+#   M.B;
 # - D_B: honest/ClientB.vo, from ClientB.v, compiled against C; its ltb
 #   returns B. forge.ml client relinks it to control/, twice/ and
 #   repeated-last/;
@@ -76,13 +79,15 @@
 # run on a VOID library counts as void. A refusal by check_module's
 # "unknown inductive" or by Safe_typing.check_register_ind voids the run:
 # those are the refusals of a badly built forgery. A coqc refusal of A1, A2
-# or their clients drops that set, with coqc's error; any other compile or
-# forge failure stops the test before its first verdict. The output names
-# no scratch path and no time, so two runs print the same bytes. The test
-# exits 0 only when every library is valid, every run that is not dropped
-# is as the table says, and none is void. Without the check, rocqchk
-# accepts forged, repeated and repeated-last, and the test exits 1 after
-# printing every line.
+# or their client drops that set, with coqc's error, and the test runs the
+# other sets; any other compile or forge failure stops the test before its
+# first verdict. The output names no scratch path and no time, so two runs
+# print the same bytes. The test exits 0 only when no set is dropped, every
+# library is valid, every run is as the table says, and none is void: A1
+# and A2 are the only sets in which coqc stores a user name and a
+# canonical name that differ, and a check that compares the wrong halves
+# passes without them. Without the check, rocqchk accepts forged, repeated
+# and repeated-last, and the test exits 1 after printing every line.
 
 set -e
 
@@ -175,12 +180,12 @@ relink forged/ClientU.vo repeated
 relink honest/ClientB.vo repeated-last
 relink forged/ClientU.vo operator-control
 
-# A1 and A2: a coqc refusal drops the set.
+# A1 and A2, each with its copy of Client.v: a coqc refusal drops the set.
 declare -A dropped_set
 for dir in alias include; do
-  for f in Lib.v Client.v; do
-    if ! coq "$dir" "$dir/$f"; then
-      echo "coqc refused $dir/$f; the set honest-$dir is dropped; coqc printed:"
+  for f in "$dir/Lib.v" Client.v; do
+    if ! coq "$dir" "$f"; then
+      echo "coqc refused $dir/${f##*/}; the set honest-$dir is dropped; coqc printed:"
       scrub < "$d/step.log"
       dropped_set[$dir]=1
       break
@@ -197,25 +202,31 @@ for dir in honest control twice forged repeated repeated-last operator-control a
   fi
 done
 
-# spec v3 R1: coqc stores both entries of the two Register commands of C''.
-if [ "$(grep -c '^Register_ind ' <<< "${retro_out[twice]}")" = 1 ]; then
-  print_retro honest-repeated twice
-  stop "coqc stored one Register_ind entry for the two Register commands of twice/Lib.v, against spec v3 R1: tell the architect, with the print above"
-fi
-
 set +e
 
-# classify <text>: the row of the classification table that <text> matches:
-# the first line of a run's output that holds Error or Anomaly, or that
-# line joined with the next by one space, for a BadConstant error, whose
-# constant name can be on the line before its text. It prints one line,
-# "<row>: <file>, <function>" for the check that refuses, where <row> is
-# d3 (the refusal of the stored canonical name, exactly: the refusal the
-# table expects of forged, repeated and repeated-last), d3-names (the same
-# refusal of other names: not as the table says), operator (the refusal
-# the table expects of operator-control), void (a refusal of a badly built
-# forgery), recorded (a refusal by another check of the registrations, not
-# as the table says), none (no error line) or unclassified.
+# error_line <log>: the first line of <log> that holds Error or Anomaly,
+# without the white space at its end, then the line after it, if there is
+# one, without white space at either end; scrubbed.
+error_line() {
+  awk '/Error|Anomaly/ {
+         sub(/[[:space:]]+$/, ""); print
+         if ((getline n) > 0) { sub(/^[[:space:]]+/, "", n); sub(/[[:space:]]+$/, "", n); print n }
+         exit
+       }' "$1" | scrub
+}
+
+# classify <text>: set row to the row of the classification table that
+# <text> matches, and check to the check that refuses, "<file>,
+# <function>". <text> is the first line of a run's output that holds Error
+# or Anomaly, or that line joined with the next by one space, for a
+# BadConstant error, whose constant name can be on the line before its
+# text. row is d3 (the refusal of the stored canonical name, exactly: the
+# refusal the table expects of forged, repeated and repeated-last),
+# d3-names (the same refusal of other names: not as the table says),
+# operator (the refusal the table expects of operator-control), void (a
+# refusal of a badly built forgery), recorded (a refusal by another check
+# of the registrations, not as the table says), none (no error line) or
+# unclassified.
 classify() {
   local t=$1
   local d3='RegInd.Lib.B is registered as the primitive inductive type bool, but the registration gives it the canonical name RegInd.Lib.U, not RegInd.Lib.B.'
@@ -225,21 +236,21 @@ classify() {
   local register_ind='A universe monomorphic inductive type is expected|A non mutual inductive is expected|A non-private inductive type is expected|An inductive type with [0-9]+ parameters is expected|an inductive type with [0-9]+ constructors is expected|th constructor does not have the expected (name|type)|the constructor does not have the expected type'
   local inconsistent='Inconsistent primitive registration for inductive'
   if [ -z "$t" ]; then
-    echo "none: none"
+    row=none check=none
   elif [ "$t" = "Fatal Error: User error: $d3" ]; then
-    echo "d3: checker/mod_checking.ml, check_structure_field"
+    row=d3 check="checker/mod_checking.ml, check_ind_registration"
   elif [[ $t =~ $d3_names ]]; then
-    echo "d3-names: checker/mod_checking.ml, check_structure_field"
+    row=d3-names check="checker/mod_checking.ml, check_ind_registration"
   elif [[ $t =~ $operator ]]; then
-    echo "operator: checker/mod_checking.ml, check_primitive_operator"
+    row=operator check="checker/mod_checking.ml, check_primitive_operator"
   elif [[ $t =~ $unknown ]]; then
-    echo "void: checker/mod_checking.ml, check_module"
+    row=void check="checker/mod_checking.ml, check_module"
   elif [[ $t =~ $register_ind ]]; then
-    echo "void: kernel/safe_typing.ml, check_register_ind"
+    row=void check="kernel/safe_typing.ml, check_register_ind"
   elif [[ $t =~ $inconsistent ]]; then
-    echo "recorded: checker/mod_checking.ml, get_retroknowlege"
+    row=recorded check="checker/mod_checking.ml, get_retroknowlege"
   else
-    echo "unclassified: unclassified"
+    row=unclassified check=unclassified
   fi
 }
 
@@ -312,65 +323,50 @@ valid_shape() {
 }
 
 a=0 u=0 v=0 dropped=0
-declare -A honest_rc honest_line
+declare -A rc_of line_of
 
 # run <set> <dir> <mode> <client or ""> <expected> <reference>: rocqchk on
 # RegInd.Lib in $d/<dir>, and RegInd.<client> if it is given, in <mode>,
 # within 300 s. Print its verdict, its error line and the refusing check,
-# and, for a refusal with the client and a <reference> (alone: the library
-# alone in this mode, from the previous run; honest: the honest set's run
-# in this mode), where the refusal is. Count the run against <expected>:
-# accepted, d3 (refused with the D3 line, and on C with the client) or
-# operator (refused by check_primitive_operator, on the client). Set r_rc
-# and r_line to the exit status and the error line.
+# and record its exit status in rc_of and its error line in line_of under
+# <set>/<kind>/<mode>, <kind> being alone without a client and client with
+# one. For a refusal with the client and a <reference>, the <set>/<kind>
+# of a run recorded before (forged/alone: the library alone in this mode;
+# honest/client: the honest set's run in this mode), print where the
+# refusal is. Count the run against <expected>: accepted, d3 (refused with
+# the D3 line, and on C with the client) or operator (refused by
+# check_primitive_operator, on the client).
 run() {
   local set=$1 dir=$2 mode=$3 client=$4 expected=$5 reference=$6
-  local kind="library alone" two line next class joined last where='' ref_rc ref_line ok='' want
-  if [ -n "$client" ]; then kind="with client"; fi
+  local kind=alone shown="library alone" rc=0 line='' next='' row=accepted check=''
+  local last where='' ref_rc ref_line ok='' want
+  if [ -n "$client" ]; then kind=client shown="with client"; fi
   mode_args "$mode" "$d/$dir" RegInd "$client"
-  r_rc=0
-  timeout 300 "$BIN"rocqchk "${mode_argv[@]}" > "$d/run.log" 2>&1 || r_rc=$?
-  r_line=
-  class=accepted
-  if [ "$r_rc" = 0 ]; then
-    echo "set $set ($mode, $kind): accepted"
+  timeout 300 "$BIN"rocqchk "${mode_argv[@]}" > "$d/run.log" 2>&1 || rc=$?
+  if [ "$rc" = 0 ]; then
+    echo "set $set ($mode, $shown): accepted"
     if [ "$mode" = grader ]; then echo "  axioms: $(axioms_line "$d/run.log")"; fi
   else
-    echo "set $set ($mode, $kind): refused"
-    two=$(awk '/Error|Anomaly/ { print; if ((getline n) > 0) print n; exit }' "$d/run.log" | scrub)
-    line=${two%%$'\n'*}
-    line=${line%"${line##*[![:space:]]}"}
-    next=
-    if [[ $two == *$'\n'* ]]; then
-      next=${two#*$'\n'}
-      next=${next#"${next%%[![:space:]]*}"}
-      next=${next%"${next##*[![:space:]]}"}
+    echo "set $set ($mode, $shown): refused"
+    { IFS= read -r line; IFS= read -r next; } < <(error_line "$d/run.log")
+    classify "$line"
+    if [ "$row" = unclassified ] && [ -n "$next" ]; then
+      classify "$line $next"
+      if [ "$row" != unclassified ]; then line="$line $next"; fi
     fi
-    class=$(classify "$line")
-    if [ "${class%%:*}" = unclassified ] && [ -n "$next" ]; then
-      joined=$(classify "$line $next")
-      if [ "${joined%%:*}" != unclassified ]; then
-        class=$joined
-        line="$line $next"
-      fi
-    fi
-    r_line=$line
-    if [ "${class%%:*}" != none ]; then
-      echo "  error: $line; check: ${class#*: }"
+    if [ "$row" != none ]; then
+      echo "  error: $line; check: $check"
     else
       last=$(awk 'NF { l = $0 } END { print l }' "$d/run.log" | scrub)
-      if [ "$r_rc" = 124 ]; then
+      if [ "$rc" = 124 ]; then
         echo "  error: timeout, no error line (last line: $last); check: none"
       else
-        echo "  error: none (exit status $r_rc; last line: $last); check: none"
+        echo "  error: none (exit status $rc; last line: $last); check: none"
       fi
     fi
     if [ -n "$client" ] && [ -n "$reference" ]; then
-      case $reference in
-        alone) ref_rc=$alone_rc ref_line=$alone_line ;;
-        honest) ref_rc=${honest_rc[$mode]} ref_line=${honest_line[$mode]} ;;
-      esac
-      if [ "$ref_rc" != 0 ] && [ -n "$r_line" ] && [ "$ref_line" = "$r_line" ]; then
+      ref_rc=${rc_of["$reference/$mode"]} ref_line=${line_of["$reference/$mode"]}
+      if [ "$ref_rc" != 0 ] && [ -n "$line" ] && [ "$ref_line" = "$line" ]; then
         where="on C"
       elif [ "$ref_rc" = 0 ]; then
         where="on the client"
@@ -380,22 +376,24 @@ run() {
       echo "  where: $where"
     fi
   fi
+  rc_of["$set/$kind/$mode"]=$rc
+  line_of["$set/$kind/$mode"]=$line
   case $expected in
     accepted)
       want="accepted"
-      if [ "$r_rc" = 0 ]; then ok=1; fi ;;
+      if [ "$rc" = 0 ]; then ok=1; fi ;;
     d3)
       want="refused with the D3 line"
       if [ -n "$client" ]; then want+=", on C"; fi
-      if [ "$r_rc" != 0 ] && [ "${class%%:*}" = d3 ] && { [ -z "$client" ] || [ "$where" = "on C" ]; }; then ok=1; fi ;;
+      if [ "$rc" != 0 ] && [ "$row" = d3 ] && { [ -z "$client" ] || [ "$where" = "on C" ]; }; then ok=1; fi ;;
     operator)
       want="refused by check_primitive_operator, on the client"
-      if [ "$r_rc" != 0 ] && [ "${class%%:*}" = operator ] && [ "$where" = "on the client" ]; then ok=1; fi ;;
+      if [ "$rc" != 0 ] && [ "$row" = operator ] && [ "$where" = "on the client" ]; then ok=1; fi ;;
   esac
   if [ "$lib_ok" != 1 ]; then
     v=$((v + 1))
     echo "  result: void: the library is VOID"
-  elif [ "${class%%:*}" = void ]; then
+  elif [ "$row" = void ]; then
     v=$((v + 1))
     echo "  result: void: refused by a check that refuses a badly built forgery"
   elif [ -n "$ok" ]; then
@@ -407,20 +405,14 @@ run() {
   fi
 }
 
-# runs <set> <dir> <client> <expected> [alone|honest]: the runs of a set in
-# both modes; with alone, the library alone runs first in each mode.
+# runs <set> <dir> <client> <expected> [<reference>]: the runs of a set in
+# both modes, with <reference> for each run with the client (run); when
+# <reference> is <set>/alone, the library alone runs first in each mode.
 runs() {
   local mode
   for mode in grader default; do
-    if [ "${5-}" = alone ]; then
-      run "$1" "$2" "$mode" "" "$4" ""
-      alone_rc=$r_rc alone_line=$r_line
-    fi
+    if [ "${5-}" = "$1/alone" ]; then run "$1" "$2" "$mode" "" "$4" ""; fi
     run "$1" "$2" "$mode" "$3" "$4" "${5-}"
-    if [ "$1" = honest ]; then
-      honest_rc[$mode]=$r_rc
-      honest_line[$mode]=$r_line
-    fi
   done
 }
 
@@ -454,22 +446,24 @@ done
 
 print_retro forged forged
 valid forged forged "$bu" "$c_others"
-runs forged forged ClientU d3 alone
+runs forged forged ClientU d3 forged/alone
 
 print_retro repeated repeated
 valid repeated repeated "$bu; $bb" "$c_others"
-runs repeated repeated ClientU d3 alone
+runs repeated repeated ClientU d3 repeated/alone
 
 print_retro repeated-last repeated-last
 valid repeated-last repeated-last "$bb; $bu" "$c_others"
-runs repeated-last repeated-last ClientB d3 alone
+runs repeated-last repeated-last ClientB d3 repeated-last/alone
 
 print_retro operator-control operator-control
 valid operator-control operator-control "$bb" "$c_others"
-runs operator-control operator-control ClientU operator honest
+runs operator-control operator-control ClientU operator honest/client
 
 total=$((a + u + v + dropped))
 if [ "$total" != 24 ]; then echo "the test counted $total runs, not 24"; fi
 echo "ran $total runs: $a as the table says, $u not as the table says, $v void, $dropped dropped"
-if [ "$total" = 24 ] && [ "$all_valid" = 1 ] && [ "$u" = 0 ] && [ "$v" = 0 ]; then exit 0; fi
+if [ "$total" = 24 ] && [ "$dropped" = 0 ] && [ "$all_valid" = 1 ] && [ "$u" = 0 ] && [ "$v" = 0 ]; then
+  exit 0
+fi
 exit 1

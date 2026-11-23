@@ -97,15 +97,21 @@ and struc_constants ?(names = cb_constants) acc struc =
       | _ -> acc)
     acc (list_of struc)
 
-(* The kernel name, hash included, of the constant named [name] in the
-   library: it is taken from the file, never rebuilt. *)
+(* The kernel name, hash included, of [name] in the library: [project] of
+   the first name that [names] (struc_constants) lists for a declaration of
+   the library and whose [project] prints as [name]. It is taken from the
+   file, never rebuilt. *)
+let find_name ?names project disk name =
+  List.find_map
+    (fun m ->
+      let kn = project m in
+      if String.equal (kn_to_string kn) name then Some kn else None)
+    (struc_constants ?names [] (root_struc disk))
+
+(* The kernel name of the constant named [name] in the library. *)
 let find_constant disk name =
-  match
-    List.find_opt
-      (fun c -> String.equal (kn_to_string (cst_user c)) name)
-      (struc_constants [] (root_struc disk))
-  with
-  | Some c -> cst_user c
+  match find_name cst_user disk name with
+  | Some kn -> kn
   | None -> fail "no declaration of the library names a constant %s" name
 
 let int0 label disk =
@@ -118,9 +124,18 @@ let int0 label disk =
   say "forging: %s's body becomes Def (Int 0)" label;
   disk
 
-let register name canonical disk =
+(* The stored action list of the library. *)
+let retro_of disk =
   let compiled = field disk 0 in
   if size compiled <> 7 then fail "compiled_library has %d fields, not 7" (size compiled);
+  field compiled 6
+
+(* [disk] with the action list [retro]; the compiled library is copied, not
+   changed in place. *)
+let with_retro retro disk = upd 0 (set 6 retro) disk
+
+let register name canonical disk =
+  let retro = retro_of disk in
   let user = find_constant disk name in
   let cst, named =
     match canonical with
@@ -130,11 +145,9 @@ let register name canonical disk =
       dual user can, " with the canonical name " ^ kn_to_string can
   in
   let action = block 1 [| Obj.repr 0; cst |] in
-  let retro = field compiled 6 in
   say "forging: the library's retroknowledge (%d action(s)) gets Register_type (prim_type 0, %s%s)"
     (List.length (list_of retro)) (kn_to_string user) named;
-  Obj.set_field compiled 6 (block 0 [| action; retro |]);
-  disk
+  with_retro (block 0 [| action; retro |]) disk
 
 (* {1 Registrations of primitive inductive types} *)
 
@@ -159,16 +172,6 @@ let halves what m =
   | 0, 1 -> field m 0, field m 0
   | 1, 2 -> field m 0, field m 1
   | t, s -> fail "%s: expected Same (tag 0, 1 field) or Dual (tag 1, 2 fields), found tag %d with %d fields" what t s
-
-(* The stored action list of the library. *)
-let retro_of disk =
-  let compiled = field disk 0 in
-  if size compiled <> 7 then fail "compiled_library has %d fields, not 7" (size compiled);
-  field compiled 6
-
-(* [disk] with the action list [retro]; the compiled library is copied, not
-   changed in place. *)
-let with_retro retro disk = upd 0 (set 6 retro) disk
 
 (* The inductive (mutual inductive, index) of the Register_ind action [a],
    after a check of both layouts. *)
@@ -219,16 +222,11 @@ let find_ind_action retro user =
   | l -> refuse "%d stored Register_ind actions have the user name %s, not one" (List.length l) user
 
 (* The kernel name, hash included, of the canonical half [name] of a mutual
-   inductive that a constant of the library names: it is taken from the
-   file, never rebuilt. *)
+   inductive that a constant of the library names. *)
 let find_canonical disk name =
   let canonical m = snd (halves "an inductive a constant names" m) in
-  match
-    List.find_opt
-      (fun m -> String.equal (kn_to_string (canonical m)) name)
-      (struc_constants ~names:cb_inductives [] (root_struc disk))
-  with
-  | Some m -> canonical m
+  match find_name ~names:cb_inductives canonical disk name with
+  | Some kn -> kn
   | None -> refuse "no constant of the library names an inductive with the canonical name %s" name
 
 (* A fresh Register_ind action: [a]'s primitive and index, and the mutual
@@ -238,31 +236,37 @@ let with_canonical a can =
   let user, _ = halves "the Register_ind action's mutual inductive" (field ind 0) in
   block 0 [| field a 0; block 0 [| dual user can; field ind 1 |] |]
 
-let ind_canonical user canonical disk =
-  let retro = retro_of disk in
-  let a = find_ind_action retro user in
-  let can = find_canonical disk canonical in
-  let fresh = with_canonical a can in
-  say "forging: the Register_ind of %s gets the mutual inductive Dual (%s, %s)" user user
-    (kn_to_string can);
-  with_retro (map_list (fun b -> if b == a then fresh else b) retro) disk
+(* Where ind-canonical and ind-repeat put the fresh action: in place of the
+   action it copies, or just before it, or just after it. *)
+type placement = Replace | Before | After
 
-(* [l] with [fresh] just before the cell that holds [a] ([first]), or just
-   after it; only the cells up to that one are copied. *)
-let rec insert_next_to a fresh ~first l =
+(* [l] with [fresh] put as [placement] says at the cell that holds [a]; only
+   the cells up to that one are copied. *)
+let rec place a fresh placement l =
   if Obj.is_int l then fail "the Register_ind action is not in the action list"
   else if field l 0 == a then
-    if first then block 0 [| fresh; l |] else upd 1 (fun tl -> block 0 [| fresh; tl |]) l
-  else upd 1 (insert_next_to a fresh ~first) l
+    match placement with
+    | Replace -> set 0 fresh l
+    | Before -> block 0 [| fresh; l |]
+    | After -> upd 1 (fun tl -> block 0 [| fresh; tl |]) l
+  else upd 1 (place a fresh placement) l
 
-let ind_repeat user canonical ~first disk =
+(* forge.ml ind-canonical (Replace) and ind-repeat (Before, After): a fresh
+   action, the one stored Register_ind of [user] with the mutual inductive
+   Dual (its user half, [canonical]), put as [placement] says. *)
+let ind_action placement user canonical disk =
   let retro = retro_of disk in
   let a = find_ind_action retro user in
   let can = find_canonical disk canonical in
   let fresh = with_canonical a can in
-  say "forging: a copy of the Register_ind of %s, with the mutual inductive Dual (%s, %s), goes %s it"
-    user user (kn_to_string can) (if first then "just before" else "just after");
-  with_retro (insert_next_to a fresh ~first retro) disk
+  let named = Printf.sprintf "the mutual inductive Dual (%s, %s)" user (kn_to_string can) in
+  let () =
+    match placement with
+    | Replace -> say "forging: the Register_ind of %s gets %s" user named
+    | Before -> say "forging: a copy of the Register_ind of %s, with %s, goes just before it" user named
+    | After -> say "forging: a copy of the Register_ind of %s, with %s, goes just after it" user named
+  in
+  with_retro (place a fresh placement retro) disk
 
 let () =
   match List.tl (Array.to_list Sys.argv) with
@@ -273,9 +277,10 @@ let () =
   | [ "client"; src; lib; lib_dp; dst ] -> client ~src ~lib ~lib_dp ~dst
   | [ "retro"; src ] -> retro src
   | [ "ind-canonical"; src; dst; user; canonical ] ->
-    rewrite_vo ~src ~dst [ "library", ind_canonical user canonical ]
+    rewrite_vo ~src ~dst [ "library", ind_action Replace user canonical ]
   | [ "ind-repeat"; src; dst; user; canonical; ("first" | "last" as where) ] ->
-    rewrite_vo ~src ~dst [ "library", ind_repeat user canonical ~first:(where = "first") ]
+    let placement = if where = "first" then Before else After in
+    rewrite_vo ~src ~dst [ "library", ind_action placement user canonical ]
   | _ ->
     prerr_endline
       "usage: ocaml forge.ml int0 LIB.vo OUT.vo LABEL\n\
