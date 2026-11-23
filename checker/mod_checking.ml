@@ -88,12 +88,22 @@ and compile_module_bytecode : 'a. env -> Vmlibrary.t -> ModPath.t ->
    index of the inductive type in the block, and the primitive. *)
 type ind_registration = MutInd.t * int * CPrimitives.prim_ind_ex
 
-(* The registrations of the library that the walk has not met yet. The
-   user name of an inductive type maps to every entry that the library
-   stores for it, in the order of the stored list ([get_retroknowlege]):
-   the first entry, and the later ones last first. *)
+(* The entries that the library stores for the user name of an inductive
+   type and that no visit of the walk has consumed yet, at least one, in
+   stored order: [first], the first of them, and [later], the others
+   ([get_retroknowlege]); and [declared], the declared name of the last
+   visit that met the user name and left them, or [None] if no visit has
+   met it ([consume_ind_registrations]). *)
+type ind_entries = {
+  declared : MutInd.t option;
+  first : ind_registration;
+  later : ind_registration list;
+}
+
+(* The registrations of the library that the walk has not consumed yet,
+   inductive types by user name. *)
 type check_state = {
-  st_retro : (ind_registration * ind_registration list) Mindmap_env.t * CPrimitives.prim_type_ex Cmap_env.t;
+  st_retro : ind_entries Mindmap_env.t * CPrimitives.prim_type_ex Cmap_env.t;
 }
 
 let empty_state = {
@@ -198,34 +208,84 @@ let check_primitive_operator env kn cb op =
   check_primitive_typing refuse env cb (CPrimitives.OT_op op)
     ~mismatch:(str "its type is not the operator's")
 
-(* [first] and [later] are the entries that the library stores for the user
-   name of the declared [kn]. [Safe_typing.import] puts [first] in force for
-   later libraries ([Primred.add_retroknowledge]) with its stored canonical
-   name, which conversion compares: [B] registered as bool under the
-   canonical name of [U := u1 | u2 (_ : False)] would let a primitive [ltb]
-   returning [U] compute [u2] with no argument, a closed proof of False
-   (test-suite/misc/rocqchk_register_ind_canonical.sh). So the first entry,
-   in stored order, whose canonical half is not [kn]'s is refused, in force
-   or not; coqc stores a registration made twice as two identical entries.
+(* The refusal of [stored], the first entry of a user name that the walk
+   has left at the end of the library ([consume_ind_registrations]):
+   [declared] is the name that the last visit of the user name declared.
+
+   [Safe_typing.import] puts a stored registration of a primitive inductive
+   type in force for later libraries ([Primred.add_retroknowledge]) with its
+   stored canonical name, which conversion compares: [B] registered as bool
+   under the canonical name of [U := u1 | u2 (_ : False)] would let a
+   primitive [ltb] returning [U] compute [u2] with no argument, a closed
+   proof of False (test-suite/misc/rocqchk_register_ind_canonical.sh).
    Unlike a primitive type's ([get_retroknowlege]), the user half may
-   differ: through a module alias or an [Include], it is the alias's and the
-   canonical half the original's, as in [kn] where the walk meets the
-   alias. [CheckInductive.check_inductive] checks the result, [first]'s
-   index and primitive, with [kn]. *)
-let check_ind_registration kn (first, later) =
-  let check_canonical (stored, _, CPrimitives.PIE prm) =
-    if not (MutInd.CanOrd.equal stored kn) then
-      CErrors.user_err
-        (KerName.print (MutInd.user kn) ++
-         str " is registered as the primitive inductive type " ++
-         str (CPrimitives.prim_ind_to_string prm) ++
-         str ", but the registration gives it the canonical name " ++
-         KerName.print (MutInd.canonical stored) ++ str ", not " ++
-         KerName.print (MutInd.canonical kn) ++ str ".")
+   differ from the canonical one: through a module alias or an [Include],
+   it is the alias's and the canonical half the original's, as in the
+   declared name where the walk meets the alias.
+
+   So the walk consumes an entry only at the visit of an inductive block
+   whose declared name [kn] has the entry's canonical half
+   ([consume_ind_registrations]), outside any functor body
+   ([check_signature]), module type declaration or functor parameter
+   ([check_module_type]). The visit checks the block under [kn], with the
+   shape of the primitive ([CheckInductive.check_inductive]), and [kn]'s
+   canonical half ([Subtyping.check_inductive_alias]), and an entry that no
+   visit consumes refuses the library: here if a visit left it, and at
+   [check_module]'s refusal of an unknown inductive if no visit met it.
+   So every stored entry that [Safe_typing.import] can put in force
+   names, by its canonical half, an inductive type that the walk checked.
+   coqc stores a registration made twice as two identical entries, which
+   one visit consumes.
+
+   The refusal waits for the end of the library ([check_module]), because
+   an entry that one visit leaves, a later one can consume: [check_module]
+   visits the type of a [Struct] module before its implementation, and the
+   two can give the user name different canonical halves. For
+   [Module M : S. Include N. Register B as kernel.ind_bool. End M.], coqc
+   stores (M.B, N.B), user half first: the visit of M's type, which
+   declares (M.B, M.B), leaves it, and the visit of M's implementation,
+   which declares (M.B, N.B), consumes it. [Register M.B as
+   kernel.ind_bool.] after [End M] stores (M.B, M.B), which the visit of
+   M's type consumes. Each visit passes the index and the primitive of the
+   first entry that it consumes to [CheckInductive.check_inductive], which
+   checks them there. Every entry of a user name has the primitive of the
+   first ([get_retroknowlege]), and [Primred.check_same_inds], which
+   compares the user name and the index, refuses two entries with
+   different indices: at the second [Primred.add_retroknowledge] of the
+   walk, when two visits consume them, and at [Safe_typing.import], which
+   adds every stored entry and which rocqchk runs on the library once it
+   is checked ([Safe_checking.import]). *)
+let refuse_ind_registration declared (stored, _, CPrimitives.PIE prm) =
+  CErrors.user_err
+    (KerName.print (MutInd.user declared) ++
+     str " is registered as the primitive inductive type " ++
+     str (CPrimitives.prim_ind_to_string prm) ++
+     str ", but the registration gives it the canonical name " ++
+     KerName.print (MutInd.canonical stored) ++ str ", not " ++
+     KerName.print (MutInd.canonical declared) ++ str ".")
+
+(* The visit of an inductive block declared as [kn], given the entries of
+   [kn]'s user name, consumes those whose canonical half is [kn]'s. It
+   returns the index and the primitive of the first of them in stored
+   order, or [None] if there is none, and the entries that it leaves, in
+   stored order, with [kn] as their declared name, or [None] if it leaves
+   none. An entry still left at the end of the library is refused there:
+   by [refuse_ind_registration] if a visit left it, and by
+   [check_module]'s refusal of an unknown inductive if no visit met it. *)
+let consume_ind_registrations kn { first; later; _ } =
+  let consumed, left =
+    List.partition (fun (stored, _, _) -> MutInd.CanOrd.equal stored kn)
+      (first :: later)
   in
-  let () = List.iter check_canonical (first :: List.rev later) in
-  let (_, i, prm) = first in
-  (i, prm)
+  let retro = match consumed with
+  | [] -> None
+  | (_, i, prm) :: _ -> Some (i, prm)
+  in
+  let left = match left with
+  | [] -> None
+  | x :: xs -> Some { declared = Some kn; first = x; later = xs }
+  in
+  retro, left
 
 (* coqc registers a primitive type only in a library, or in a module nested
    in it with no functor parameter ([Safe_typing.add_retroknowledge]), for a
@@ -233,13 +293,14 @@ let check_ind_registration kn (first, later) =
    field of the body of its module: of the type of a module that has no
    other implementation ([FullStruct], as a library has), or of the
    implementation of a [Struct] module. Elsewhere, in the type of a sealed,
-   algebraic or declared module, or in the body of a functor, its
-   declaration can be a parameter that an implementation defines: a sealed
-   [int : Set := Empty_set] is [Parameter int : Set] in its module's type.
-   [check_module] therefore checks such a type, and such a functor body,
-   with the constant registrations withheld: [f] gets [st] without them, and
-   the result has them back. A registration that no module body declares is
-   left over, and [check_module] refuses it. *)
+   algebraic or declared module, its declaration can be a parameter that an
+   implementation defines: a sealed [int : Set := Empty_set] is
+   [Parameter int : Set] in its module's type. [check_module] therefore
+   checks such a type with the constant registrations withheld: [f] gets
+   [st] without them, and the result has them back. The body of a functor
+   is checked with no registration pending at all ([check_signature]). A
+   registration that no module body declares is left over, and
+   [check_module] refuses it. *)
 let without_constant_registrations f st =
   let (ind_retro, cst_retro) = st.st_retro in
   let r, st = f { st_retro = (ind_retro, Cmap_env.empty) } in
@@ -727,10 +788,11 @@ and check_structure_field env st mp lab res = function
       let retro, st = match Mindmap_env.find_opt kn (fst st.st_retro) with
       | None -> None, st
       | Some entries ->
-        let retro = check_ind_registration kn entries in
+        let retro, left = consume_ind_registrations kn entries in
         let (ind_retro, cst_retro) = st.st_retro in
-        let st = { st_retro = (Mindmap_env.remove kn ind_retro, cst_retro) } in
-        Some retro, st
+        let ind_retro = Mindmap_env.update kn (fun _ -> left) ind_retro in
+        let st = { st_retro = (ind_retro, cst_retro) } in
+        retro, st
       in
       let env' = CheckInductive.check_inductive env kn mib retro in
       let () = Subtyping.check_inductive_alias env kn mib in
@@ -757,13 +819,24 @@ and check_structure_field env st mp lab res = function
       Environ.add_rewrite_rules rrb.rewrules_rules env, st
 
 (* The registrations in force after the signature, and the state. A functor
-   makes none ([without_constant_registrations]). *)
+   makes no registration and consumes none: coqc registers nothing inside a
+   functor ([Safe_typing.add_retroknowledge] refuses a registration inside
+   a functor or a module type), and a name that a functor body declares,
+   for example with a canonical half in the functor's parameter, is not an
+   inductive type that a later library sees. So the body is checked with
+   no registration pending ([empty_state]), and the state after the
+   functor is the one before it:
+   an entry whose user name only a functor body declares keeps
+   [declared = None], and [check_module] refuses it as an unknown
+   inductive (the set forged-functor of
+   test-suite/misc/rocqchk_register_ind_canonical.sh), as it refuses a
+   constant registration that only a functor body declares. *)
 and check_signature env st sign mp_mse res = match sign with
   | MoreFunctor (arg_id, mtb, body) ->
       let () = check_module_type env (MPbound arg_id) mtb in
       let env' = Modops.add_module_parameter arg_id mtb env in
-      let (_ : Retroknowledge.retroknowledge), st =
-        without_constant_registrations (fun st -> check_signature env' st body mp_mse res) st
+      let (_ : Retroknowledge.retroknowledge), (_ : check_state) =
+        check_signature env' empty_state body mp_mse res
       in
       Environ.retroknowledge env, st
   | NoFunctor struc ->
@@ -841,8 +914,11 @@ let get_retroknowlege env retro =
       (env', imap, cmap, Mindmap_env.add ind (CPrimitives.PIE prm) extind)
     else
       (* [imap] keeps every entry of the user name, with its full name, for
-         [check_ind_registration] to compare with the declared one. The first
-         entry has the primitive of every later one. *)
+         [consume_ind_registrations] to compare with the declared one:
+         during the fold, the first entry and the later ones last first,
+         then, as entries that no visit has met, the first entry and the
+         later ones in stored order. The first entry has the primitive of
+         every later one. *)
       let entry = (ind, i, CPrimitives.PIE prm) in
       let add = function
       | None -> Some (entry, [])
@@ -878,7 +954,8 @@ let get_retroknowlege env retro =
   let (env, imap, cmap, _) =
     List.fold_left fold (env, Mindmap_env.empty, Cmap_env.empty, Mindmap_env.empty) retro
   in
-  env, (imap, cmap)
+  let in_stored_order (first, later) = { declared = None; first; later = List.rev later } in
+  env, (Mindmap_env.map in_stored_order imap, cmap)
 
 (* A checked library goes through this after its check, and an admitted one
    instead of it under -o ([CheckLibrary.check_one_lib]), so the walk above
@@ -898,8 +975,14 @@ let check_module env opac retro mp mb =
   let env, retro = get_retroknowlege env retro in
   let st = { st_retro = retro } in
   let (_ : Retroknowledge.retroknowledge), { st_retro = (imap, cmap) } = check_module env st mp mb in
+  (* An inductive entry left with a declared name is one that the visits
+     of its user name did not consume ([consume_ind_registrations]); one
+     left with none is one that no visit met, as a constant left over is
+     one that no module body declares ([without_constant_registrations]). *)
   let () = match Mindmap_env.choose_opt imap, Cmap_env.choose_opt cmap with
   | None, None -> ()
+  | Some (_, { declared = Some kn; first; _ }), (None | Some _) ->
+    refuse_ind_registration kn first
   | Some (ind, _), (None | Some _) ->
     CErrors.user_err Pp.(str "Retroknowledge registration for unknown inductive " ++ MutInd.print ind ++ str ".")
   | None, Some (cst, _) ->
