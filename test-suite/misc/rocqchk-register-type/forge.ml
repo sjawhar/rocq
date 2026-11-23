@@ -3,7 +3,7 @@
    primitive type, which coqc does only for a parameter that Primitive
    declares. The typing of Int 0 uses the registered constant, so with a
    definition int : Set := Empty_set registered, Int 0 has a type that
-   unfolds to Empty_set. Also print, rewrite and repeat a stored
+   unfolds to Empty_set. Also print, rewrite, rename and repeat a stored
    registration of a primitive inductive type, for
    rocqchk_register_ind_canonical.sh. The helpers, and the value layouts
    they rely on, are those of misc/rocqchk_forge_lib.ml; this file also
@@ -24,9 +24,9 @@
    - term: Int is tag 17 [uint63], an immediate integer on a 64-bit
      platform.
 
-   retro, ind-canonical and ind-repeat read a constant_body only at its
-   fields 2 and 3 (map_cb, cb_inductives), and compiled_library only at
-   fields 1 and 6, so that they also read upstream's layout, whose
+   retro, ind-canonical, ind-name and ind-repeat read a constant_body only
+   at its fields 2 and 3 (map_cb, cb_inductives), and compiled_library only
+   at fields 1 and 6, so that they also read upstream's layout, whose
    constant_body has 10 fields.
 
    Commands (each but retro writes a new file; the input is left as it is):
@@ -51,21 +51,26 @@
        USER gets the mutual inductive Dual (that user half, CANONICAL), in a
        fresh action, also when CANONICAL is USER; every other action stays
        as it is;
+     forge.ml ind-name LIB.vo OUT.vo USER NEWUSER CANONICAL
+       as ind-canonical, but the fresh action's mutual inductive is Dual
+       (NEWUSER, CANONICAL): the registration gets another user name too;
      forge.ml ind-repeat LIB.vo OUT.vo USER CANONICAL first|last
        a fresh copy of that one action, with the mutual inductive Dual (its
        user half, CANONICAL) and the same index and primitive, goes just
        before it (first) or just after it (last) in the stored list.
-     USER and CANONICAL are full names, such as RegInd.Lib.B. CANONICAL is
-     the canonical half of an inductive that a constant of the library
-     names, in its type or its body; its kernel name, hash included, is
-     taken from there. ind-canonical and ind-repeat write nothing and exit
-     1 when no stored Register_ind, or more than one, has the user half
-     USER, or when no constant of the library names an inductive with the
-     canonical half CANONICAL.
+     USER, NEWUSER and CANONICAL are full names, such as RegInd.Lib.B.
+     NEWUSER is the user half, and CANONICAL the canonical half, of an
+     inductive that a constant of the library names, in its type or its
+     body, in a module, a module type or a functor body too
+     (struc_constants); its kernel name, hash included, is taken from
+     there. ind-canonical, ind-name and ind-repeat write nothing and exit 1
+     when no stored Register_ind, or more than one, has the user half USER,
+     or when no constant of the library names an inductive with the user
+     half NEWUSER or the canonical half CANONICAL.
 
    misc/rocqchk_repeated_label.sh runs int0 and register too, and
    misc/rocqchk_register_ind_canonical.sh runs retro, ind-canonical,
-   ind-repeat and client. *)
+   ind-name, ind-repeat and client. *)
 
 #use "./misc/rocqchk_forge_lib.ml";;
 
@@ -151,8 +156,9 @@ let register name canonical disk =
 
 (* {1 Registrations of primitive inductive types} *)
 
-(* forge.ml ind-canonical and ind-repeat refuse their arguments this way:
-   a message on the standard error, exit status 1, and no file written. *)
+(* forge.ml ind-canonical, ind-name and ind-repeat refuse their arguments
+   this way: a message on the standard error, exit status 1, and no file
+   written. *)
 let refuse fmt = Printf.ksprintf (fun s -> prerr_endline ("forge.ml: " ^ s); exit 1) fmt
 
 let prim_ind_names = [| "bool"; "carry"; "pair"; "cmp"; "f_cmp"; "f_class" |]
@@ -221,23 +227,22 @@ let find_ind_action retro user =
   | [] -> refuse "no stored Register_ind action has the user name %s" user
   | l -> refuse "%d stored Register_ind actions have the user name %s, not one" (List.length l) user
 
-(* The kernel name, hash included, of the canonical half [name] of a mutual
-   inductive that a constant of the library names. *)
-let find_canonical disk name =
-  let canonical m = snd (halves "an inductive a constant names" m) in
-  match find_name ~names:cb_inductives canonical disk name with
+(* The kernel name, hash included, of the half [name] of a mutual inductive
+   that a constant of the library names: the user half, [what] = "user",
+   with [half] = fst, or the canonical half, "canonical", with snd. *)
+let find_ind_half what half disk name =
+  let project m = half (halves "an inductive a constant names" m) in
+  match find_name ~names:cb_inductives project disk name with
   | Some kn -> kn
-  | None -> refuse "no constant of the library names an inductive with the canonical name %s" name
+  | None -> refuse "no constant of the library names an inductive with the %s name %s" what name
 
 (* A fresh Register_ind action: [a]'s primitive and index, and the mutual
-   inductive Dual ([a]'s user half, [can]), in fresh blocks. *)
-let with_canonical a can =
-  let ind = field a 1 in
-  let user = cst_user (field ind 0) in
-  block 0 [| field a 0; block 0 [| dual user can; field ind 1 |] |]
+   inductive Dual ([user], [can]), in fresh blocks. *)
+let with_names a user can =
+  block 0 [| field a 0; block 0 [| dual user can; field (field a 1) 1 |] |]
 
-(* Where ind-canonical and ind-repeat put the fresh action: in place of the
-   action it copies, or just before it, or just after it. *)
+(* Where ind-canonical, ind-name and ind-repeat put the fresh action: in
+   place of the action it copies, or just before it, or just after it. *)
 type placement = Replace | Before | After
 
 (* [l] with [fresh] put as [placement] says at the cell that holds [a]; only
@@ -251,15 +256,24 @@ let rec place a fresh placement l =
     | After -> upd 1 (fun tl -> block 0 [| fresh; tl |]) l
   else upd 1 (place a fresh placement) l
 
-(* forge.ml ind-canonical (Replace) and ind-repeat (Before, After): a fresh
-   action, the one stored Register_ind of [user] with the mutual inductive
-   Dual (its user half, [canonical]), put as [placement] says. *)
-let ind_action placement user canonical disk =
+(* forge.ml ind-canonical (Replace), ind-name (Replace, with [new_user]) and
+   ind-repeat (Before, After): a fresh action, the one stored Register_ind
+   of [user] with the mutual inductive Dual (the user half [new_user] if it
+   is given, else its own user half, [canonical]), put as [placement]
+   says. *)
+let ind_action ?new_user placement user canonical disk =
   let retro = retro_of disk in
   let a = find_ind_action retro user in
-  let can = find_canonical disk canonical in
-  let fresh = with_canonical a can in
-  let named = Printf.sprintf "the mutual inductive Dual (%s, %s)" user (kn_to_string can) in
+  let new_user =
+    match new_user with
+    | None -> cst_user (field (field a 1) 0)
+    | Some name -> find_ind_half "user" fst disk name
+  in
+  let can = find_ind_half "canonical" snd disk canonical in
+  let fresh = with_names a new_user can in
+  let named =
+    Printf.sprintf "the mutual inductive Dual (%s, %s)" (kn_to_string new_user) (kn_to_string can)
+  in
   let () =
     match placement with
     | Replace -> say "forging: the Register_ind of %s gets %s" user named
@@ -278,6 +292,8 @@ let () =
   | [ "retro"; src ] -> retro src
   | [ "ind-canonical"; src; dst; user; canonical ] ->
     rewrite_vo ~src ~dst [ "library", ind_action Replace user canonical ]
+  | [ "ind-name"; src; dst; user; new_user; canonical ] ->
+    rewrite_vo ~src ~dst [ "library", ind_action ~new_user Replace user canonical ]
   | [ "ind-repeat"; src; dst; user; canonical; ("first" | "last" as where) ] ->
     let placement = if where = "first" then Before else After in
     rewrite_vo ~src ~dst [ "library", ind_action placement user canonical ]
@@ -288,5 +304,6 @@ let () =
       \       | client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo\n\
       \       | retro LIB.vo\n\
       \       | ind-canonical LIB.vo OUT.vo USER CANONICAL\n\
+      \       | ind-name LIB.vo OUT.vo USER NEWUSER CANONICAL\n\
       \       | ind-repeat LIB.vo OUT.vo USER CANONICAL first|last";
     exit 2

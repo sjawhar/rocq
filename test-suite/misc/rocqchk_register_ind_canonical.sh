@@ -15,7 +15,10 @@
 # Include, whose user and canonical names can differ, and one made inside
 # a sealed module or after it: rocqchk checks the module's type before its
 # implementation, and the two give the registered name different canonical
-# names.
+# names. It also proves that rocqchk refuses a registration whose user
+# name only the body of a functor declares: coqc never registers inside a
+# functor, and a type that a functor body declares is not one that a later
+# library sees.
 #
 # The files. The sources are in misc/rocqchk-register-ind-canonical/, each
 # compiled with $coqc -noinit -R <dir> RegInd in its own directory under
@@ -37,6 +40,12 @@
 # - repeated-last: repeated-last/Lib.vo, C with (B, U) just after its
 #   entry (ind-repeat ... last): (B, B), then (B, U);
 # - operator-control: operator-control/Lib.vo, a copy of C;
+# - functor: functor/Lib.vo, from functor/Lib.v: B registered as bool, as
+#   in C, then Module Type T and Module F (X : T), whose body declares a B
+#   of its own and f : B -> B;
+# - forged-functor: forged-functor/Lib.vo, functor/Lib.vo with its entry
+#   (B, B) written (F.B, F.B), by forge.ml ind-name RegInd.Lib.B
+#   RegInd.Lib.F.B RegInd.Lib.F.B, with the kernel names that f names;
 # - A1: alias/Lib.vo, from alias/Lib.v: Module M := N, then Register M.B;
 #   one entry with the user name RegInd.Lib.M.B;
 # - A2: include/Lib.vo, from include/Lib.v: Module M. Include N. End M.,
@@ -44,9 +53,9 @@
 # - A3: sealed/Lib.vo, from sealed/Lib.v: Module Type S and Module N, each
 #   declaring B, then Module M : S. Include N. Register B as
 #   kernel.ind_bool. End M.; the same rule;
-# - A4: sealedtop/Lib.vo, from sealedtop/Lib.v: S and N as in A3, then
+# - A4: sealed-top/Lib.vo, from sealed-top/Lib.v: S and N as in A3, then
 #   Module M : S. Include N. End M., then Register M.B; the same rule;
-# - alias/Client.vo, include/Client.vo and sealedtop/Client.vo: Client.v,
+# - alias/Client.vo, include/Client.vo and sealed-top/Client.vo: Client.v,
 #   compiled in each of the three directories against its library, A1, A2
 #   or A4; its ltb returns M.B;
 # - sealed/ClientN.vo: ClientN.v, compiled against A3; its ltb returns
@@ -62,53 +71,63 @@
 # The sets, in the order they run. Each runs as a grader runs rocqchk
 # (mode grader) and with the default options (mode default), as mode_args
 # builds them. forged, repeated and repeated-last run the library alone,
-# then with the client: 14 runs per mode, 28 in all.
-#   set               library        client              must be
-#   honest            C              D_B                 accepted
-#   control           control        D_B, relinked       accepted
-#   honest-repeated   C''            D_B, relinked       accepted
-#   honest-alias      A1             alias/Client.vo     accepted
-#   honest-include    A2             include/Client.vo   accepted
-#   honest-sealed     A3             sealed/ClientN.vo   accepted
-#   honest-sealed-top A4             sealedtop/Client.vo accepted
-#   forged            C'             D_U                 refused, D3, on C
-#   repeated          C'''           D_U, relinked       refused, D3, on C
-#   repeated-last     repeated-last  D_B, relinked       refused, D3, on C
-#   operator-control  C              D_U, relinked       refused by
-#                                                        check_primitive_operator,
-#                                                        on the client
+# then with the client, and forged-functor the library alone only: 15
+# runs per mode, 30 in all.
+#   set               library        client               must be
+#   honest            C              D_B                  accepted
+#   control           control        D_B, relinked        accepted
+#   honest-repeated   C''            D_B, relinked        accepted
+#   honest-alias      A1             alias/Client.vo      accepted
+#   honest-include    A2             include/Client.vo    accepted
+#   honest-sealed     A3             sealed/ClientN.vo    accepted
+#   honest-sealed-top A4             sealed-top/Client.vo accepted
+#   forged            C'             D_U                  refused, D3, on C
+#   repeated          C'''           D_U, relinked        refused, D3, on C
+#   repeated-last     repeated-last  D_B, relinked        refused, D3, on C
+#   operator-control  C              D_U, relinked        refused by
+#                                                         check_primitive_operator,
+#                                                         on the client
+#   forged-functor    forged-functor none                 refused, unknown F.B
 # D3 is the line rocqchk prints for the refusal of the stored canonical
 # name, exactly as classify spells it. A refusal with the client is on C
 # when the library alone, in the same mode, is refused with the same error
 # line, and on the client when the library alone is accepted. C alone is
 # not run again for operator-control: the honest set's run of the same mode
-# checks C first, so its acceptance is C's.
+# checks C first, so its acceptance is C's. unknown F.B is the line
+# rocqchk prints for the refusal of a registration of an unknown
+# inductive, exactly: "Fatal Error: User error: Retroknowledge registration
+# for unknown inductive RegInd.Lib.F.B.".
 #
 # Before the runs of a set, the test prints forge.ml retro of its library,
 # and "valid" when the print shows the entries above (for A1 to A4: one
 # entry, index 0, prim bool, user RegInd.Lib.M.B, with "shape: user !=
 # canonical" or a NOTE that the set does not test that shape), else VOID: a
-# run on a VOID library counts as void. A refusal by check_module's
-# "unknown inductive" or by Safe_typing.check_register_ind voids the run:
-# those are the refusals of a badly built forgery. A coqc refusal of one of
-# A1 to A4 or of its client drops that set, with coqc's error, and the test
-# runs the other sets; any other compile or forge failure stops the test
-# before its first verdict. The output names no scratch path and no time,
-# so two runs print the same bytes. The test exits 0 only when no set is
-# dropped, every library is valid, every run is as the table says, and
-# none is void: A1, A2 and A3 are the only sets in which coqc stores a user
-# name and a canonical name that differ, and a check that compares the
-# wrong halves passes without them. In A3 and A4, the type of M, which
-# rocqchk checks before its implementation, gives M.B another canonical
-# name than the implementation does; the registration of A3 has the
-# implementation's, and that of A4 the type's. So a check that refuses a
-# registration that the type of M does not match passes without A3, and a
-# check that matches registrations only in the implementation passes
-# without A4. Where coqc stores equal halves for one of A1 to A4, the set
-# still runs and must be accepted, and its NOTE says that it does not test
-# that shape; the NOTE does not fail the test, and A4 is expected to print
-# it. Without the check, rocqchk accepts forged, repeated and
-# repeated-last, and the test exits 1 after printing every line.
+# run on a VOID library counts as void. In every set but forged-functor, a
+# refusal by check_module's "unknown inductive" or by
+# Safe_typing.check_register_ind voids the run: those are the refusals of
+# a badly built forgery. forged-functor is outside that rule: its run is as
+# the table says when its error line is unknown F.B, and not as the table
+# says otherwise. A coqc refusal of one of A1 to A4 or of its client drops
+# that set, with coqc's error, and the test runs the other sets; any other
+# compile or forge failure stops the test before its first verdict. The
+# output names no scratch path and no time, so two runs print the same
+# bytes. The test exits 0 only when no set is dropped, every library is
+# valid, every run is as the table says, and none is void: A1, A2 and A3
+# are the only sets in which coqc stores a user name and a canonical name
+# that differ, and a check that compares the wrong halves passes without
+# them. In A3 and A4, the type of M, which rocqchk checks before its
+# implementation, gives M.B another canonical name than the implementation
+# does; the registration of A3 has the implementation's, and that of A4
+# the type's. So a check that refuses a registration that the type of M
+# does not match passes without A3, and a check that matches registrations
+# only in the implementation passes without A4. Where coqc stores equal
+# halves for one of A1 to A4, the set still runs and must be accepted, and
+# its NOTE says that it does not test that shape; the NOTE does not fail
+# the test, and A4 is expected to print it. Without the check, rocqchk
+# accepts forged, repeated and repeated-last, and the test exits 1 after
+# printing every line. A checker that walks a functor body with the
+# registrations pending consumes the entry of forged-functor at the visit
+# of F.B in that body and accepts the library, and the test exits 1 too.
 
 set -e
 
@@ -200,18 +219,19 @@ relink honest/ClientB.vo twice
 relink forged/ClientU.vo repeated
 relink honest/ClientB.vo repeated-last
 relink forged/ClientU.vo operator-control
+build functor functor/Lib.v
+mkdir "$d/forged-functor"
+forge ind-name "$d/functor/Lib.vo" "$d/forged-functor/Lib.vo" RegInd.Lib.B RegInd.Lib.F.B RegInd.Lib.F.B
 
-# A1 to A4, each with its client: a coqc refusal drops the set. set_of
-# and client_of give the set and the client of each directory.
+# A1 to A4, each with its client: a coqc refusal drops the set honest-<dir>.
+# client_of gives the client of each directory.
 declare -A dropped_set
-declare -A set_of=([alias]=honest-alias [include]=honest-include
-  [sealed]=honest-sealed [sealedtop]=honest-sealed-top)
 declare -A client_of=([alias]=Client [include]=Client [sealed]=ClientN
-  [sealedtop]=Client)
-for dir in alias include sealed sealedtop; do
+  [sealed-top]=Client)
+for dir in alias include sealed sealed-top; do
   for f in "$dir/Lib.v" "${client_of[$dir]}.v"; do
     if ! coq "$dir" "$f"; then
-      echo "coqc refused $dir/${f##*/}; the set ${set_of[$dir]} is dropped; coqc printed:"
+      echo "coqc refused $dir/${f##*/}; the set honest-$dir is dropped; coqc printed:"
       scrub < "$d/step.log"
       dropped_set[$dir]=1
       break
@@ -223,7 +243,7 @@ done
 # failure stops the test before its first verdict; valid and valid_shape
 # print them before the runs of the set.
 declare -A retro_out
-for dir in honest control twice forged repeated repeated-last operator-control alias include sealed sealedtop; do
+for dir in honest control twice forged repeated repeated-last operator-control alias include sealed sealed-top forged-functor; do
   if [ -z "${dropped_set[$dir]-}" ]; then
     retro_out[$dir]=$(ocaml "$FORGE" retro "$d/$dir/Lib.vo" 2> "$d/step.log") ||
       stop "forge.ml retro $dir/Lib.vo failed:" "$d/step.log"
@@ -252,9 +272,10 @@ error_line() {
 # refusal the table expects of forged, repeated and repeated-last),
 # d3-names (the same refusal of other names: not as the table says),
 # operator (the refusal the table expects of operator-control), void (a
-# refusal of a badly built forgery), recorded (a refusal by another check
-# of the registrations, not as the table says), none (no error line) or
-# unclassified.
+# refusal of a badly built forgery, but for forged-functor, whose run
+# counts the refusal that the table expects of it outside that rule),
+# recorded (a refusal by another check of the registrations, not as the
+# table says), none (no error line) or unclassified.
 classify() {
   local t=$1
   local d3='RegInd.Lib.B is registered as the primitive inductive type bool, but the registration gives it the canonical name RegInd.Lib.U, not RegInd.Lib.B.'
@@ -356,6 +377,9 @@ valid_shape() {
 a=0 u=0 v=0 dropped=0
 declare -A rc_of line_of
 
+# unknown F.B, the error line that the table expects of forged-functor.
+unknown_fb='Fatal Error: User error: Retroknowledge registration for unknown inductive RegInd.Lib.F.B.'
+
 # run <set> <dir> <mode> <client or ""> <expected> <reference>: rocqchk on
 # RegInd.Lib in $d/<dir>, and RegInd.<client> if it is given, in <mode>,
 # within 300 s. Print its verdict, its error line and the refusing check,
@@ -365,8 +389,10 @@ declare -A rc_of line_of
 # of a run recorded before (forged/alone: the library alone in this mode;
 # honest/client: the honest set's run in this mode), print where the
 # refusal is. Count the run against <expected>: accepted, d3 (refused with
-# the D3 line, and on C with the client) or operator (refused by
-# check_primitive_operator, on the client).
+# the D3 line, and on C with the client), operator (refused by
+# check_primitive_operator, on the client) or unknown (refused with the
+# line unknown F.B, which classify rows void: such a run is counted outside
+# the rule that a void row voids the run).
 run() {
   local set=$1 dir=$2 mode=$3 client=$4 expected=$5 reference=$6
   local kind=alone shown="library alone" rc=0 line='' next='' row=accepted check=''
@@ -420,11 +446,14 @@ run() {
     operator)
       want="refused by check_primitive_operator, on the client"
       if [ "$rc" != 0 ] && [ "$row" = operator ] && [ "$where" = "on the client" ]; then ok=1; fi ;;
+    unknown)
+      want="refused with the line unknown F.B"
+      if [ "$rc" != 0 ] && [ "$line" = "$unknown_fb" ]; then ok=1; fi ;;
   esac
   if [ "$lib_ok" != 1 ]; then
     v=$((v + 1))
     echo "  result: void: the library is VOID"
-  elif [ "$row" = void ]; then
+  elif [ "$row" = void ] && [ "$expected" != unknown ]; then
     v=$((v + 1))
     echo "  result: void: refused by a check that refuses a badly built forgery"
   elif [ -n "$ok" ]; then
@@ -439,6 +468,7 @@ run() {
 # runs <set> <dir> <client> <expected> [<reference>]: the runs of a set in
 # both modes, with <reference> for each run with the client (run); when
 # <reference> is <set>/alone, the library alone runs first in each mode.
+# With the client "", each mode runs the library alone only.
 runs() {
   local mode
   for mode in grader default; do
@@ -449,6 +479,7 @@ runs() {
 
 bb='user=RegInd.Lib.B canonical=RegInd.Lib.B index=0 prim=bool'
 bu='user=RegInd.Lib.B canonical=RegInd.Lib.U index=0 prim=bool'
+fb='user=RegInd.Lib.F.B canonical=RegInd.Lib.F.B index=0 prim=bool'
 int_type='constant=RegInd.Lib.int prim=int63_type'
 
 valid honest honest "$bb" "$int_type"
@@ -461,13 +492,13 @@ runs control control ClientB accepted
 valid honest-repeated twice "$bb; $bb" "$c_others"
 runs honest-repeated twice ClientB accepted
 
-for dir in alias include sealed sealedtop; do
+for dir in alias include sealed sealed-top; do
   if [ -n "${dropped_set[$dir]-}" ]; then
-    echo "set ${set_of[$dir]}: dropped (coqc refused a file of $dir/), 2 runs"
+    echo "set honest-$dir: dropped (coqc refused a file of $dir/), 2 runs"
     dropped=$((dropped + 2))
   else
-    valid_shape "${set_of[$dir]}" "$dir" "$int_type"
-    runs "${set_of[$dir]}" "$dir" "${client_of[$dir]}" accepted
+    valid_shape "honest-$dir" "$dir" "$int_type"
+    runs "honest-$dir" "$dir" "${client_of[$dir]}" accepted
   fi
 done
 
@@ -483,10 +514,13 @@ runs repeated-last repeated-last ClientB d3 repeated-last/alone
 valid operator-control operator-control "$bb" "$c_others"
 runs operator-control operator-control ClientU operator honest/client
 
+valid forged-functor forged-functor "$fb" "$int_type"
+runs forged-functor forged-functor "" unknown
+
 total=$((a + u + v + dropped))
-if [ "$total" != 28 ]; then echo "the test counted $total runs, not 28"; fi
+if [ "$total" != 30 ]; then echo "the test counted $total runs, not 30"; fi
 echo "ran $total runs: $a as the table says, $u not as the table says, $v void, $dropped dropped"
-if [ "$total" = 28 ] && [ "$dropped" = 0 ] && [ "$all_valid" = 1 ] && [ "$u" = 0 ] && [ "$v" = 0 ]; then
+if [ "$total" = 30 ] && [ "$dropped" = 0 ] && [ "$all_valid" = 1 ] && [ "$u" = 0 ] && [ "$v" = 0 ]; then
   exit 0
 fi
 exit 1
