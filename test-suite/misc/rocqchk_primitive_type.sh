@@ -35,8 +35,7 @@ EOF
 for vm in yes no; do
   must_accept "$d/honest-$vm.log" "rocqchk -bytecode-compiler $vm refused the honest Bogus.vo" \
     -silent -o -bytecode-compiler $vm -Q "$d/honest" PrimitiveType -norec PrimitiveType.Bogus
-  section 'Axioms' "$d/honest-$vm.log" | sed -n 's/^    //p' |
-    LC_ALL=C sort > "$d/axioms-$vm"
+  axiom_names "$d/honest-$vm.log" > "$d/axioms-$vm"
   if ! diff -u "$d/expected" "$d/axioms-$vm"; then
     echo "rocqchk -o -bytecode-compiler $vm does not list the primitive bogus among the axioms"
     cat "$d/honest-$vm.log"
