@@ -1,6 +1,7 @@
 (* Forge the .vo files of misc/rocqchk_delta_alias.sh,
    misc/rocqchk_forged_aliases.sh, misc/rocqchk_register_type.sh,
-   misc/rocqchk_primitive_operator.sh and misc/rocqchk_repeated_label.sh.
+   misc/rocqchk_primitive_operator.sh, misc/rocqchk_repeated_label.sh and
+   misc/rocqchk_copied_body.sh.
    The code is deliberately independent of Rocq's OCaml libraries: this is
    an untrusted file producer, not another path through the kernel API.
 
@@ -38,6 +39,11 @@
    ocaml forge.ml rename-constructor LIB.vo OUT.vo BLOCK FROM TO
      Give the constructor FROM of the inductive block BLOCK of LIB.vo the
      name TO.
+   ocaml forge.ml copy-body LIB.vo OUT.vo MODULE FROM INTO
+     Give the constant INTO of the module MODULE of LIB.vo the body of the
+     constant FROM of the same module. In a copy that an Include makes,
+     each body is a definition of the copied constant, so INTO becomes a
+     definition of another constant than the one its name resolves to.
    ocaml forge.ml client CLIENT.vo LIB.vo LIB_DIRPATH OUT.vo
      Record the digest of LIB.vo as that of the dependency LIB_DIRPATH of
      CLIENT.vo, so that a client compiled against another library loads
@@ -468,6 +474,12 @@ let set_digest dp digest deps =
   if deps' == deps then failwith ("no dependency " ^ dp);
   deps'
 
+(* The structure [root] with the body of the constant [into] of its module
+   [m] replaced by the body of the constant [from] of [m]. *)
+let copy_body m from into root =
+  let body = field (get from (struc (get m root))) 2 in
+  on m (on_struc (on into (upd 2 (fun _ -> body)))) root
+
 let marshalled f data = Marshal.to_string (f (Marshal.from_string data 0)) []
 
 let () =
@@ -488,6 +500,8 @@ let () =
   | [ "relabel"; src; dst; from; into ] -> rewrite src dst (forge (relabel from into))
   | [ "rename-constructor"; src; dst; ind; from; into ] ->
     rewrite src dst (forge (rename_constructor ind from into))
+  | [ "copy-body"; src; dst; m; from; into ] ->
+    rewrite src dst (forge (copy_body m from into))
   | [ "client"; src; lib; dp; dst ] ->
     let library, _ = find_segment "library" (snd (read_vo lib)) in
     rewrite src dst
