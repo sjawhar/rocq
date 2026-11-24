@@ -825,10 +825,9 @@ and check_structure_field env st mp lab res = function
    for example with a canonical half in the functor's parameter, is not an
    inductive type that a later library sees. So the body is checked with
    no registration pending ([empty_state]), and the state after the
-   functor is the one before it:
-   an entry whose user name only a functor body declares keeps
-   [declared = None], and [check_module] refuses it as an unknown
-   inductive (the set forged-functor of
+   functor is the one before it: an entry whose user name only a functor
+   body declares keeps [declared = None], and [check_module] refuses it as
+   an unknown inductive (the set forged-functor of
    test-suite/misc/rocqchk_register_ind_canonical.sh), as it refuses a
    constant registration that only a functor body declares. *)
 and check_signature env st sign mp_mse res = match sign with
