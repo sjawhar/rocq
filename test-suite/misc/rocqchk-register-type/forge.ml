@@ -5,9 +5,10 @@
    definition int : Set := Empty_set registered, Int 0 has a type that
    unfolds to Empty_set. Also print, rewrite, rename and repeat a stored
    registration of a primitive inductive type, for
-   rocqchk_register_ind_canonical.sh. The helpers, and the value layouts
-   they rely on, are those of misc/rocqchk_forge_lib.ml; this file also
-   relies on these, from checker/values.ml:
+   rocqchk_register_ind_canonical.sh and rocqchk_register_ind_label.sh.
+   The helpers, and the value layouts they rely on, are those of
+   misc/rocqchk_forge_lib.ml; this file also relies on these, from
+   checker/values.ml:
 
    - compiled_library field 6: comp_retro, a list of retro_action, newest
      first (Safe_typing.add_retroknowledge prepends);
@@ -68,9 +69,10 @@
      or when no constant of the library names an inductive with the user
      half NEWUSER or the canonical half CANONICAL.
 
-   misc/rocqchk_repeated_label.sh runs int0 and register too, and
+   misc/rocqchk_repeated_label.sh runs int0 and register too,
    misc/rocqchk_register_ind_canonical.sh runs retro, ind-canonical,
-   ind-name, ind-repeat and client. *)
+   ind-name, ind-repeat and client, and misc/rocqchk_register_ind_label.sh
+   runs ind-canonical and retro. *)
 
 #use "./misc/rocqchk_forge_lib.ml";;
 
