@@ -2,8 +2,8 @@
 # rocqchk_sigalias.sh, rocqchk_alias_label.sh, rocqchk_nested_resolver.sh,
 # rocqchk_inline_hint.sh, rocqchk_alias_rewrite_rule.sh,
 # rocqchk_primitive_type.sh, rocqchk_register_type.sh,
-# rocqchk_repeated_label.sh and rocqchk_register_ind_canonical.sh. Each
-# sources it with
+# rocqchk_repeated_label.sh, rocqchk_register_ind_canonical.sh and
+# rocqchk_register_ind_label.sh. Each sources it with
 #
 #   . misc/rocqchk_forge_common.bash
 #
