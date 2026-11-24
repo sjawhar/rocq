@@ -154,7 +154,10 @@ let get_mod env mp view l =
       cached pair;
     - conversion compares constant references up to the delta resolver
       (canonical names), so a successful check is independent of the
-      user-level path under which physically equal bodies are reached.
+      user-level path under which physically equal bodies are reached;
+    - except for a primitive field, whose check reads the field's own
+      path (see [implements_same_primitive]): [cache_add] does not add
+      a primitive field.
 
     The cache is indexed by the label of the field — whose hash is cheap,
     and which is stable across the module paths under which the same
@@ -175,14 +178,17 @@ let cache_mem l cb1 cb2 =
   | Some pairs -> List.exists (fun (c1, c2) -> c1 == cb1 && c2 == cb2) pairs
 
 let cache_add l cb1 cb2 =
-  let prev = match LabTbl.find_opt cb_cache l with
-    | None -> []
-    | Some pairs ->
-      if List.length pairs >= cache_max_gen
-      then CList.firstn (cache_max_gen - 1) pairs
-      else pairs
-  in
-  LabTbl.replace cb_cache l ((cb1, cb2) :: prev)
+  match cb2.const_body with
+  | Primitive _ -> () (* not cached, see above *)
+  | Undef _ | Def _ | OpaqueDef _ | Symbol _ ->
+    let prev = match LabTbl.find_opt cb_cache l with
+      | None -> []
+      | Some pairs ->
+        if List.length pairs >= cache_max_gen
+        then CList.firstn (cache_max_gen - 1) pairs
+        else pairs
+    in
+    LabTbl.replace cb_cache l ((cb1, cb2) :: prev)
 
 (* Cached verdicts are only valid as long as the ambient environment
    evolves monotonically (see above). Rolling the global state back in
@@ -212,6 +218,34 @@ let check_conv_error error why state poly pb env a1 a2 =
   | Result.Error None -> error why
   | Result.Error (Some (Univ e)) -> error (IncompatibleUniverses { err = e; env; t1 = a1; t2 = a2 })
   | Result.Error (Some (Qual e)) -> error (IncompatibleQualities { err = e; env; t1 = a1; t2 = a2 })
+
+(* A primitive field [p2] of the signature is implemented only by the
+   field's own declaration of the same primitive, given directly ([cb1]
+   is [Primitive p2]) or through the alias of the field to itself that
+   strengthening makes ([cb1] is [Def] of the field's own name [mp1.l],
+   and the body of that name in [env] is [Primitive p2]). An alias to
+   another module's field, a definition, a parameter or a different
+   primitive is refused, even when the other field is the same primitive.
+   This is sound: the implementation is the primitive that the signature
+   names, so both compute the same. The types are checked by [check_type]
+   in [check_constant]. Not cached: see the comment above [LabTbl]. *)
+let implements_same_primitive env mp1 l cb1 p2 =
+  let is_p2 = function
+    | Primitive p1 -> CPrimitives.equal p1 p2
+    | Undef _ | Def _ | OpaqueDef _ | Symbol _ -> false
+  in
+  match cb1.const_body with
+  | Primitive p1 -> CPrimitives.equal p1 p2
+  | Def c1 ->
+    begin match kind c1 with
+    | Const (c, _) ->
+      KerName.equal (Constant.user c) (KerName.make mp1 l) &&
+      (match Environ.lookup_constant_opt c env with
+       | Some cb -> is_p2 cb.const_body
+       | None -> false)
+    | _ -> false
+    end
+  | Undef _ | OpaqueDef _ | Symbol _ -> false
 
 (** Subtyping of polymorphic contexts *)
 
@@ -402,17 +436,20 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
       (* Now we check the bodies:
          - A transparent constant can only be implemented by a compatible
            transparent constant.
-         - A primitive cannot be implemented.
-           (We could try to allow implementing with the same primitive,
-            but for some reason we get cb1.const_body = Def,
-            without some use case there is no motivation to solve this.)
+         - A primitive field can only be implemented by the field's own
+           declaration of the same primitive, given directly or through
+           the alias of the field to itself that strengthening makes;
+           see [implements_same_primitive].
          - In the signature, an opaque is handled just as a parameter:
            anything of the right type can implement it, even if bodies differ.
       *)
       let cst' =
         (match cb2.const_body with
          | Undef _ | OpaqueDef _ -> cst'
-         | Primitive _ | Symbol _ -> error (NotConvertibleBodyField None)
+         | Primitive p2 ->
+           if implements_same_primitive env mp1 l cb1 p2 then cst'
+           else error (NotConvertibleBodyField None)
+         | Symbol _ -> error (NotConvertibleBodyField None)
          | Def c2 ->
            (match cb1.const_body with
             | Primitive _ | Undef _ | OpaqueDef _ | Symbol _ -> error (NotConvertibleBodyField None)
