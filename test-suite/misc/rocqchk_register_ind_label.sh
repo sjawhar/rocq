@@ -5,8 +5,10 @@
 # honest registration through a module alias or an Include keeps the label
 # and changes the module path (Subtyping.check_inductive_alias requires
 # equal labels), so a check that compares labels passes every honest set of
-# rocqchk_register_ind_canonical.sh and every forged set there, whose
-# forged canonical names have the label U. Here the library
+# rocqchk_register_ind_canonical.sh, and every forged set there whose
+# canonical name the check compares, since their forged canonical names
+# have the label U (forged-functor is refused as an unknown inductive
+# whatever the comparison). Here the library
 # rocqchk-register-ind-canonical/label/Lib.v declares B := true | false,
 # registered as bool, and N.B := u1 | u2 (_ : False), which has the label B
 # too. The forged library stores the registration of B with the canonical
