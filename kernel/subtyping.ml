@@ -524,7 +524,13 @@ let check_constant_alias env cst cb =
         error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
     in
     let target = Constant.make1 canonical in
-    let target_body = Environ.lookup_constant target env in
+    (* An enclosing module's resolver can name a target that is not, or not
+       yet, in the environment: refuse it instead of failing on an anomaly. *)
+    let target_body = match Environ.lookup_constant_opt target env with
+      | Some target_body -> target_body
+      | None ->
+        error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+    in
     (* An honest alias is a field that [Modops.strengthen_const] turned
        into [Def target], whatever the target's own body: a parameter, an
        opaque constant, a primitive operator or a symbol. Strengthen the
@@ -563,6 +569,13 @@ let check_inductive_alias env mind mib =
           (NotEqualInductiveAliases (mind, MutInd.make1 canonical))
     in
     let target = MutInd.make1 canonical in
+    (* An enclosing module's resolver can name a target that is not, or not
+       yet, in the environment: refuse it instead of failing on an anomaly. *)
+    let () =
+      if not (Environ.mem_mind target env) then
+        error_signature_mismatch [] (KerName.label user)
+          (NotEqualInductiveAliases (mind, target))
+    in
     let target_body = Environ.lookup_mind target env in
     (* The labels are equal: [check_inductive] compares [user], which is
        [KerName.make user_mp target_label], and [add_kn_delta_resolver]

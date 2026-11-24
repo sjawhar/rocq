@@ -18,7 +18,12 @@
 # - inductive: A.X.I -> A.Y.I, where A.X.I has no constructor and A.Y.I has
 #   one, so that R.e : forall _ : A.X.I, False becomes
 #   forall _ : A.Y.I, False; check_inductive_alias refuses it when it
-#   compares the two.
+#   compares the two;
+# - sameLabelLater and inductiveLater: sameLabel and inductive with A.Y
+#   declared after A.X, so that the alias's target is not yet in the
+#   environment when A.X is checked. rocqchk must refuse them with the
+#   module typing error of the other alias checks, not stop on the anomaly
+#   that says the target does not appear in the environment.
 # WithModule.v is an honest file where the two resolvers differ and the
 # alias is sound.
 
@@ -34,11 +39,11 @@ $coqc -noinit -R "$D/with" NestedResolver "$D/with/WithModule.v"
 accepts with -o -bytecode-compiler yes -R "$D/with" NestedResolver -norec NestedResolver.WithModule
 accepts with -R "$D/with" NestedResolver NestedResolver.WithModule
 
-for c in sealed sealedAc sameLabel inductive; do
+for c in sealed sealedAc sameLabel inductive sameLabelLater inductiveLater; do
   case $c in
     sealed|sealedAc) forge=sealed ;;
-    sameLabel) forge=same-label ;;
-    inductive) forge=inductive ;;
+    sameLabel|sameLabelLater) forge=same-label ;;
+    inductive|inductiveLater) forge=inductive ;;
   esac
   C=$D/$c
   rm -rf "$C/forged"
