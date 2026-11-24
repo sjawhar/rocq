@@ -154,7 +154,10 @@ let get_mod env mp view l =
       cached pair;
     - conversion compares constant references up to the delta resolver
       (canonical names), so a successful check is independent of the
-      user-level path under which physically equal bodies are reached.
+      user-level path under which physically equal bodies are reached;
+    - except for a primitive field, whose check reads the field's own
+      path (see [implements_same_primitive]): checks of primitive fields
+      are not cached.
 
     The cache is indexed by the label of the field — whose hash is cheap,
     and which is stable across the module paths under which the same
@@ -365,6 +368,34 @@ let check_inductive (cst, ustate) trace env mp1 l info1 mp2 mib2 subst1 subst2 r
     cst
 
 
+(* A primitive field [p2] of the signature is implemented only by the
+   field's own declaration of the same primitive, given directly ([cb1]
+   is [Primitive p2]) or through the alias of the field to itself that
+   strengthening makes ([cb1] is [Def] of the field's own name [mp1.l],
+   and the body of that name in [env] is [Primitive p2]). An alias to
+   another module's field, a definition, a parameter or a different
+   primitive is refused, even when the other field is the same primitive.
+   This is sound: the implementation is the primitive that the signature
+   names, so both compute the same. The types are checked by [check_type]
+   in [check_constant]. Not cached: see the comment above [LabTbl]. *)
+let implements_same_primitive env mp1 l cb1 p2 =
+  let is_p2 = function
+    | Primitive p1 -> CPrimitives.equal p1 p2
+    | Undef _ | Def _ | OpaqueDef _ | Symbol _ -> false
+  in
+  match cb1.const_body with
+  | Primitive p1 -> CPrimitives.equal p1 p2
+  | Def c1 ->
+    begin match kind c1 with
+    | Const (c, _) ->
+      KerName.equal (Constant.user c) (KerName.make mp1 l) &&
+      (match Environ.lookup_constant_opt c env with
+       | Some cb -> is_p2 cb.const_body
+       | None -> false)
+    | _ -> false
+    end
+  | Undef _ | OpaqueDef _ | Symbol _ -> false
+
 let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 subst2 =
   let error why = error_signature_mismatch trace l why in
   let check_conv why cst poly pb = check_conv_error error why (cst, ustate) poly pb in
@@ -402,17 +433,20 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
       (* Now we check the bodies:
          - A transparent constant can only be implemented by a compatible
            transparent constant.
-         - A primitive cannot be implemented.
-           (We could try to allow implementing with the same primitive,
-            but for some reason we get cb1.const_body = Def,
-            without some use case there is no motivation to solve this.)
+         - A primitive field can only be implemented by the field's own
+           declaration of the same primitive, given directly or through
+           the alias of the field to itself that strengthening makes;
+           see [implements_same_primitive].
          - In the signature, an opaque is handled just as a parameter:
            anything of the right type can implement it, even if bodies differ.
       *)
       let cst' =
         (match cb2.const_body with
          | Undef _ | OpaqueDef _ -> cst'
-         | Primitive _ | Symbol _ -> error (NotConvertibleBodyField None)
+         | Primitive p2 ->
+           if implements_same_primitive env mp1 l cb1 p2 then cst'
+           else error (NotConvertibleBodyField None)
+         | Symbol _ -> error (NotConvertibleBodyField None)
          | Def c2 ->
            (match cb1.const_body with
             | Primitive _ | Undef _ | OpaqueDef _ | Symbol _ -> error (NotConvertibleBodyField None)
@@ -422,9 +456,14 @@ let check_constant (cst, ustate) trace env mp1 l strengthen1 info1 cb2 subst1 su
               check_conv (NotConvertibleBodyField (Some (env, c1, c2))) cst' poly CONV env c1 c2))
       in
       (* Only cache checks that produced no new universe constraints: they
-         are then pure and stay valid in any later state of this process. *)
+         are then pure and stay valid in any later state of this process.
+         Primitive fields are not cached, see the comment above [LabTbl]. *)
       let () =
-        if context_free && cst' == cst then cache_add l cb1_0 cb2_0
+        if context_free && cst' == cst
+           && (match cb2.const_body with
+               | Primitive _ -> false
+               | Undef _ | Def _ | OpaqueDef _ | Symbol _ -> true)
+        then cache_add l cb1_0 cb2_0
       in
       cst'
       end
