@@ -1,0 +1,18 @@
+diff --git a/kernel/subtyping.ml b/kernel/subtyping.ml
+index 901bd18..44532a8 100644
+--- a/kernel/subtyping.ml
++++ b/kernel/subtyping.ml
+@@ -298,9 +298,10 @@ let check_recursivity r1 r2 = match r1, r2 with
+    block from the environment, so it sees [Some true] where that module's
+    structure, and the signature, hold [Some false]. A private block against
+    a non-private one, either way round, stays refused (#15842). *)
+-let check_private error p1 p2 =
+-  if Bool.equal (Option.has_some p1) (Option.has_some p2) then ()
+-  else error (PrivateStatusExpected p2)
++(* Forge row dev/ci/forge/rocq-private-functor: the reverted build lets a
++   private inductive implement a non-private one, and the other way round
++   (rocq-prover/rocq#21113, the functor form). *)
++let check_private _error _p1 _p2 = ()
+ 
+ let check_primitive error p1 p2 = match p1, p2 with
+ | (NotRecord | FakeRecord), (NotRecord | FakeRecord) -> ()
