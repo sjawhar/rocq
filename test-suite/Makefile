@@ -99,7 +99,9 @@ COQFLAGS?=$(COQEXTRAFLAGS)
 coqc := $(BIN)rocq c -q -R prerequisite TestSuite $(COQFLAGS)
 coqchk := $(BIN)rocqchk -R prerequisite TestSuite
 # Every coqchk the suite runs also cooks each opaque body the stock way and
-# fails unless that equals the shared cook (checker/checkLibrary.ml).
+# fails unless that equals the shared cook (checker/checkLibrary.ml). The
+# same variable also runs CheckDischarged's put-back check on each body that
+# the discharged check rewrites (checker/checkDischarged.ml).
 export ROCQCHK_COOK_CROSS_CHECK := 1
 # Every rocqchk the suite runs also compares its inductive block pairs by
 # Indmerge.eq_mib and fails unless both agree (checker/check_compare.ml).

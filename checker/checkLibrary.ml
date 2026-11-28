@@ -262,7 +262,9 @@ let access_opaque_table dp i =
    shared but rebuilds every changed one at each occurrence), and an anomaly
    is raised unless the two terms are [Constr.equal]. The test suite sets it
    (test-suite/Makefile), so that every coqchk run there checks that
-   [Cooking.expand_constr_shared] still agrees with [Cooking.expand_constr]. *)
+   [Cooking.expand_constr_shared] still agrees with [Cooking.expand_constr].
+   The same variable also runs [CheckDischarged]'s put-back check on each
+   body that the discharged check rewrites. *)
 let cook_cross_check_on =
   match Sys.getenv_opt "ROCQCHK_COOK_CROSS_CHECK" with
   | None | Some "" -> false
