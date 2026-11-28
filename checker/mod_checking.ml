@@ -320,7 +320,7 @@ let check_constant_declaration env st kn cb =
   let jty = Typeops.infer_type env ty in
   if not (Sorts.relevance_equal cb.const_relevance (Sorts.relevance_of_sort jty.utj_type))
   then raise Pp.(BadConstant (kn, str "incorrect const_relevance"));
-  let check env bd () =
+  let check env bd ty =
     let j = Typeops.infer env bd in
     match conv_leq env j.uj_type ty with
     | Result.Ok () -> ()
@@ -362,7 +362,7 @@ let check_constant_declaration env st kn cb =
   | Def c ->
     (* A transparent body may be unfolded by later checks, which rely on
        it being well-typed, so it is checked here. *)
-    check env c ()
+    check env c ty
   | OpaqueDef o ->
     (* Nothing else that is checked looks into an opaque body, so its check
        can be postponed, and possibly run in another process, and so can
@@ -370,8 +370,13 @@ let check_constant_declaration env st kn cb =
        waits. The process that runs the check reads the table it needs
        ([CheckLibrary.indirect_accessor]), and a check handed back cooks
        again in the process that runs it. With -j 1, [defer] runs the
-       closure at once, so the order of effects is as before. *)
-    CheckWorkers.defer kn (fun () -> let c, env = cook o in check env c ())
+       closure at once, so the order of effects is as before. Every opaque
+       body goes through [CheckDischarged.check] (checkDischarged.mli),
+       whose verdict is that of [check] on [c]. *)
+    CheckWorkers.defer kn (fun () ->
+        let c, env = cook o in
+        let (sub, ci, _, _) = Opaqueproof.repr o in
+        CheckDischarged.check env sub ci c ty ~stock:check)
   in
   retro, st
 

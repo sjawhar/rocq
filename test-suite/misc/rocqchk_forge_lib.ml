@@ -4,10 +4,11 @@
    misc/rocqchk_alias_rewrite_rule.sh, misc/rocqchk_register_type.sh,
    misc/rocqchk_functor_loop_summary.sh,
    misc/rocqchk_walk_stop_summary.sh, misc/rocqchk_repeated_label.sh,
-   misc/rocqchk_register_ind_canonical.sh and
-   misc/rocqchk_register_ind_label.sh share: reading and writing the
-   segments of a .vo file, copy-on-write edits of its values, the delta
-   resolver's maps, and the command client. Each of them starts with
+   misc/rocqchk_register_ind_canonical.sh,
+   misc/rocqchk_register_ind_label.sh and misc/rocqchk_section_lets.sh
+   share: reading and writing the segments of a .vo file, copy-on-write
+   edits of its values, the delta resolver's maps, and the command client.
+   Each of them starts with
 
      #use "./misc/rocqchk_forge_lib.ml";;
 
@@ -125,12 +126,18 @@ let write_vo file header contents =
   Sys.rename temporary file;
   rewritten
 
-(* The value of the library segment of [file]. *)
-let library_value file =
+(* The data of the segment [name] of [file]. *)
+let segment file name =
   let _, _, contents = read_vo file in
-  match Array.find_opt (fun (n, _) -> String.equal n "library") contents with
-  | Some (_, data) -> Obj.repr (Marshal.from_string data 0)
-  | None -> fail "%s has no library segment" file
+  match Array.find_opt (fun (n, _) -> String.equal n name) contents with
+  | Some (_, data) -> data
+  | None -> fail "%s has no %s segment" file name
+
+(* The value that the segment [name] of [file] holds. *)
+let segment_value file name = Obj.repr (Marshal.from_string (segment file name) 0)
+
+(* The value of the library segment of [file]. *)
+let library_value file = segment_value file "library"
 
 (* Rewrite the segments named in [edits] with their functions, keep the
    others byte for byte, and write [dst] with fresh segment checksums. *)
@@ -357,12 +364,19 @@ let module_of struc name =
    a functor. *)
 let sig_struc struc name = nofunctor ("module " ^ name) (field (module_of struc name) 1)
 
-let constant_of struc name =
-  let sfb = struc_find struc name in
+(* The constant_body of the field [sfb], the constant [name]. *)
+let cb_of_field name sfb =
   expect ~size:1 ("field " ^ name ^ " (a constant)") 0 sfb;
   let cb = field sfb 0 in
   expect ~size:9 (name ^ "'s constant_body") 0 cb;
   cb
+
+let constant_of struc name = cb_of_field name (struc_find struc name)
+
+(* [struc] with the constant_body of its constant [name] replaced by [f] of
+   it. *)
+let constant_update struc name f =
+  struc_update struc name (fun sfb -> set 0 (f (cb_of_field name sfb)) sfb)
 
 let impl_of mb = field (field mb 0) 0
 
