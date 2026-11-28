@@ -779,7 +779,18 @@ let template_polymorphic_pind (ind,u) env =
   if not (UVars.Instance.is_empty u) then false
   else template_polymorphic_ind ind env
 
+(* A private inductive may be matched on (mind_private = Some false) only in
+   the module that declares it, where its name is its canonical name. A name
+   whose canonical name is another one, as Include gives the fields it copies,
+   is a copy from outside that module: enter it locked, as
+   Modops.add_structure does, so that no match on the copy reaches the
+   original (rocq-prover/rocq#21113). The stored body is left as it is. *)
 let add_mind_key kn mind link env =
+  let mind = match mind.mind_private with
+    | Some false when not (KerName.equal (MutInd.user kn) (MutInd.canonical kn)) ->
+      { mind with mind_private = Some true }
+    | None | Some _ -> mind
+  in
   let mind_key = (mind, ref link, MutInd.canonical kn) in
   let new_inds = Mindmap_env.add kn mind_key env.env_inductives in
   let irr_inds = Array.fold_left_i (fun i irr_inds mip ->
@@ -792,6 +803,20 @@ let add_mind_key kn mind link env =
 
 let add_mind kn mib env =
   let li = no_link_info in add_mind_key kn mib li env
+
+(* The entry under the user name of [kn], entered open to matching again when
+   it is locked and the canonical name it was entered with is not that user
+   name: a copy that [add_mind_key] locked, or one that Modops.add_structure
+   locked. Any other entry is left as it is. rocqchk uses it only to type a
+   copy of a constant of the inductive's own module, or of a module nested in
+   it (Mod_checking). *)
+let unlock_private_copy kn env =
+  match Mindmap_env.find_opt kn env.env_inductives with
+  | Some (({ mind_private = Some true; _ } as mind), link, canonical)
+    when not (KerName.equal (MutInd.user kn) canonical) ->
+    let mind_key = ({ mind with mind_private = Some false }, link, canonical) in
+    { env with env_inductives = Mindmap_env.add kn mind_key env.env_inductives }
+  | Some _ | None -> env
 
 (* Lookup of section variables *)
 

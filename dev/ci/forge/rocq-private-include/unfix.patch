@@ -1,0 +1,26 @@
+diff --git a/kernel/environ.ml b/kernel/environ.ml
+index 2c1f2ef..083f378 100644
+--- a/kernel/environ.ml
++++ b/kernel/environ.ml
+@@ -779,18 +779,10 @@ let template_polymorphic_pind (ind,u) env =
+   if not (UVars.Instance.is_empty u) then false
+   else template_polymorphic_ind ind env
+ 
+-(* A private inductive may be matched on (mind_private = Some false) only in
+-   the module that declares it, where its name is its canonical name. A name
+-   whose canonical name is another one, as Include gives the fields it copies,
+-   is a copy from outside that module: enter it locked, as
+-   Modops.add_structure does, so that no match on the copy reaches the
+-   original (rocq-prover/rocq#21113). The stored body is left as it is. *)
++(* Forge row dev/ci/forge/rocq-private-include: the reverted build enters an
++   Include copy of a private inductive open to matching, as the original is
++   in its own module (rocq-prover/rocq#21113). *)
+ let add_mind_key kn mind link env =
+-  let mind = match mind.mind_private with
+-    | Some false when not (KerName.equal (MutInd.user kn) (MutInd.canonical kn)) ->
+-      { mind with mind_private = Some true }
+-    | None | Some _ -> mind
+-  in
+   let mind_key = (mind, ref link, MutInd.canonical kn) in
+   let new_inds = Mindmap_env.add kn mind_key env.env_inductives in
+   let irr_inds = Array.fold_left_i (fun i irr_inds mip ->
