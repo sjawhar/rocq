@@ -33,6 +33,9 @@
 # univs      Univ.v   univs N f M p          refuse: N.f has other universes
 # univs2     Univ.v   univs N fp M p         refuse: N.fp has other polymorphic universes
 # opaque     Opq.v    body N p1 M p2         refuse: N.p1 has M.p2's opaque proof, of type bool
+# opqcopy    OpqC.v   body N l M l           refuse: N.l, a copy whose body is M.l's opaque
+#                                            proof, which matches on I, is typed (opaque
+#                                            bodies are never opened) and the match refused
 # annot      Ctl.v    annot N f              refuse: N.f's binder is marked irrelevant
 # kerpair    KP.v     kerpair N f N useg     refuse: N.f names N.g as the copy of Q.h
 # bound      Bound.v  none                   accept: F includes its parameter X : T, and the
@@ -113,6 +116,17 @@ Include M.
 End N.
 V
 
+cat > "$d/OpqC.v" <<'V'
+Module M.
+Inductive I := a | b.
+Definition l (x : I) : bool.
+Proof. exact (match x with a => true | b => false end). Qed.
+End M.
+Module N.
+Include M.
+End N.
+V
+
 cat > "$d/Bound.v" <<'V'
 Module Type T.
 Inductive I := a | b.
@@ -123,7 +137,7 @@ Include X.
 End F.
 V
 
-for m in Ctl Lib Stay Univ Opq KP Bound; do
+for m in Ctl Lib Stay Univ Opq OpqC KP Bound; do
   rocq c -R "$d" PI "$d/$m.v" || { echo "rocq c refused the honest $m.v"; exit 1; }
   if ! rocqchk -o -bytecode-compiler yes -R "$d" PI -norec "PI.$m" > "$d/$m.honest.log" 2>&1; then
     echo "rocqchk refused the honest $m.vo"
@@ -168,6 +182,7 @@ check relev Ctl "const_relevance" irrelevant N f
 check univs Univ "$private" univs N f M p
 check univs2 Univ "$private" univs N fp M p
 check opaque Opq "ActualType" body N p1 M p2
+check opqcopy OpqC "$private" body N l M l
 check annot Ctl "BadBinderRelevance" annot N f
 check kerpair KP "IllFormedConstant" kerpair N f N useg
 check bound Bound accept
