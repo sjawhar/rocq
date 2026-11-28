@@ -36,3 +36,15 @@ Module Type T.
     Fail Sort foz.
   End M.
 End T.
+
+(* A second global sort of one name in another module of the same library. *)
+Module CollM.
+  Sort coll.
+End CollM.
+Fail Sort coll.
+Module Type CollT.
+  Fail Sort coll.
+End CollT.
+Section CollS.
+  Fail Sort coll.
+End CollS.

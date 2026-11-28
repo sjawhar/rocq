@@ -455,6 +455,32 @@ and ``rocq repl``, unless stated otherwise:
   when interpreting :cmd:`Require` commands.
 :-vok: Indicate Rocq to check a file completely, to load ``.vos`` files instead
   of ``.vo`` files when interpreting :cmd:`Require` commands. No ``.vo`` file is written.
+:-record-timeouts: *Rocq compile only*. Write ``file.timeouts.json`` beside the
+  output file, holding
+  ``{"format":2,"armed":A,"fired":F,"object_sha256":H}``, where ``A`` counts
+  the timeouts this compilation armed (:tacn:`timeout`, :cmd:`Timeout`,
+  :opt:`Default Timeout` and the Ltac2 ``Control.timeout`` and
+  ``Control.timeoutf``), ``F`` counts those that expired, and ``H`` is the
+  SHA-256 of the bytes of the output file, as 64 lowercase hexadecimal
+  characters in a string, or ``null`` when this compilation wrote no output
+  file. A failing compilation therefore records ``null`` even where the
+  output file of an earlier compilation is still at that path: it did not
+  write those bytes, so its counts do not describe them.
+  The hash binds the record to the object, so a reader can refuse a
+  record that sits beside another object. A record of an
+  earlier compilation is removed before the compilation starts, and the new one
+  is written at exit, after the output file on success and after the error
+  message on failure, so a compilation killed by a signal Rocq does not catch,
+  such as ``SIGKILL``, leaves no record. A tactic worker of the ``par:``
+  selector sends back what it armed and what fired, and a task whose answer is
+  lost counts as one armed timeout that fired, so a compilation that lost one
+  never reports zero; the
+  option refuses ``-async-proofs`` and ``-vos``, whose delegated proofs send
+  nothing back. The record is named after the base name of the output file, so
+  a ``.vo`` and a ``.vok`` compilation of one file share it, and a ``-vok``
+  compilation, which writes no output file, records ``null`` over whatever the
+  ``.vo`` compilation recorded. Without the
+  option nothing is removed or written.
 :-w (all|none|w₁,…,wₙ): Configure the display of warnings. This
   option expects all, none or a comma-separated list of warning names or
   categories (see Section :ref:`controlling-display`).

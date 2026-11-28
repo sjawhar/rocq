@@ -29,6 +29,10 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [guard checker does not check for correct recursive calls when passed as uniform argument in a nested fixpoint](#guard-checker-does-not-check-for-correct-recursive-calls-when-passed-as-uniform-argument-in-a-nested-fixpoint)
       - [guard checker does not count argument-less recursive calls to compute uniform arguments of a nested mutual fixpoint](#guard-checker-does-not-count-argument-less-recursive-calls-to-compute-uniform-arguments-of-a-nested-mutual-fixpoint)
       - [incorrect variance inference for a constructor applied in a letin of a constructor type](#incorrect-variance-inference-for-a-constructor-applied-in-a-letin-of-a-constructor-type)
+      - [incorrect reification in lazy machine of matches with universe polymorphism](#incorrect-reification-in-lazy-machine-of-matches-with-universe-polymorphism)
+      - [guard checker computes commutative cuts in the wrong environment and breaks propositional extensionality](#guard-checker-computes-commutative-cuts-in-the-wrong-environment-and-breaks-propositional-extensionality)
+    - [Section system](#section-system)
+      - [projections are cooked in wrong environment](#projections-are-cooked-in-wrong-environment)
     - [Module system](#module-system)
       - [missing universe constraints in typing "with" clause of a module type](#missing-universe-constraints-in-typing-with-clause-of-a-module-type)
       - [universe constraints for module subtyping not stored in vo files](#universe-constraints-for-module-subtyping-not-stored-in-vo-files)
@@ -39,6 +43,8 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [Missing substitution when strengthening aliased functors](#missing-substitution-when-strengthening-aliased-functors)
       - [Incorrect subtyping rule for universe polymorphic "with Definition".](#incorrect-subtyping-rule-for-universe-polymorphic-with-definition)
       - [Subtyping ignored elimination constraints](#subtyping-ignored-elimination-constraints)
+    - [Including functor application generates garbage delta-resolvers](#including-functor-application-generates-garbage-delta-resolvers)
+      - [Subtyping of inductive types ignores uniform parameters making it inconsistent with propext](#subtyping-of-inductive-types-ignores-uniform-parameters-making-it-inconsistent-with-propext)
     - [Universes](#universes)
       - [issue with two parameters in the same universe level](#issue-with-two-parameters-in-the-same-universe-level)
       - [universe polymorphism can capture global universes](#universe-polymorphism-can-capture-global-universes)
@@ -52,6 +58,7 @@ This file recollects knowledge about critical bugs found in Coq since version 8.
       - [Incorrect discharge of sort polymorphic inductive squashing with section polymorphic sort](#incorrect-discharge-of-sort-polymorphic-inductive-squashing-with-section-polymorphic-sort)
       - [Missing universe substitution in primitive array instance in lazy](#missing-universe-substitution-in-primitive-array-instance-in-lazy)
       - [Double universe substitution in letins from indices in match return clause](#double-universe-substitution-in-letins-from-indices-in-match-return-clause)
+      - [Universe checking state gets confused when locally changed in module](#universe-checking-state-gets-confused-when-locally-changed-in-module)
     - [Primitive projections](#primitive-projections)
       - [check of guardedness of extra arguments of primitive projections missing](#check-of-guardedness-of-extra-arguments-of-primitive-projections-missing)
       - [records based on primitive projections became possibly recursive without the guard condition being updated](#records-based-on-primitive-projections-became-possibly-recursive-without-the-guard-condition-being-updated)
@@ -355,6 +362,31 @@ and lack of checking of relevance marks on constants in coqchk
   (typically in `f x`, the inferred type of `f` is reduced to expose a `forall`).
   The bug occurs when the reduced type has a stuck match on a universe polymorphic inductive.
   The exploit in the issue uses Definitional UIP but the code is incorrect even without that flag.
+
+#### guard checker computes commutative cuts in the wrong environment and breaks propositional extensionality
+- component: guard checking
+- introduced: 8.8 ([#920](https://github.com/rocq-prover/rocq/pull/920))
+- impacted released versions: from 8.8 although inconsistency with propext was achievable in other ways
+- impacted coqchk versions: Same
+- fixed in: 9.2.1, 9.3.1, 9.4 ([#22763](https://github.com/rocq-prover/rocq/pull/22763))
+- found by: Pierre-Marie Pédrot
+- exploit: test-suite/test-suite/bugs/bug_guard_filter_stack_env.v
+- GH issue number: none
+- risk: requires the use of propext
+
+### Section system
+
+#### projections are cooked in wrong environment
+
+- component: sections, projections
+- introduced: V8.12 (inductive cooking doesn't recheck it)
+- impacted released versions: V8.12 to V9.3.0
+- impacted coqchk versions: none
+- fixed in: V9.2.1, V9.3.1, v9.4 [#22767](https://github.com/rocq-prover/rocq/issues/22767)
+- found by: Axel Mierczuk, Spencer Michaels
+- exploit: test-suite/bugs/bug_22761.v
+- GH issue number: [#22761](https://github.com/rocq-prover/rocq/issues/22761)
+- risk: needs local definition in record parameters, in a section with variables
 
 ### Module system
 

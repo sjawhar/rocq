@@ -592,6 +592,13 @@ external tcode_array : tcode_array -> tcode array = "rocq_tcode_array"
 let first_fix o = shift_fix o (- current_fix o)
 let fix_env v = (Obj.magic (last_fix v) : vm_env)
 
+(* The environment a fixpoint's own entry code expects: the closure itself,
+   as the APPLY instruction leaves it. GRABREC advances it to [fix_env] when
+   the fixpoint unfolds, and stores it as the fixpoint of the accumulator
+   when the recursive argument is stuck, so entering with [fix_env] would
+   record the block's LAST component instead of this one. *)
+let fix_self v = (Obj.magic v : vm_env)
+
 let last o = (Obj.field o (Obj.size o - 1))
 let fix_types (v:vfix) = tcode_array (Obj.magic (last (Obj.repr v)) : tcode_array)
 let cofix_types (v:vcofix) = tcode_array (Obj.magic (last (Obj.repr v)) : tcode_array)
@@ -697,8 +704,7 @@ let mk_cofix_body apply_varray k ndef vcf =
 
   let cofix_body i =
     let vcfi = get_fcofix vcf i in
-    let c = Obj.field (Obj.repr vcfi) 0 in
-    Obj.set_field e 0 c;
+    set_bytecode_field e 0 (fun_code vcfi);
     let atom = Obj.new_block cofix_tag 1 in
     let self = obj_of_atom (Obj.obj atom) in
     apply_varray (Obj.obj e) [|Obj.obj self|] in

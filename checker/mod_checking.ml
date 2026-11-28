@@ -380,10 +380,100 @@ let check_constant_declaration env st kn cb =
   in
   retro, st
 
+(* Two universe contexts are the same when they have the same sizes and the
+   same constraints, as CheckInductive.check_abstract_uctx compares them. *)
+let same_universes a b = match a, b with
+  | Monomorphic, Monomorphic -> true
+  | Polymorphic a, Polymorphic b ->
+    UVars.AbstractContext.size a = UVars.AbstractContext.size b
+    && PConstraints.equal (UVars.UContext.constraints (UVars.AbstractContext.repr a))
+      (UVars.UContext.constraints (UVars.AbstractContext.repr b))
+  | (Monomorphic | Polymorphic _), _ -> false
+
+(* [same_declaration tb cb] is [Some c] when the constant body [cb] is its
+   canonical constant's [tb], [c] being its body, compared as terms
+   ([Constr.equal], which compares global references by canonical name and
+   ignores binder annotations, so this test alone proves nothing about
+   typing): the same transparent body, type, universes, typing flags and
+   relevance, and no section variables. Include strengthens what it copies
+   (Modops.strengthen_const): a copy of an axiom or of an opaque constant has
+   the body Def of the constant it copies, which matches on nothing, so only
+   transparent bodies are compared. The typing flags are compared
+   structurally, not with Environ.same_flags, which compares the conversion
+   oracles physically and so fails for two libraries. *)
+let same_declaration tb cb = match tb.const_body, cb.const_body with
+  | Def d, Def c
+    when Constr.equal c d
+      && Constr.equal cb.const_type tb.const_type
+      && List.is_empty cb.const_hyps && List.is_empty tb.const_hyps
+      && Sorts.relevance_equal cb.const_relevance tb.const_relevance
+      && (cb.const_typing_flags == tb.const_typing_flags
+          || cb.const_typing_flags = tb.const_typing_flags)
+      && same_universes cb.const_universes tb.const_universes ->
+    Some c
+  | (Undef _ | Def _ | OpaqueDef _ | Primitive _ | Symbol _), _ -> None
+
+(* [f acc mind] folded over the mutual inductive of each match in the term
+   [c]: the kernel reads whether an inductive is private only to type a
+   match (Typeops, error_case_on_private_ind). *)
+let rec fold_matched_minds f acc c =
+  let acc = match Constr.kind c with
+    | Constr.Case (ci, _, _, _, _, _, _) -> f acc (fst ci.ci_ind)
+    | _ -> acc
+  in
+  Constr.fold (fold_matched_minds f) acc c
+
+(* The environment in which rocqchk types the constant [kn].
+
+   Environ.add_mind_key enters a copy of a private inductive locked: a match
+   on it is refused (rocq-prover/rocq#21113). A copy is a name to which the
+   delta resolver gives another canonical name: a field that Include copies,
+   or a field of a module alias. A function that matches on a private
+   inductive of its own module is copied with it, and its copy matches on
+   the copy of the inductive. So when [kn] is a copy and is the same
+   declaration as its canonical constant (same_declaration), which is in the
+   environment, so that rocqchk checked or admitted it, it is typed with the
+   copies that its matches name of the inductives of that constant's module,
+   or of a module that encloses it, entered open again
+   (Environ.unlock_private_copy), in its type and its body. A module nested
+   in the one that declares a private inductive matches on it as that module
+   does (Safe_typing enters it open until the declaring module ends). Which
+   module an inductive is of is read from the canonical name the environment
+   holds for it, not from the term. The copy is still typed in full: typing refuses
+   what same_declaration does not compare, as a binder annotation or a
+   reference whose user name does not go with its canonical one. Every other
+   constant is typed with every copy locked, and the opened entries do not
+   outlast this one check.
+
+   The canonical constant may be a field of a functor parameter, as when a
+   functor includes its parameter X : T. Its body there is T's, and rocqchk
+   checks T (check_module_type, in check_signature) before it adds X to the
+   environment (Modops.add_module_parameter), so that body was typed where T
+   declares its private inductives open to matching. *)
+let typing_env env kn cb =
+  let canonical = Constant.canonical kn in
+  if KerName.equal (Constant.user kn) canonical then env
+  else match Environ.lookup_constant_opt (Constant.make1 canonical) env with
+    | None -> env
+    | Some tb ->
+      match same_declaration tb cb with
+      | None -> env
+      | Some c ->
+        let home = KerName.modpath canonical in
+        let unlock env mind =
+          if not (Environ.mem_mind mind env) then env
+          else
+            let (_, _, declared) = Environ.lookup_mind_key mind env in
+            if ModPath.subpath (KerName.modpath declared) home
+            then Environ.unlock_private_copy mind env
+            else env
+        in
+        fold_matched_minds unlock (fold_matched_minds unlock env cb.const_type) c
+
 let check_constant_declaration env st kn cb =
   let retro, st = NewProfile.profile "check_constant" ~args:(fun () ->
       [("name", `String (Constant.to_string kn))])
-      (fun () -> check_constant_declaration env st kn cb)
+      (fun () -> check_constant_declaration (typing_env env kn cb) st kn cb)
       ()
   in
   let env = Environ.add_constant kn cb env in

@@ -248,6 +248,14 @@ val lookup_mind_key : MutInd.t -> env -> mind_key
 val add_mind_key : MutInd.t -> mutual_inductive_body -> link_info -> env -> env
 val add_mind : MutInd.t -> mutual_inductive_body -> env -> env
 
+(** [unlock_private_copy kn env]: the entry under the user name of [kn],
+    entered open to matching again when it is locked ([mind_private = Some
+    true]) and the canonical name it was entered with is not that user name.
+    Any other entry is left as it is. For rocqchk's check of a copy of a
+    constant of the inductive's own module, or of a module nested in it,
+    only. *)
+val unlock_private_copy : MutInd.t -> env -> env
+
 (** Looks up in the context of global inductive names
    raises an anomaly if the required path is not found *)
 val lookup_mind : MutInd.t -> env -> mutual_inductive_body

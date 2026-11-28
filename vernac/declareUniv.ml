@@ -99,6 +99,16 @@ let check_exists_sort sp =
     raise (AlreadyDeclared (Some "Sort", Libnames.basename sp))
   else ()
 
+(* A global sort's kernel name is its library and its name, not its module
+   (UnivGen.new_sort_global), so a sort of one name in another module of the
+   library passes the name check of [input_sort_names] and would stop at an
+   assertion of the kernel. *)
+let check_sort_fresh_in_library (id, qg) =
+  if QGraph.is_declared (Sorts.Quality.global qg) (Global.elim_graph ()) then
+    CErrors.user_err
+      Pp.(str "Sort " ++ Id.print id ++
+          strbrk " already exists in this library: a global sort is named by its library and its name, not by its module.")
+
 let qualify_sort i dp id =
   i, Libnames.add_path_suffix dp id
 
@@ -224,6 +234,11 @@ let do_sort ~poly l =
   let l = List.map (fun {CAst.v=id} -> (id, UnivGen.new_sort_global id)) l in
   let src = if poly then BoundQuality else UnqualifiedQuality in
   let () = input_sort_names (src, l) in
+  (* A monomorphic sort in a section or a module type gets the kernel's own user error. *)
+  let () =
+    if poly || not (in_section || Lib.is_modtype ()) then
+      List.iter check_sort_fresh_in_library l
+  in
   match poly with
   | false ->
     let qs = List.fold_left  (fun qs (_, qv) -> Sorts.QVar.(Set.add (make_global qv) qs))

@@ -1022,7 +1022,7 @@ constraint on global sorts can be declared with the :cmd:`Constraint`.
    quantification will be discharged for each section definition
    independently. Polymorphic sort qualities are forbidden outside sections.
 
-  .. exn:: Polymorphic sorts can only be declared inside sections, use #[universe(polymorphic=no)] Sort in order to declare a global sort.
+  .. exn:: Polymorphic sorts can only be declared inside sections, use #[universes(polymorphic=no)] Sort in order to declare a global sort.
 
     Generated when a :cmd:`Sort` command is issued outside a section with universe polymorphism set.
     Either scope the :cmd:`Sort` with an enclosing :cmd:`Section` or be explicit about creating a global sort
@@ -1031,6 +1031,12 @@ constraint on global sorts can be declared with the :cmd:`Constraint`.
   .. exn:: Cannot declare global sort qualities inside module types.
 
     The :cmd:`Sort` command is not supported inside module types.
+
+  .. exn:: Sort @ident already exists in this library: a global sort is named by its library and its name, not by its module.
+
+    A global sort that a monomorphic :cmd:`Sort` declares is named by its library and its name,
+    whatever the module. So a :cmd:`Sort` of a name that a monomorphic :cmd:`Sort` in another
+    module of the same library already declares is refused.
 
 .. cmd:: Print Sorts
 

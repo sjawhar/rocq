@@ -1,0 +1,165 @@
+diff --git a/kernel/mod_declarations.ml b/kernel/mod_declarations.ml
+index 93abee57fe..2e471d47ef 100644
+--- a/kernel/mod_declarations.ml
++++ b/kernel/mod_declarations.ml
+@@ -104,6 +104,10 @@ let replace_module_body struc delta mb =
+     mod_type_alg = None;
+     mod_delta = delta }
+ 
++(* Forge row dev/ci/forge/rocqchk-alias-label: the forger in
++   Safe_typing.export gives a module the resolver that it has rewritten. *)
++let set_delta delta mb = if delta == mb.mod_delta then mb else { mb with mod_delta = delta }
++
+ let module_type_of_module mb =
+   { mb with mod_expr = ModTypeNul; mod_type_alg = None; }
+ 
+diff --git a/kernel/mod_declarations.mli b/kernel/mod_declarations.mli
+index d1d7758c45..cc6584fff6 100644
+--- a/kernel/mod_declarations.mli
++++ b/kernel/mod_declarations.mli
+@@ -96,6 +96,10 @@ val set_signature : module_signature -> 'a generic_module_body -> 'a generic_mod
+ 
+ (** {6 Substitution} *)
+ 
++val set_delta : Mod_subst.delta_resolver ->
++  'a generic_module_body -> 'a generic_module_body
++(** Replace the delta resolver, keeping everything else. *)
++
+ type subst_kind
+ val subst_dom : subst_kind
+ val subst_codom : subst_kind
+diff --git a/kernel/mod_subst.ml b/kernel/mod_subst.ml
+index a075cce98f..b701ea7cee 100644
+--- a/kernel/mod_subst.ml
++++ b/kernel/mod_subst.ml
+@@ -234,6 +234,25 @@ let add_kn_delta_resolver kn kn' =
+ 
+ let add_mp_delta_resolver mp1 mp2 = Deltamap.add_mp mp1 mp2
+ 
++(* Rewrite the canonical names a resolver points at and the terms it inlines,
++   leaving its domain and its module equivalences alone: used where a
++   substitution cannot express the rewrite (the forger of the forge row
++   dev/ci/forge/rocqchk-alias-label pointing an entry at a name with another
++   label).  [fc] is applied to an inlined functor-parameter term, as
++   [gen_subst_delta_resolver] applies the substitution to it. *)
++let map_kn_delta_resolver ?(fc = fun c -> c) f resolver =
++  let mp_id mkey mequ rslv = Deltamap.add_mp mkey mequ rslv in
++  let kn_map kkey hint rslv = match hint with
++    | Equiv kn ->
++      let kn' = f kn in
++      Deltamap.add_kn kkey (if kn' == kn then hint else Equiv kn') rslv
++    | Inline (lev, Some t) ->
++      Deltamap.add_kn kkey (Inline (lev, Some (UVars.map_univ_abstracted fc t))) rslv
++    | Inline (_, None) -> Deltamap.add_kn kkey hint rslv
++  in
++  Deltamap.fold mp_id kn_map resolver
++    (empty_delta_resolver (Deltamap.root resolver))
++
+ (* rocqchk does not trust the term an [Inline] hint of a file carries, see
+    checker/safe_checking.ml. *)
+ let drop_inline_bodies resolver =
+diff --git a/kernel/mod_subst.mli b/kernel/mod_subst.mli
+index 873a2a58a5..5781e74377 100644
+--- a/kernel/mod_subst.mli
++++ b/kernel/mod_subst.mli
+@@ -33,6 +33,13 @@ val add_mp_delta_resolver :
+ val add_kn_delta_resolver :
+   KerName.t -> KerName.t -> delta_resolver -> delta_resolver
+ 
++(** [map_kn_delta_resolver ?fc f reso] rewrites the canonical name each
++    [Equiv] hint points at and, with [fc], the term each [Inline] hint
++    carries, leaving the domain and the module equivalences alone. *)
++val map_kn_delta_resolver :
++  ?fc:(Constr.t -> Constr.t) ->
++  (KerName.t -> KerName.t) -> delta_resolver -> delta_resolver
++
+ (** [drop_inline_bodies reso] turns each [Inline (lev, Some t)] hint into
+     [Inline (lev, None)], the hint of a [Parameter Inline]: a substitution
+     through the result keeps the constant where one through [reso] puts
+diff --git a/kernel/safe_typing.ml b/kernel/safe_typing.ml
+index 71a9d9772a..3350112d36 100644
+--- a/kernel/safe_typing.ml
++++ b/kernel/safe_typing.ml
+@@ -1696,10 +1696,61 @@ let start_library dir senv =
+     opaquetab = Opaqueproof.empty_opaquetab;
+   }
+ 
++(* Forge row dev/ci/forge/rocqchk-alias-label: this code exists only in the
++   reverted build, which writes the forged .vo. The library is the variant
++   that its client part was compiled against: in the functor F (P : S),
++   lemma is an axiom of type A.X.k = false, and a module Forge_label marks
++   it. The forger gives lemma the statement and the proof that the honest
++   library has, k = false := P.X.f, and records in the resolver of F's body
++   that F.k is an alias of P.X.d, from label k to label d; lemma's statement
++   names F.k by that alias. This is the F that
++   test-suite/misc/rocqchk-alias-label/forge.ml writes from the honest
++   library (whose client is compiled against the variant). F's
++   implementation is FullStruct: its signature is its only body. *)
++let forge_label mp struc =
++  let id = Id.of_string in
++  if Option.is_empty (List.assoc_f_opt Id.equal (id "Forge_label") struc) then struc
++  else
++    let fk = KerName.make (MPdot (mp, id "F")) (id "k") in
++    let axk = KerName.make (MPdot (MPdot (mp, id "A"), id "X")) (id "k") in
++    let forge_body px (l, field) = match field with
++      | SFBconst cb when Id.equal l (id "lemma") ->
++        (* The axiom's statement names A.X.k where the honest one names F.k. *)
++        let alias = Constant.make fk (KerName.make px (id "d")) in
++        let rec rename c = match Constr.kind c with
++          | Const (k, u) when KerName.equal (Constant.user k) axk -> mkConstU (alias, u)
++          | _ -> Constr.map rename c
++        in
++        let proof = mkConstU (Constant.make1 (KerName.make px (id "f")), UVars.Instance.empty) in
++        (l, SFBconst { cb with const_body = Def proof; const_type = rename cb.const_type })
++      | _ -> (l, field)
++    in
++    let forge (l, field) = match field with
++      | SFBmodule f when Id.equal l (id "F") ->
++        begin match mod_type f with
++        | MoreFunctor (p, ptype, NoFunctor body) ->
++          let px = MPdot (MPbound p, id "X") in
++          let body = List.map (forge_body px) body in
++          (* [add_kn_delta_resolver] asserts that an alias keeps its label, so
++             the entry is added as F.k to itself and then pointed at P.X.d. *)
++          let xd = KerName.make px (id "d") in
++          let delta =
++            Mod_subst.map_kn_delta_resolver (fun k -> if KerName.equal k fk then xd else k)
++              (Mod_subst.add_kn_delta_resolver fk fk (mod_delta f))
++          in
++          let f = set_signature (MoreFunctor (p, ptype, NoFunctor body)) f in
++          (l, SFBmodule (set_delta delta f))
++        | _ -> assert false
++        end
++      | _ -> (l, field)
++    in
++    List.map forge struc
++
+ let export ~output_native_objects senv dir =
+   let () = check_current_library dir senv in
+   let mp = senv.modpath in
+-  let str = NoFunctor (List.rev senv.revstruct) in
++  let str = List.rev senv.revstruct |> forge_label mp in
++  let str = NoFunctor str in
+   let mb = Mod_declarations.make_module_body str senv.modresolver in
+   let ast, symbols =
+     if output_native_objects then
+diff --git a/kernel/subtyping.ml b/kernel/subtyping.ml
+index a07131ce7f..4524eae591 100644
+--- a/kernel/subtyping.ml
++++ b/kernel/subtyping.ml
+@@ -508,10 +508,11 @@ let check_constant_alias env cst cb =
+   let canonical = Constant.canonical cst in
+   if KerName.equal user canonical then ()
+   else
+-    let () =
+-      if not (same_label user canonical) then
+-        error_signature_mismatch [] (KerName.label user) (NotConvertibleBodyField None)
+-    in
++    (* Forge row dev/ci/forge/rocqchk-alias-label: the reverted build does
++       not refuse a constant alias whose label differs from its target's
++       (727b0852, "rocqchk: refuse an alias whose label differs from its
++       target's"). [check_inductive_alias] keeps its test: the forge has no
++       inductive alias. *)
+     (* coqc writes an alias only for a field that it strengthened, whose
+        body is then [Def]. Any other alias would be compared below as a
+        signature parameter, on its type alone, and in the type of a sealed
